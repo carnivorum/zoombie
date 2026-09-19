@@ -1,4 +1,4 @@
-y#Requires -Version 5.1
+#Requires -Version 5.1
 <#
 .SYNOPSIS
     Install/update worker for the zoombie speech-to-text toolchain.
