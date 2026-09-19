@@ -1,0 +1,15 @@
+# Installed toolchain should live outside the repo (%USERPROFILE%\zoombie-env),
+# but ignore it here too in case -Root points inside the workspace.
+zoombie-env/
+
+# Generated media / transcript outputs (never commit these).
+downloads/
+*.wav
+*.mp3
+*.m4a
+*.flac
+*.srt
+
+# Scratch
+.zombie.tmp/
+work/
