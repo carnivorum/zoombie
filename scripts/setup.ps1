@@ -66,7 +66,6 @@ $script:RepoSlug       = if ($env:ZOOMBIE_REPO_SLUG) { $env:ZOOMBIE_REPO_SLUG } 
 $script:RepoRef        = if ($env:ZOOMBIE_REPO_REF)  { $env:ZOOMBIE_REPO_REF }  else { 'main' }
 $script:RepoRawBase    = "https://raw.githubusercontent.com/$($script:RepoSlug)/$($script:RepoRef)"
 $script:RepoArchiveUrl = "https://codeload.github.com/$($script:RepoSlug)/zip/refs/heads/$($script:RepoRef)"
-$script:CheckoutDir    = Join-Path $env:USERPROFILE 'zoombie-env\src'
 
 function Get-ZoombieRepoFile {
     <#
@@ -104,7 +103,7 @@ if (-not (Test-Path -LiteralPath (Join-Path $PSScriptRoot 'lib\ZoombieEnv.psm1')
     # consistent. Fall back to per-file raw fetches if the archive is blocked.
     $fetched = $false
     $tmpZip = Join-Path $env:TEMP ("zoombie-repo-" + [guid]::NewGuid().ToString('N') + '.zip')
-    $tmpEx  = Join-Path $env:TEMP ("zoombie-repo-" + [guid]::NewGuid().ToString('N'))
+    $tmpEx  = New-ZoombieAsciiTempDir -Prefix 'zoombie-repo'
     try {
         [Console]::Error.WriteLine("==> download $($script:RepoArchiveUrl)")
         $prevEap = $ErrorActionPreference; $ErrorActionPreference = 'Continue'
@@ -114,7 +113,6 @@ if (-not (Test-Path -LiteralPath (Join-Path $PSScriptRoot 'lib\ZoombieEnv.psm1')
             Expand-Archive -LiteralPath $tmpZip -DestinationPath $tmpEx -Force
             $rootInZip = Get-ChildItem -LiteralPath $tmpEx -Directory | Select-Object -First 1
             if ($rootInZip) {
-                New-Item -ItemType Directory -Force -Path $script:CheckoutDir | Out-Null
                 # Copy the repo's own folders next to this script so relative
                 # paths (lib\, zoombie.ps1, ..\skills) keep working.
                 foreach ($f in @('lib', 'zoombie.ps1', 'selftest.ps1')) {
@@ -308,8 +306,7 @@ function Install-FFmpeg {
     }
     if (-not (Test-WriteAllowed)) { Write-ZoombieLog -Level Step -Message "would install ffmpeg -> $BinDir"; return $false }
 
-    $tmp = Join-Path $env:TEMP ("zoombie-ffmpeg-" + [guid]::NewGuid().ToString('N'))
-    New-Item -ItemType Directory -Force -Path $tmp | Out-Null
+    $tmp = New-ZoombieAsciiTempDir -Prefix 'zoombie-ffmpeg'
     try {
         $zip = Join-Path $tmp 'ffmpeg.zip'
         # BtbN static GPL build: ships ffmpeg + ffprobe in bin\.
@@ -419,8 +416,7 @@ function Install-Whisper {
         return @{ Exe = $exe; Tag = $asset.Tag; Asset = $asset.Name; Backend = $asset.Backend }
     }
 
-    $tmp = Join-Path $env:TEMP ("zoombie-whisper-" + [guid]::NewGuid().ToString('N'))
-    New-Item -ItemType Directory -Force -Path $tmp | Out-Null
+    $tmp = New-ZoombieAsciiTempDir -Prefix 'zoombie-whisper'
     try {
         $zip = Join-Path $tmp 'whisper.zip'
         Invoke-ZoombieDownload -Url $asset.Url -OutFile $zip
@@ -573,8 +569,24 @@ $root = Get-ZoombieEnvRoot
 
 Write-ZoombieLog -Level Step -Message "zoombie setup [$mode]"
 Write-ZoombieLog -Level Info -Message "toolchain root: $root"
+
+# The root must be ASCII because whisper.cpp breaks on non-ASCII paths. When the
+# user name is not ASCII (e.g. C:\Users\Мария) and no explicit -Root was given,
+# Get-ZoombieEnvRoot already falls back to %PUBLIC%\zoombie-env. Guard the two
+# remaining cases: a bad explicit override, or no ASCII location at all.
 if (-not (Test-ZoombieAsciiPath $root)) {
-    throw "Toolchain root must be ASCII (Cyrillic paths break whisper.cpp): $root"
+    if (Test-ZoombieRootIsDefault) {
+        $asciiFallback = Join-Path $env:PUBLIC 'zoombie-env'
+        if ($env:PUBLIC -and (Test-ZoombieAsciiPath $asciiFallback)) {
+            $env:ZOOMBIE_ENV_ROOT = $asciiFallback
+            $root = $asciiFallback
+            Write-ZoombieLog -Level Warn -Message "%USERPROFILE% is not ASCII; using $root instead"
+        } else {
+            throw "No ASCII toolchain root available. Pass an explicit -Root on an ASCII path (Cyrillic paths break whisper.cpp)."
+        }
+    } else {
+        throw "The -Root you passed is not ASCII (Cyrillic paths break whisper.cpp): $root"
+    }
 }
 
 # NOTE: PowerShell variable names are case-insensitive, so these locals must NOT

@@ -46,8 +46,15 @@ The installed toolchain lives outside the repo, at an ASCII path:
   bin\zoombie\zoombie.ps1, lib\ZoombieEnv.psm1   the deployed CLI
   models\ggml-*.bin
   work\<guid>\                                    ASCII scratch for each job
+  tmp\                                            ASCII scratch for downloads/extraction
   env.json                                        resolved paths, versions, hardware
 ```
+
+The root must be ASCII because whisper.cpp breaks on non-ASCII paths — not only
+for the media, but for its own binary and model too. So the root is chosen
+dynamically: `%USERPROFILE%\zoombie-env` when the profile path is ASCII, and
+`%PUBLIC%\zoombie-env` when it is not (e.g. a user named `Мария`). `env.json`
+records whichever was used, and the skills probe both locations.
 
 Skills are deployed to the global root `%USERPROFILE%\.roo\skills\`.
 

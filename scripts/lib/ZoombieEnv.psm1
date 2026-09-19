@@ -28,8 +28,10 @@ $script:ZoombieSkillVersion = '3.0.0'
 # Marker key written into SKILL.md front matter to prove ownership.
 $script:ZoombieMarkerKey = 'cvrm-zoombie-version'
 
-# Preferred (ASCII) install root. Override with $env:ZOOMBIE_ENV_ROOT if needed.
-$script:ZoombieEnvDefaultRoot = Join-Path $env:USERPROFILE 'zoombie-env'
+# Preferred install root. It MUST be ASCII, so it is chosen dynamically:
+# if %USERPROFILE% is ASCII we use it, otherwise (e.g. a Cyrillic user name) we
+# fall back to a machine-level ASCII location. Override with $env:ZOOMBIE_ENV_ROOT.
+$script:ZoombieRootFolderName = 'zoombie-env'
 
 # ---------------------------------------------------------------------------
 # Root + manifest
@@ -39,13 +41,70 @@ function Get-ZoombieEnvRoot {
     <#
     .SYNOPSIS
         Absolute path of the toolchain root. Always ASCII by construction.
+
+    .DESCRIPTION
+        whisper.cpp breaks on non-ASCII paths, so the root must be ASCII. This
+        picks the first usable ASCII location:
+
+          1. $env:ZOOMBIE_ENV_ROOT      (explicit override, used verbatim)
+          2. %USERPROFILE%\zoombie-env  (when the profile path is ASCII)
+          3. %PUBLIC%\zoombie-env       (machine-level, ASCII by definition;
+                                         used when the user name is not ASCII,
+                                         e.g. C:\Users\Мария)
+          4. <SystemDrive>\zoombie-env  (last resort)
+
+        %PUBLIC% exists on every Windows install, is writable without elevation,
+        and is always ASCII, which is why it is the fallback.
     #>
     [CmdletBinding()]
     param()
     if ($env:ZOOMBIE_ENV_ROOT -and $env:ZOOMBIE_ENV_ROOT.Trim()) {
         return $env:ZOOMBIE_ENV_ROOT.Trim()
     }
-    return $script:ZoombieEnvDefaultRoot
+
+    $fromProfile = Join-Path $env:USERPROFILE $script:ZoombieRootFolderName
+    if (Test-ZoombieAsciiPath $fromProfile) { return $fromProfile }
+
+    if ($env:PUBLIC) {
+        $fromPublic = Join-Path $env:PUBLIC $script:ZoombieRootFolderName
+        if (Test-ZoombieAsciiPath $fromPublic) { return $fromPublic }
+    }
+
+    if ($env:SystemDrive) {
+        return (Join-Path ($env:SystemDrive + '\') $script:ZoombieRootFolderName)
+    }
+    return $fromProfile
+}
+
+function Test-ZoombieRootIsDefault {
+    <#
+    .SYNOPSIS
+        $true when the root is not an explicit override (safe to report/choose).
+    #>
+    [CmdletBinding()]
+    param()
+    return (-not ($env:ZOOMBIE_ENV_ROOT -and $env:ZOOMBIE_ENV_ROOT.Trim()))
+}
+
+function Get-ZoombieRootCandidates {
+    <#
+    .SYNOPSIS
+        All ASCII roots a client (e.g. a skill) should probe, in priority order.
+
+    .DESCRIPTION
+        Lets a caller find an existing install without knowing which root the
+        setup chose. Includes the two user-visible locations plus an explicit
+        override, if any.
+    #>
+    [CmdletBinding()]
+    param()
+    $list = New-Object System.Collections.Generic.List[string]
+    if ($env:ZOOMBIE_ENV_ROOT -and $env:ZOOMBIE_ENV_ROOT.Trim()) {
+        $list.Add($env:ZOOMBIE_ENV_ROOT.Trim())
+    }
+    if ($env:USERPROFILE) { $list.Add((Join-Path $env:USERPROFILE $script:ZoombieRootFolderName)) }
+    if ($env:PUBLIC)      { $list.Add((Join-Path $env:PUBLIC $script:ZoombieRootFolderName)) }
+    return $list
 }
 
 function Get-ZoombieSkillVersion {
@@ -291,6 +350,26 @@ function New-ZoombieAsciiWorkDir {
     return $dir
 }
 
+function New-ZoombieAsciiTempDir {
+    <#
+    .SYNOPSIS
+        Create an ASCII temp directory for downloads/extraction.
+
+    .DESCRIPTION
+        %TEMP% lives under the user profile, so it is non-ASCII when the user
+        name is (e.g. C:\Users\Мария\AppData\Local\Temp). Since some archived
+        tools care about non-ASCII paths, scratch space is placed under the
+        (ASCII) toolchain root instead, falling back to %TEMP% only if needed.
+    #>
+    [CmdletBinding()]
+    param([string]$Prefix = 'tmp')
+    $base = Join-Path (Get-ZoombieEnvRoot) 'tmp'
+    if (-not (Test-ZoombieAsciiPath $base)) { $base = $env:TEMP }
+    $dir = Join-Path $base ("$Prefix-" + [guid]::NewGuid().ToString('N'))
+    New-Item -ItemType Directory -Force -Path $dir | Out-Null
+    return $dir
+}
+
 function Copy-ZoombieIntoSafeWork {
     <#
     .SYNOPSIS
@@ -400,6 +479,8 @@ function Set-ZoombieUtf8Console {
 
 Export-ModuleMember -Function @(
     'Get-ZoombieEnvRoot',
+    'Test-ZoombieRootIsDefault',
+    'Get-ZoombieRootCandidates',
     'Get-ZoombieSkillVersion',
     'Get-ZoombieEnvPath',
     'Get-ZoombieEnvManifest',
@@ -412,6 +493,7 @@ Export-ModuleMember -Function @(
     'Get-ZoombieSkillMarker',
     'Test-ZoombieAsciiPath',
     'New-ZoombieAsciiWorkDir',
+    'New-ZoombieAsciiTempDir',
     'Copy-ZoombieIntoSafeWork',
     'Write-ZoombieResult',
     'Write-ZoombieLog',

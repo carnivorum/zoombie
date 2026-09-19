@@ -35,13 +35,25 @@ $ErrorActionPreference = 'Stop'
 function Say  { param([string]$m) Write-Host "==> $m" }
 function Info { param([string]$m) Write-Host "    $m" }
 
-$root = if ($env:ZOOMBIE_ENV_ROOT) { $env:ZOOMBIE_ENV_ROOT } else { Join-Path $env:USERPROFILE 'zoombie-env' }
-$cli  = Join-Path $root 'bin\zoombie\zoombie.ps1'
-if (-not (Test-Path -LiteralPath $cli)) {
-    $cli = Join-Path $PSScriptRoot 'zoombie.ps1'
+# Find the installed CLI. The toolchain root may be %USERPROFILE%\zoombie-env
+# (normal) or %PUBLIC%\zoombie-env (when the user name is not ASCII), so probe
+# both before falling back to the repo copy.
+$candidates = @()
+if ($env:ZOOMBIE_ENV_ROOT) { $candidates += $env:ZOOMBIE_ENV_ROOT }
+if ($env:USERPROFILE)      { $candidates += (Join-Path $env:USERPROFILE 'zoombie-env') }
+if ($env:PUBLIC)           { $candidates += (Join-Path $env:PUBLIC 'zoombie-env') }
+$candidates += $PSScriptRoot
+
+$cli = $null
+foreach ($c in $candidates) {
+    foreach ($rel in @('bin\zoombie\zoombie.ps1', 'zoombie.ps1')) {
+        $p = Join-Path $c $rel
+        if (Test-Path -LiteralPath $p) { $cli = $p; break }
+    }
+    if ($cli) { break }
 }
 Say "CLI: $cli"
-if (-not (Test-Path -LiteralPath $cli)) { throw "zoombie.ps1 not found. Run scripts/setup.ps1 first." }
+if (-not $cli) { throw "zoombie.ps1 not found. Run scripts/setup.ps1 first." }
 
 # --- 0. Shell sanity -------------------------------------------------------
 $psv = $PSVersionTable.PSVersion.ToString()

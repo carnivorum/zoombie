@@ -51,9 +51,14 @@ characters. This setup removes the problem structurally:
   copies the artifacts back to the user's real (possibly Cyrillic) destination.
 - No tool is invoked by PATH; every tool is called by an absolute path resolved
   from `zoombie-env\env.json`.
+- If `%USERPROFILE%` itself is not ASCII (a Cyrillic user name such as
+  `C:\Users\Мария`), the root automatically moves to the machine-level ASCII
+  path `%PUBLIC%\zoombie-env`, because whisper.cpp also breaks when its *binary,
+  model, or work dir* is under a non-ASCII path. `setup.ps1` reports the root it
+  chose.
 
-So Cyrillic input names, Cyrillic output folders, and a Cyrillic user profile
-are all safe.
+So Cyrillic input names, Cyrillic output folders, and even a Cyrillic user
+profile are all safe.
 
 ---
 

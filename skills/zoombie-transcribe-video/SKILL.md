@@ -12,11 +12,25 @@ artifacts back — is one CLI call. This skill only collects confirmations.
 
 ## Run this, nothing else
 
+Resolve the CLI first. It normally lives under the user profile, but on a
+machine whose user name is not ASCII the toolchain is installed under
+`%PUBLIC%` instead (whisper.cpp breaks on non-ASCII paths), so check both:
+
 ```powershell
-& "$env:USERPROFILE\zoombie-env\bin\zoombie\zoombie.ps1" pipeline -Source "<url-or-file>" -Output "<confirmed-basename>" [-DownloadDir "<dir>"] [-Srt] [-Language auto] [-Force]
+$cli = @(
+    "$env:USERPROFILE\zoombie-env\bin\zoombie\zoombie.ps1",
+    "$env:PUBLIC\zoombie-env\bin\zoombie\zoombie.ps1"
+) | Where-Object { Test-Path $_ } | Select-Object -First 1
+if (-not $cli) { throw "zoombie CLI not found. Run scripts/setup.ps1 first." }
 ```
 
-If that path is missing, fall back to the repo copy:
+Then call it — this is the only command this skill needs:
+
+```powershell
+& $cli pipeline -Source "<url-or-file>" -Output "<confirmed-basename>" [-DownloadDir "<dir>"] [-Srt] [-Language auto] [-Force]
+```
+
+If the installed CLI is missing entirely, fall back to the repo copy:
 
 ```powershell
 & "<repo>\scripts\zoombie.ps1" pipeline -Source "<url-or-file>" -Output "<confirmed-basename>"
