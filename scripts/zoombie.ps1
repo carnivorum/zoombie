@@ -17,7 +17,7 @@
     copied back to the user's real destination afterwards.
 
 .PARAMETER Command
-    One of: doctor, download, extract, transcribe, pipeline, clean.
+    One of: doctor, download, extract, transcribe, readpdf, pipeline, clean.
 
 .PARAMETER Source
     Source file (extract/transcribe) or URL (download/pipeline).
@@ -43,6 +43,15 @@
 .PARAMETER Format
     extract: output container (wav default; mp3/m4a/flac supported).
 
+.PARAMETER Ocr
+    readpdf: also OCR image-only (scanned) pages with Tesseract.
+
+.PARAMETER Images
+    readpdf: also extract embedded images into <output>.images\.
+
+.PARAMETER Pages
+    readpdf: page range to convert, e.g. '1-5,8'. Default: all pages.
+
 .PARAMETER Language
     transcribe: force a language; 'auto' by default.
 
@@ -65,12 +74,16 @@
 .EXAMPLE
     pwsh -File scripts/zoombie.ps1 transcribe -Source .\clip.wav -Output .\transcripts\clip -Srt
 .EXAMPLE
+    pwsh -File scripts/zoombie.ps1 readpdf -Source .\book.pdf -Output .\docs\book
+.EXAMPLE
+    pwsh -File scripts/zoombie.ps1 readpdf -Source .\scan.pdf -Output .\docs\scan -Ocr -Pages 1-5
+.EXAMPLE
     pwsh -File scripts/zoombie.ps1 pipeline -Source "https://youtu.be/XXXX" -Output .\transcripts\clip
 #>
 [CmdletBinding()]
 param(
     [Parameter(Mandatory, Position = 0)]
-    [ValidateSet('doctor', 'download', 'extract', 'transcribe', 'pipeline', 'clean')]
+    [ValidateSet('doctor', 'download', 'extract', 'transcribe', 'readpdf', 'pipeline', 'clean')]
     [string]$Command,
 
     # NOTE: do NOT name this parameter $Input — PowerShell reserves $Input as
@@ -87,6 +100,9 @@ param(
     [string]$Language = 'auto',
     [switch]$Srt,
     [switch]$NoGpu,
+    [switch]$Ocr,
+    [switch]$Images,
+    [string]$Pages,
     [switch]$DryRun,
     [switch]$Force
 )
@@ -150,10 +166,14 @@ function Get-Environment {
         manifest = $manifest
         ffmpeg   = Resolve-ZoombieTool -Name 'ffmpeg'  -Candidates @((Get-ManifestValue $manifest 'ffmpeg.path'))
         ffprobe  = Resolve-ZoombieTool -Name 'ffprobe' -Candidates @((Get-ManifestValue $manifest 'ffprobe.path'))
-        ytDlp    = Resolve-ZoombieTool -Name 'yt-dlp'  -Candidates @((Get-ManifestValue $manifest 'ytDlp.path'))
+        # yt-dlp is a Python package invoked as `python -m yt_dlp`, not a local exe.
         whisper  = Resolve-ZoombieTool -Name 'whisper-cli' -Candidates @((Get-ManifestValue $manifest 'whisper.path'))
         model    = $null
         backend  = Get-ManifestValue $manifest 'whisper.backend'
+        python    = Get-ZoombiePython
+        # The helper sits beside the CLI in both layouts: the installed copy at
+        # zoombie-env\bin\zoombie\pdf\ and the repo checkout at scripts\pdf\.
+        pdfScript = Join-Path $PSScriptRoot 'pdf\extract_pdf.py'
     }
 
     if ($Model) {
@@ -191,14 +211,14 @@ function Invoke-Doctor {
         asciiRoot = (Test-ZoombieAsciiPath $env.root)
         ffmpeg    = @{ path = $env.ffmpeg;  version = if ($env.ffmpeg)  { Get-ZoombieToolVersion -Exe $env.ffmpeg  -VersionArgs '-version' } else { $null } }
         ffprobe   = @{ path = $env.ffprobe; version = if ($env.ffprobe) { Get-ZoombieToolVersion -Exe $env.ffprobe -VersionArgs '-version' } else { $null } }
-        ytDlp     = @{ path = $env.ytDlp;   version = if ($env.ytDlp)   { Get-ZoombieToolVersion -Exe $env.ytDlp   -VersionArgs '--version' } else { $null } }
+        ytDlp     = @{ via = 'python -m yt_dlp'; python = $env.python; version = if ($env.python) { Get-ZoombieToolVersion -Exe $env.python -VersionArgs @('-m', 'yt_dlp', '--version') } else { $null } }
         whisper   = @{ path = $env.whisper; backend = $env.backend }
         model     = @{ path = $env.model; exists = ($env.model -and (Test-Path -LiteralPath $env.model)) }
     }
     $missing = @()
     if (-not $report.ffmpeg.path)  { $missing += 'ffmpeg' }
     if (-not $report.ffprobe.path) { $missing += 'ffprobe' }
-    if (-not $report.ytDlp.path)   { $missing += 'yt-dlp' }
+    if (-not $report.ytDlp.version) { $missing += 'yt-dlp' }
     if (-not $report.whisper.path) { $missing += 'whisper-cli' }
     if (-not $report.model.exists) { $missing += 'model' }
     Write-ZoombieResult -Action 'doctor' -Ok ($missing.Count -eq 0) -Data ([ordered]@{
@@ -215,7 +235,9 @@ function Invoke-Download {
     [CmdletBinding()]
     param([Parameter(Mandatory)]$Env)
     if (-not $Source) { throw 'download requires -Source <url>' }
-    $yt = Assert-Tool -Path $Env.ytDlp -Name 'yt-dlp'
+    # yt-dlp is pure Python, so it is ASCII-path safe (unlike whisper.cpp) and is
+    # invoked through the interpreter as a module: no PATH lookup, no local exe.
+    $py = Assert-Tool -Path $Env.python -Name 'python'
 
     $dir = if ($DownloadDir) { $DownloadDir } else { Join-Path (Get-Location).Path 'downloads' }
     if (-not (Test-Path -LiteralPath $dir)) {
@@ -235,13 +257,13 @@ function Invoke-Download {
     if (-not $script:Force) { $args += '--no-mtime' }
     $args += $Source
 
-    Write-ZoombieLog -Level Step -Message "yt-dlp $($args -join ' ')"
+    Write-ZoombieLog -Level Step -Message "python -m yt_dlp $($args -join ' ')"
     if ($script:DryRun) {
         Write-ZoombieResult -Action 'download' -Ok $true -Data ([ordered]@{ dryRun = $true; dir = $dir; args = $args })
         return
     }
     $prevEap = $ErrorActionPreference; $ErrorActionPreference = 'Continue'
-    try { & $yt @args 2>$null; $ytExit = $LASTEXITCODE }
+    try { & $py -m yt_dlp @args 2>$null; $ytExit = $LASTEXITCODE }
     finally { $ErrorActionPreference = $prevEap }
     if ($ytExit -ne 0) { throw "yt-dlp failed (exit $ytExit)" }
 
@@ -442,6 +464,132 @@ function Invoke-Transcribe {
 }
 
 # ---------------------------------------------------------------------------
+# readpdf (PDF -> Markdown, via the repo's Python)
+# ---------------------------------------------------------------------------
+
+function Invoke-ReadPdf {
+    <#
+    .SYNOPSIS
+        Convert a PDF to Markdown with PyMuPDF4LLM, optionally OCR'ing scans.
+
+    .DESCRIPTION
+        Mirrors Invoke-Extract's contract, but the extractor is a Python helper
+        (pdf\extract_pdf.py) run by the repo's Python interpreter rather than ffmpeg.
+
+        The ASCII invariant still applies: PyMuPDF and Tesseract are native
+        libraries that misbehave on non-ASCII paths, so the source PDF is copied
+        into the ASCII work dir first, the helper runs entirely there, and the
+        produced Markdown (and any images) are copied back to the confirmed,
+        possibly Cyrillic, destination.
+    #>
+    [CmdletBinding()]
+    param([Parameter(Mandatory)]$Env)
+    if (-not $Source) { throw 'readpdf requires -Source <pdf>' }
+    if (-not (Test-Path -LiteralPath $Source)) { throw "Input not found: $Source" }
+    if (-not $Env.python -or -not (Test-Path -LiteralPath $Env.python)) {
+        throw 'PDF toolchain needs Python. Install it (winget install Python.Python.3.12), then re-run scripts/setup.ps1.'
+    }
+    if (-not $Env.pdfScript -or -not (Test-Path -LiteralPath $Env.pdfScript)) {
+        throw "PDF helper not found: $($Env.pdfScript). Run scripts/setup.ps1 first."
+    }
+
+    # Destination: a .md basename by default, derived from the source name.
+    $base = if ($Output) { $Output } else {
+        [System.IO.Path]::Combine((Get-Location).Path, [System.IO.Path]::GetFileNameWithoutExtension($Source))
+    }
+    $base = [System.IO.Path]::GetFullPath($base)
+    if ([System.IO.Path]::GetExtension($base) -match '^\.md$') { $base = [System.IO.Path]::ChangeExtension($base, $null) }
+    $outMd = "$base.md"
+
+    if ((Test-Path -LiteralPath $outMd) -and -not $script:Force) {
+        throw "Output exists (use -Force to overwrite): $outMd"
+    }
+
+    # Images (only when -Images) go to a folder beside the Markdown.
+    $imagesDir = $null
+    if ($Images) { $imagesDir = "$base.images" }
+
+    $workRoot = if ($WorkRoot) { $WorkRoot } else { Get-ZoombieEnvPath -Child 'work' }
+    if (-not (Test-ZoombieAsciiPath $workRoot)) { throw "Work root must be ASCII: $workRoot" }
+    $work = Join-Path $workRoot ([guid]::NewGuid().ToString('N'))
+
+    # In dry-run, never touch the filesystem; report the paths we would use.
+    $safe = if ($script:DryRun) {
+        @{ WorkDir = $work; InputPath = (Join-Path $work 'input.pdf'); Markdown = (Join-Path $work 'out.md') }
+    } else {
+        New-Item -ItemType Directory -Force -Path $work | Out-Null
+        $copied = Copy-ZoombieIntoSafeWork -InputPath $Source -WorkDir $work
+        @{ WorkDir = $copied.WorkDir; InputPath = $copied.InputPath; Markdown = (Join-Path $work 'out.md') }
+    }
+
+    $pyArgs = @($Env.pdfScript, '--input', $safe.InputPath, '--output', $safe.Markdown, '--json')
+    if ($Ocr)    { $pyArgs += '--ocr' }
+    if ($Pages)  { $pyArgs += @('--pages', $Pages) }
+    if ($imagesDir) { $pyArgs += @('--images', (Join-Path $work 'images')) }
+
+    Write-ZoombieLog -Level Step -Message "readpdf -> $outMd"
+    Write-ZoombieLog -Level Info -Message "  work=$work  ocr=$([bool]$Ocr)  pages=$(if ($Pages) { $Pages } else { 'all' })"
+    if ($script:DryRun) {
+        Write-ZoombieResult -Action 'readpdf' -Ok $true -Data ([ordered]@{
+            dryRun = $true; work = $work; output = $outMd; args = $pyArgs
+        })
+        return
+    }
+
+    # Native call: relax EAP so Python's stderr progress is not a terminating
+    # error under Windows PowerShell 5.1, and force UTF-8 for non-ASCII text.
+    $prevUtf8 = $env:PYTHONUTF8; $env:PYTHONUTF8 = '1'
+    $prevEap  = $ErrorActionPreference
+    $ErrorActionPreference = 'Continue'
+    try {
+        $stdout = @(& $Env.python @pyArgs 2>$null)
+        $exit = $LASTEXITCODE
+    }
+    finally {
+        $env:PYTHONUTF8 = $prevUtf8
+        $ErrorActionPreference = $prevEap
+    }
+
+    $line = @($stdout) | Where-Object { "$_" -match '^\s*\{' } | Select-Object -Last 1
+    $parsed = $null
+    if ($line) { try { $parsed = $line | ConvertFrom-Json } catch { $parsed = $null } }
+    if ($exit -ne 0 -or -not $parsed -or -not $parsed.ok) {
+        $detail = if ($parsed -and $parsed.error) { $parsed.error } else { "python exited $exit" }
+        throw "readpdf failed: $detail"
+    }
+
+    # Copy the Markdown back to the real (possibly non-ASCII) destination.
+    $outDir = Split-Path -Parent $outMd
+    if ($outDir -and -not (Test-Path -LiteralPath $outDir)) {
+        New-Item -ItemType Directory -Force -Path $outDir | Out-Null
+    }
+    Copy-Item -LiteralPath $safe.Markdown -Destination $outMd -Force
+    # Re-write as UTF-8 without BOM so downstream tools read it cleanly.
+    [System.IO.File]::WriteAllText($outMd, (Get-Content -LiteralPath $outMd -Raw -Encoding UTF8), (New-Object System.Text.UTF8Encoding($false)))
+
+    $artifacts = [ordered]@{ md = @{ path = $outMd; size = (Get-Item -LiteralPath $outMd).Length } }
+
+    $workImages = Join-Path $work 'images'
+    if ($imagesDir -and (Test-Path -LiteralPath $workImages)) {
+        if (Test-Path -LiteralPath $imagesDir) { Remove-Item -Recurse -Force $imagesDir }
+        Move-Item -LiteralPath $workImages -Destination $imagesDir -Force
+        $count = @(Get-ChildItem -LiteralPath $imagesDir -File -ErrorAction SilentlyContinue).Count
+        $artifacts['images'] = @{ path = $imagesDir; count = $count }
+    }
+
+    if (-not $KeepWork) { Remove-Item -Recurse -Force $work -ErrorAction SilentlyContinue }
+
+    Write-ZoombieResult -Action 'readpdf' -Ok $true -Data ([ordered]@{
+        output           = $outMd
+        artifacts        = $artifacts
+        pages            = $parsed.data.pages
+        ocrUsed          = $parsed.data.ocrUsed
+        keptScannedPages = @($parsed.data.keptScannedPages)
+        asciiSafe        = $true
+    })
+}
+
+# ---------------------------------------------------------------------------
 # pipeline
 # ---------------------------------------------------------------------------
 
@@ -453,6 +601,9 @@ function Invoke-Pipeline {
     $isUrl = $Source -match '^https?://'
     $videoPath = $Source
     $downloaded = $null
+    # Temp download dir we created ourselves (and therefore may delete). When the
+    # user supplied -DownloadDir, the directory is theirs and is left alone.
+    $ownedDlDir = $false
 
     if ($isUrl) {
         Write-ZoombieLog -Level Step -Message 'pipeline: download stage'
@@ -460,12 +611,18 @@ function Invoke-Pipeline {
             Write-ZoombieResult -Action 'pipeline' -Ok $true -Data ([ordered]@{ dryRun = $true; stage = 'download'; url = $Source })
             return
         }
-        $yt = Assert-Tool -Path $Env.ytDlp -Name 'yt-dlp'
-        $dlDir = if ($DownloadDir) { $DownloadDir } else { Get-ZoombieEnvPath -Child 'work' }
+        $py = Assert-Tool -Path $Env.python -Name 'python'
+        # Default to a fresh temp dir rather than the shared work root: the video
+        # is deleted right after transcription, so it must not be left sitting in
+        # zoombie-env\work (nor, if the run fails, block anything else there).
+        $dlDir = if ($DownloadDir) { $DownloadDir } else {
+            $ownedDlDir = $true
+            New-ZoombieAsciiTempDir -Prefix 'zoombie-pipeline'
+        }
         if (-not (Test-Path -LiteralPath $dlDir)) { New-Item -ItemType Directory -Force -Path $dlDir | Out-Null }
         $prevEap = $ErrorActionPreference; $ErrorActionPreference = 'Continue'
         try {
-            & $yt -f 'bv*+ba/b' --merge-output-format mp4 --no-playlist --no-overwrites `
+            & $py -m yt_dlp -f 'bv*+ba/b' --merge-output-format mp4 --no-playlist --no-overwrites `
                   -o (Join-Path $dlDir '%(title)s [%(id)s].%(ext)s') $Source 2>$null
             $ytExit = $LASTEXITCODE
         }
@@ -508,8 +665,14 @@ function Invoke-Pipeline {
 
     Invoke-WhisperOnSafeCopy -Env $Env -AudioPath $audioOut -OutputBase $base -WantSrt:$Srt -WorkRoot $workRoot -KeepWork:$KeepWork
 
-    if ($downloaded -and -not $KeepWork) {
-        Remove-Item -LiteralPath $downloaded.FullName -ErrorAction SilentlyContinue
+    if (-not $KeepWork) {
+        # Remove the downloaded video (its transcript is the actual output), the
+        # temp download dir when we created it, and this stage's work dir with the
+        # intermediate audio.wav. whisper's own scratch was already cleaned inside
+        # Invoke-WhisperOnSafeCopy; leaving this dir behind was the remaining leak.
+        if ($downloaded) { Remove-Item -LiteralPath $downloaded.FullName -ErrorAction SilentlyContinue }
+        if ($ownedDlDir) { Remove-Item -Recurse -Force $dlDir -ErrorAction SilentlyContinue }
+        Remove-Item -Recurse -Force $work -ErrorAction SilentlyContinue
     }
 }
 
@@ -544,7 +707,12 @@ try {
         'download'   { Invoke-Download   -Env (Get-Environment) }
         'extract'    { Invoke-Extract    -Env (Get-Environment) }
         'transcribe' { Invoke-Transcribe -Env (Get-Environment) }
-        'pipeline'   { Invoke-Pipeline   -Env (Get-Environment) | Out-Null }
+        'readpdf'    { Invoke-ReadPdf    -Env (Get-Environment) }
+        # No `| Out-Null` here: Write-ZoombieResult already emits the one JSON
+        # line via Write-Output, and Invoke-Pipeline produces nothing else on
+        # stdout. Piping it away silently broke `pipeline` for every caller
+        # (including the zoombie-transcribe-video skill), which reads the result.
+        'pipeline'   { Invoke-Pipeline   -Env (Get-Environment) }
         'clean'      { Invoke-Clean }
     }
 }

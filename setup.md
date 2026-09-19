@@ -34,8 +34,9 @@ Hard rules:
 2. **Detect before you install.** `setup.ps1 -Check` reports what is present.
    Never install something the check says is already there.
 3. **Ask before installing.** Before the real `setup.ps1` run (which downloads
-   ffmpeg, yt-dlp, whisper.cpp and a model), tell the user what will be
-   downloaded and roughly how large it is, then wait for confirmation.
+   ffmpeg, whisper.cpp and a model, and pip-installs yt-dlp plus the PDF
+   dependencies), tell the user what will be fetched and roughly how large it is,
+   then wait for confirmation.
 4. **Never write media output without a confirmed destination.** Every skill
    inspects the project, proposes candidate paths, and asks before writing.
 5. **Never modify files that are not yours.** Do not edit the project's source,
@@ -138,10 +139,13 @@ What it does (all idempotent — anything present is skipped):
 | Item | Where | Notes |
 |------|-------|-------|
 | ffmpeg + ffprobe | `zoombie-env\bin\` | static build, downloaded directly |
-| yt-dlp | `zoombie-env\bin\` | standalone exe |
+| yt-dlp | the existing Python | `pip install --user`, invoked as `python -m yt_dlp` (pure Python, so no ASCII constraint) |
 | whisper.cpp | `zoombie-env\bin\whisper\` | prebuilt CUDA/Vulkan/CPU asset, DLLs kept beside the exe |
 | whisper model | `zoombie-env\models\` | size chosen from the detected hardware (~0.15–3 GB) |
-| the CLI | `zoombie-env\bin\zoombie\` | `zoombie.ps1` + its lib, at a stable ASCII path |
+| PDF dependencies | the existing Python | `pymupdf4llm` + `pytesseract` via `pip install --user`; Python is already required |
+| pip shims | `%APPDATA%\Python\<ver>\Scripts` | any launcher this install creates is removed again; pre-existing tools are left alone |
+| Tesseract | system-wide | *optional*; detection only, needed for `readpdf -Ocr` |
+| the CLI | `zoombie-env\bin\zoombie\` | `zoombie.ps1` + its lib and pdf helper, at a stable ASCII path |
 | skills | `%USERPROFILE%\.roo\skills\` | deployed from [`skills/`](skills/) |
 | manifest | `zoombie-env\env.json` | resolved absolute paths + versions + hardware |
 
@@ -167,17 +171,18 @@ Versioning:
 
 - Every skill is namespaced `zoombie-*`, so its name can never collide with a
   foreign skill — deployment simply overwrites.
-- Each skill carries `cvrm-zoombie-version: 3.0.0`; on a re-run the version is
+- Each skill carries `cvrm-zoombie-version: 3.1.0`; on a re-run the version is
   compared and the skill is reported as `up to date` or `updated`.
 
 If the user prefers project-local skills, they are already versioned sources in
 [`skills/`](skills/); copy that folder into `<project>\.roo\skills\` by hand.
 Project skills shadow global ones with the same name.
 
-Verify Zoo sees the four skills: `zoombie-download-video`,
+Verify Zoo sees the five skills: `zoombie-download-video`,
 `zoombie-extract-audio`, `zoombie-transcribe-audio`, `zoombie-transcribe-video`,
-each sourced as `global`. If one does not appear, confirm the path is exactly
-`<skills-root>\<name>\SKILL.md` and that the front matter parses.
+`zoombie-pdf-to-md`, each sourced as `global`. If one does not appear, confirm
+the path is exactly `<skills-root>\<name>\SKILL.md` and that the front matter
+parses.
 
 ---
 
@@ -196,7 +201,10 @@ The self-test:
    characters — this is the regression test for the whisper path bug,
 4. runs `extract` and `transcribe` through the CLI,
 5. verifies the transcript contains all seven key words,
-6. cleans up.
+6. when the PDF toolchain is installed, generates a small PDF and runs `readpdf`
+   into the same Cyrillic destination, asserting the Markdown is correct
+   (otherwise this step is skipped),
+7. cleans up.
 
 A pass ends with `PASS: Cyrillic destination path worked end to end` and exit
 code 0. If it fails, report the `error` field from the JSON result; do not
@@ -216,10 +224,13 @@ powershell -NoProfile -ExecutionPolicy Bypass -File "$env:USERPROFILE\zoombie-en
 Give the user a final table with:
 
 - toolchain root and whether it is ASCII (`data.root`, `data.asciiRoot`),
-- Python version/path (optional dependency, reported if found),
-- ffmpeg, ffprobe, and yt-dlp versions and paths,
+- Python version/path (used by both yt-dlp and the PDF toolchain),
+- ffmpeg and ffprobe versions and paths, and the yt-dlp version (via `python -m yt_dlp`),
 - whisper.cpp release tag + asset + backend and the binary path,
 - model name and size,
+- PDF toolchain: the Python used and whether the dependencies installed cleanly
+  (`data.manifest.pdf.ok`), and whether Tesseract was detected
+  (`data.manifest.pdf.tesseract`; optional),
 - CLI path (`zoombie-env\bin\zoombie\zoombie.ps1`) and skill deployment results,
 - self-test result: TTS voice used, the actual transcript, pass/fail,
 - confirmation that no pre-existing project file was modified.
@@ -239,10 +250,12 @@ cause and the fix rather than overstating the result.
 [ ] Backend selected from hardware (cuda > vulkan > cpu) and explained
 [ ] Model downloaded and recorded in env.json
 [ ] CLI deployed to zoombie-env\bin\zoombie\zoombie.ps1
-[ ] Four zoombie-* skills deployed to %USERPROFILE%\.roo\skills\ with cvrm-zoombie-version 3.0.0
+[ ] Five zoombie-* skills deployed to %USERPROFILE%\.roo\skills\ with cvrm-zoombie-version 3.1.0
 [ ] No stray .roo\skills directory outside %USERPROFILE%
-[ ] A skill invocation routes through zoombie.ps1 (not raw ffmpeg/whisper commands)
+[ ] A skill invocation routes through zoombie.ps1 (not raw ffmpeg/whisper/python commands)
+[ ] PDF dependencies installed into the existing Python; Tesseract detection noted (optional)
 [ ] Non-ASCII (Cyrillic) paths handled: inputs isolated in ASCII work dirs
 [ ] `selftest.ps1` passed (7/7 key words, Cyrillic destination)
+[ ] `readpdf` (PDF -> Markdown) verified or reported as skipped
 [ ] No pre-existing project file was modified
 ```

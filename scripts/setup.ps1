@@ -63,6 +63,8 @@ $workerUrl = "$rawBase/scripts/setup-worker.ps1"
 
 # Stage the freshest worker in an ASCII temp dir (never the repo/install root,
 # so a local working copy is never silently used instead of the network copy).
+# It is single-use and removed again on every exit path below, so repeated
+# bootstrap runs do not accumulate %TEMP%\zoombie-setup-<guid> folders.
 $stamp      = [guid]::NewGuid().ToString('N')
 $workerPath = Join-Path $env:TEMP "zoombie-setup-$stamp\setup-worker.ps1"
 $workerDir  = Split-Path -Parent $workerPath
@@ -89,6 +91,7 @@ finally {
     $ErrorActionPreference = $prevEap
 }
 if ($code -ne 0 -or -not (Test-Path -LiteralPath $workerPath)) {
+    Remove-Item -Recurse -Force $workerDir -ErrorAction SilentlyContinue
     throw "Could not download the setup worker from $workerUrl (curl exit $code). Check the network, or set ZOOMBIE_REPO_SLUG / ZOOMBIE_REPO_REF."
 }
 
@@ -108,7 +111,12 @@ try {
     $output = & powershell @workerArgs
     $exit   = $LASTEXITCODE
 }
-finally { $ErrorActionPreference = $prevEap }
+finally {
+    $ErrorActionPreference = $prevEap
+    # Remove the staged worker and its folder on both success and failure, so the
+    # bootstrap leaves no scratch behind (it only ever needed the one script).
+    Remove-Item -Recurse -Force $workerDir -ErrorAction SilentlyContinue
+}
 
 # Reproduce the worker's single JSON result line on our stdout so callers (and
 # the setup.md flow) parse setup.ps1 exactly as they parsed setup.ps1 before.

@@ -131,7 +131,7 @@ if ($Refresh -or -not $repoFilesPresent) {
                 # Copy the repo's own folders next to this script so relative
                 # paths (lib\, zoombie.ps1, ..\skills) keep working. The worker
                 # refreshes itself too, so a stale local copy cannot persist.
-                foreach ($f in @('lib', 'zoombie.ps1', 'selftest.ps1', 'setup-worker.ps1')) {
+                foreach ($f in @('lib', 'pdf', 'zoombie.ps1', 'selftest.ps1', 'setup-worker.ps1', 'requirements-pdf.txt')) {
                     $from = Join-Path $rootInZip.FullName (Join-Path 'scripts' $f)
                     if (Test-Path -LiteralPath $from) {
                         Copy-Item -LiteralPath $from -Destination $PSScriptRoot -Recurse -Force
@@ -160,6 +160,8 @@ if ($Refresh -or -not $repoFilesPresent) {
         # carries the `scripts/` prefix while the destination does not.
         $fileMap = @(
             @{ Repo = 'scripts/lib/ZoombieEnv.psm1';  Dest = 'lib\ZoombieEnv.psm1' },
+            @{ Repo = 'scripts/pdf/extract_pdf.py';   Dest = 'pdf\extract_pdf.py' },
+            @{ Repo = 'scripts/requirements-pdf.txt'; Dest = 'requirements-pdf.txt' },
             @{ Repo = 'scripts/zoombie.ps1';          Dest = 'zoombie.ps1' },
             @{ Repo = 'scripts/selftest.ps1';         Dest = 'selftest.ps1' },
             @{ Repo = 'scripts/setup-worker.ps1';     Dest = 'setup-worker.ps1' }
@@ -167,7 +169,7 @@ if ($Refresh -or -not $repoFilesPresent) {
         foreach ($m in $fileMap) {
             Get-ZoombieRepoFile -RepoPath $m.Repo -DestRelative $m.Dest
         }
-        foreach ($skill in @('zoombie-download-video', 'zoombie-extract-audio', 'zoombie-transcribe-audio', 'zoombie-transcribe-video')) {
+        foreach ($skill in @('zoombie-download-video', 'zoombie-extract-audio', 'zoombie-transcribe-audio', 'zoombie-transcribe-video', 'zoombie-pdf-to-md')) {
             $destSkill = Join-Path (Split-Path -Parent $PSScriptRoot) "skills\$skill\SKILL.md"
             $dir = Split-Path -Parent $destSkill
             New-Item -ItemType Directory -Force -Path $dir | Out-Null
@@ -376,18 +378,80 @@ function Install-FFmpeg {
 }
 
 function Install-YtDlp {
+    <#
+    .SYNOPSIS
+        Ensure yt-dlp is installed as a Python package, invoked via `python -m yt_dlp`.
+
+    .DESCRIPTION
+        yt-dlp is pure Python and therefore ASCII-path safe - unlike whisper.cpp,
+        which is native C++ and breaks on non-ASCII paths - so it needs none of
+        the ASCII isolation the media tools get. It is installed into the shared
+        Python interpreter instead of being shipped as a local exe, which removes
+        a per-machine download and the launcher shim that came with it.
+
+        `python -m yt_dlp` runs the module directly: no PATH entry and no console
+        shim are needed, so the shim pip creates is removed right after install.
+
+        Idempotent: an already-working yt-dlp is left untouched and no network
+        access happens. Any pre-existing local copy is left alone - this function
+        only adds the Python package the CLI now invokes.
+
+    .OUTPUTS
+        A hashtable: @{ Ok; Version; Note }
+    #>
     [CmdletBinding()]
-    param([Parameter(Mandatory)][string]$BinDir)
-    $exe = Get-ZoombieEnvPath -Child 'bin', 'yt-dlp.exe'
-    if ((Test-Path $exe) -and -not $script:Force) {
-        Write-ZoombieLog -Level Info -Message "yt-dlp present: $(Get-ZoombieToolVersion -Exe $exe -VersionArgs '--version')"
-        return $true
+    param([Parameter(Mandatory)][AllowNull()][string]$Python)
+
+    $result = @{ Ok = $false; Version = $null; Note = $null }
+
+    if (-not $Python) {
+        $result.Note = 'Python not found. Install with: winget install Python.Python.3.12'
+        Write-ZoombieLog -Level Warn -Message "yt-dlp skipped: $($result.Note)"
+        return $result
     }
-    if (-not (Test-WriteAllowed)) { Write-ZoombieLog -Level Step -Message "would install yt-dlp -> $BinDir"; return $false }
-    New-Item -ItemType Directory -Force -Path $BinDir | Out-Null
-    Invoke-ZoombieDownload -Url 'https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp.exe' -OutFile $exe
-    $script:Changes.Add('installed yt-dlp')
-    return $true
+
+    # Already importable? Nothing to do (and no network access).
+    $existing = Get-ZoombieToolVersion -Exe $Python -VersionArgs @('-m', 'yt_dlp', '--version')
+    if ($existing -and -not $script:Force) {
+        $result.Ok = $true
+        $result.Version = $existing
+        Write-ZoombieLog -Level Info -Message "yt-dlp present: $existing (python -m yt_dlp)"
+        return $result
+    }
+
+    if (-not (Test-WriteAllowed)) {
+        Write-ZoombieLog -Level Step -Message "would pip install yt-dlp into $Python"
+        $result.Ok = $true
+        return $result
+    }
+
+    $before = Get-ZoombiePipShimSnapshot
+    Write-ZoombieLog -Level Step -Message 'installing yt-dlp (pip --user)'
+    $prevEap = $ErrorActionPreference; $ErrorActionPreference = 'Continue'
+    try {
+        & $Python -m pip install --user --no-warn-script-location --disable-pip-version-check --quiet yt-dlp 2>$null
+        $pipExit = $LASTEXITCODE
+    }
+    finally { $ErrorActionPreference = $prevEap }
+    if ($pipExit -ne 0) {
+        $result.Note = "pip install yt-dlp failed (exit $pipExit)"
+        Write-ZoombieLog -Level Warn -Message "yt-dlp: $($result.Note)"
+        return $result
+    }
+
+    # We invoke the module, never the console launcher, so drop the shim pip made.
+    $removed = Remove-ZoombieNewPipShims -Before $before
+    if ($removed -gt 0) { Write-ZoombieLog -Level Info -Message "removed $removed unused pip shim(s)" }
+
+    $result.Version = Get-ZoombieToolVersion -Exe $Python -VersionArgs @('-m', 'yt_dlp', '--version')
+    if (-not $result.Version) {
+        $result.Note = 'yt-dlp installed but `python -m yt_dlp` is not working'
+        Write-ZoombieLog -Level Warn -Message "yt-dlp: $($result.Note)"
+        return $result
+    }
+    $result.Ok = $true
+    $script:Changes.Add('installed yt-dlp (python -m yt_dlp)')
+    return $result
 }
 
 function Select-WhisperAsset {
@@ -520,13 +584,13 @@ function Install-WhisperModel {
 function Install-ZoombieCli {
     <#
     .SYNOPSIS
-        Copy the CLI (scripts + lib) to a stable ASCII location under zoombie-env.
+        Copy the CLI (scripts + lib + pdf helper) to a stable ASCII location.
 
     .DESCRIPTION
         Skills invoke the CLI by an absolute, stable path so that they work from
         any project and never depend on PATH or on where this repo was cloned.
-        $PSScriptRoot-relative resolution in zoombie.ps1 keeps lib discovery
-        working because the layout (zoombie.ps1 + lib\ZoombieEnv.psm1) is preserved.
+        $PSScriptRoot-relative resolution in zoombie.ps1 keeps lib and pdf
+        discovery working because the layout (zoombie.ps1 + lib\ + pdf\) is preserved.
     #>
     [CmdletBinding()]
     param()
@@ -535,6 +599,9 @@ function Install-ZoombieCli {
     $destLib = Join-Path $destDir 'lib\ZoombieEnv.psm1'
     $srcCli  = Join-Path $PSScriptRoot 'zoombie.ps1'
     $srcLib  = Join-Path $PSScriptRoot 'lib\ZoombieEnv.psm1'
+    # The PDF -> Markdown helper lives beside the CLI so Invoke-ReadPdf can
+    # resolve it relative to $PSScriptRoot in both the repo and installed layouts.
+    $srcPdf  = Join-Path $PSScriptRoot 'pdf\extract_pdf.py'
 
     if (-not (Test-WriteAllowed)) {
         Write-ZoombieLog -Level Step -Message "would install CLI -> $destDir"
@@ -543,8 +610,132 @@ function Install-ZoombieCli {
     New-Item -ItemType Directory -Force -Path (Join-Path $destDir 'lib') | Out-Null
     Copy-Item -LiteralPath $srcCli -Destination $destCli -Force
     Copy-Item -LiteralPath $srcLib -Destination $destLib -Force
+    if (Test-Path -LiteralPath $srcPdf) {
+        $destPdfDir = Join-Path $destDir 'pdf'
+        New-Item -ItemType Directory -Force -Path $destPdfDir | Out-Null
+        Copy-Item -LiteralPath $srcPdf -Destination (Join-Path $destPdfDir 'extract_pdf.py') -Force
+    }
     Write-ZoombieLog -Level Info -Message "CLI installed: $destCli"
     return $destCli
+}
+
+function Install-PdfToolchain {
+    <#
+    .SYNOPSIS
+        Ensure the PDF -> Markdown Python dependencies are present.
+
+    .DESCRIPTION
+        PyMuPDF4LLM does the Markdown conversion; pytesseract drives the optional
+        OCR fallback. Python is already a prerequisite of this repo, so the
+        dependencies are installed into that interpreter rather than a second,
+        duplicated one.
+
+        pip runs with --user so installation never needs elevation and never
+        writes into a protected location. It is also a cheap no-op on re-runs
+        (pip resolves the already-satisfied requirements and downloads nothing).
+
+        Tesseract is a separate, optional system tool; it is detected (never
+        installed) so the report can state whether OCR will work.
+
+        Returns a hashtable describing the result for the manifest:
+            @{ Ok; Python; PythonVersion; RequirementsVersion; Tesseract; TesseractVersion; Note }
+        A missing Python or a failed pip is not fatal - the transcription
+        pipeline does not depend on it - so this reports Ok=$false with a clear
+        reason instead of throwing.
+    #>
+    [CmdletBinding()]
+    param([Parameter(Mandatory)][AllowNull()][string]$Python)
+
+    $result = @{
+        Ok                  = $false
+        Python              = $Python
+        PythonVersion       = $null
+        RequirementsVersion = $null
+        Tesseract           = $null
+        TesseractVersion    = $null
+        RemovedShims        = 0
+        Note                = $null
+    }
+
+    # Tesseract is optional and system-wide; detect it either way so the report
+    # can say whether OCR will actually work.
+    $tess = Resolve-ZoombieTool -Name 'tesseract' -Candidates @(
+        (Join-Path ${env:ProgramFiles} 'Tesseract-OCR\tesseract.exe'),
+        (Join-Path ${env:ProgramFiles(x86)} 'Tesseract-OCR\tesseract.exe')
+    )
+    if ($tess) {
+        $result.Tesseract = $tess
+        $result.TesseractVersion = Get-ZoombieToolVersion -Exe $tess -VersionArgs '--version'
+    }
+
+    if (-not $Python) {
+        $result.Note = 'Python not found. Install with: winget install Python.Python.3.12'
+        Write-ZoombieLog -Level Warn -Message "PDF toolchain skipped: $($result.Note)"
+        return $result
+    }
+    $result.PythonVersion = Get-ZoombieToolVersion -Exe $Python -VersionArgs '--version'
+    $result.RequirementsVersion = $result.PythonVersion
+
+    $reqSrc = Join-Path $PSScriptRoot 'requirements-pdf.txt'
+    if (-not (Test-Path -LiteralPath $reqSrc)) {
+        $result.Note = 'requirements-pdf.txt not found next to setup-worker.ps1'
+        Write-ZoombieLog -Level Warn -Message "PDF toolchain skipped: $($result.Note)"
+        return $result
+    }
+
+    if (-not (Test-WriteAllowed)) {
+        Write-ZoombieLog -Level Step -Message "would pip install -r requirements-pdf.txt into $Python"
+        $result.Ok = $true
+        return $result
+    }
+
+    # The helper imports libraries directly by absolute interpreter path, so no
+    # console entry-point shim is ever needed, yet pip still drops them into
+    # %APPDATA%\Python\<ver>\Scripts (not on PATH). Snapshot the directory before
+    # the install and remove only what THIS install created, so a pre-existing
+    # unrelated tool (e.g. yt-dlp.exe) is never touched.
+    $before = Get-ZoombiePipShimSnapshot
+
+    Write-ZoombieLog -Level Step -Message "installing Python PDF dependencies (pip --user)"
+    $prevEap = $ErrorActionPreference; $ErrorActionPreference = 'Continue'
+    try {
+        & $Python -m pip install --user --no-warn-script-location --disable-pip-version-check --quiet -r $reqSrc 2>$null
+        $pipExit = $LASTEXITCODE
+    }
+    finally { $ErrorActionPreference = $prevEap }
+    if ($pipExit -ne 0) {
+        $result.Note = "pip install failed (exit $pipExit)"
+        Write-ZoombieLog -Level Warn -Message "PDF toolchain: $($result.Note)"
+        return $result
+    }
+
+    $removedShims = Remove-ZoombieNewPipShims -Before $before
+    if ($removedShims -gt 0) {
+        Write-ZoombieLog -Level Info -Message "removed $removedShims unused pip entry-point shim(s)"
+    }
+    $result.RemovedShims = $removedShims
+
+    # Confirm the imports actually resolve, so a partial install is reported as a
+    # failure here rather than surfacing later as an opaque readpdf error.
+    # No quotes in the snippet: PowerShell strips inner double quotes when
+    # passing a -c argument to a native exe, which would turn print("ok") into
+    # print(ok) and raise a NameError. The exit code is the signal, not stdout.
+    $probe = 'import pymupdf4llm, pymupdf'
+    $ErrorActionPreference = 'Continue'
+    try {
+        & $Python -c $probe 2>$null | Out-Null
+        $probeExit = $LASTEXITCODE
+    }
+    finally { $ErrorActionPreference = $prevEap }
+    if ($probeExit -ne 0) {
+        $result.Note = 'PDF dependencies installed but not importable'
+        Write-ZoombieLog -Level Warn -Message "PDF toolchain: $($result.Note)"
+        return $result
+    }
+
+    $result.Ok = $true
+    $script:Changes.Add('installed PDF python dependencies')
+    return $result
 }
 
 function Install-ZoombieSkills {
@@ -645,6 +836,7 @@ $modelInfo    = $null
 $hw           = $null
 $cliPath      = $null
 $skillResults = @()
+$pdfInfo      = $null
 
 Write-ZoombieLog -Level Step -Message "PowerShell $($PSVersionTable.PSVersion) on $([System.Environment]::OSVersion.VersionString)"
 
@@ -683,9 +875,9 @@ if ($python) {
 Write-ZoombieLog -Level Step -Message "ensuring ffmpeg/ffprobe"
 Install-FFmpeg -BinDir (Get-ZoombieEnvPath -Child 'bin') | Out-Null
 
-# 4. yt-dlp into zoombie-env\bin.
+# 4. yt-dlp as a Python package (invoked via `python -m yt_dlp`).
 Write-ZoombieLog -Level Step -Message "ensuring yt-dlp"
-Install-YtDlp -BinDir (Get-ZoombieEnvPath -Child 'bin') | Out-Null
+$ytDlpInfo = Install-YtDlp -Python $python
 
 # 5. whisper.cpp (backend-aware) into zoombie-env\bin\whisper.
 Write-ZoombieLog -Level Step -Message "ensuring whisper.cpp"
@@ -702,6 +894,15 @@ $cliPath = Install-ZoombieCli
 Write-ZoombieLog -Level Step -Message "deploying skills to the global root"
 $skillResults = Install-ZoombieSkills
 
+# 6c. PDF -> Markdown toolchain (Python deps + optional Tesseract detection).
+Write-ZoombieLog -Level Step -Message "ensuring PDF -> Markdown toolchain"
+$pdfInfo = Install-PdfToolchain -Python $python
+if ($pdfInfo.Tesseract) {
+    Write-ZoombieLog -Level Info -Message "tesseract present: $($pdfInfo.Tesseract)"
+} else {
+    Write-ZoombieLog -Level Info -Message "tesseract not found (optional; OCR fallback unavailable). Install with: winget install UB-Mannheim.TesseractOCR"
+}
+
 # 7. Persist the manifest.
 # Built incrementally rather than as one big literal: under StrictMode on
 # Windows PowerShell 5.1, a single bad member reference inside a large
@@ -709,13 +910,13 @@ $skillResults = Install-ZoombieSkills
 $envRoot     = Get-ZoombieEnvRoot
 $ffmpegPath  = Join-Path $envRoot 'bin\ffmpeg.exe'
 $ffprobePath = Join-Path $envRoot 'bin\ffprobe.exe'
-$ytdlpPath   = Join-Path $envRoot 'bin\yt-dlp.exe'
 
 $pythonVersion = $null
 if ($python) { $pythonVersion = Get-ZoombieToolVersion -Exe $python -VersionArgs '--version' }
 $ffmpegVersion  = Get-ZoombieToolVersion -Exe $ffmpegPath  -VersionArgs '-version'
 $ffprobeVersion = Get-ZoombieToolVersion -Exe $ffprobePath -VersionArgs '-version'
-$ytdlpVersion   = Get-ZoombieToolVersion -Exe $ytdlpPath   -VersionArgs '--version'
+$ytdlpVersion   = $null
+if ($python) { $ytdlpVersion = Get-ZoombieToolVersion -Exe $python -VersionArgs @('-m', 'yt_dlp', '--version') }
 
 # Read result fields defensively (Get-Field lives with the small helpers above),
 # so a missing key can never abort the run under StrictMode.
@@ -728,7 +929,7 @@ $manifest['asciiRoot']      = (Test-ZoombieAsciiPath $root)
 $manifest['python']         = [ordered]@{ path = $python; version = $pythonVersion }
 $manifest['ffmpeg']         = [ordered]@{ path = $ffmpegPath;  version = $ffmpegVersion }
 $manifest['ffprobe']        = [ordered]@{ path = $ffprobePath; version = $ffprobeVersion }
-$manifest['ytDlp']          = [ordered]@{ path = $ytdlpPath;   version = $ytdlpVersion }
+$manifest['ytDlp']          = [ordered]@{ via = 'python -m yt_dlp'; python = $python; version = $ytdlpVersion; ok = (Get-Field $ytDlpInfo 'Ok' $false); note = Get-Field $ytDlpInfo 'Note' }
 $manifest['whisper']        = [ordered]@{
     path    = Get-Field $whisperInfo 'Exe'
     tag     = Get-Field $whisperInfo 'Tag'
@@ -740,6 +941,14 @@ $manifest['model']          = [ordered]@{
     name   = Get-Field $modelInfo 'Name'
     sizeMb = Get-Field $modelInfo 'SizeMb' 0
 }
+$manifest['pdf']            = [ordered]@{
+    python           = Get-Field $pdfInfo 'Python'
+    pythonVersion    = Get-Field $pdfInfo 'PythonVersion'
+    ok               = Get-Field $pdfInfo 'Ok' $false
+    tesseract        = Get-Field $pdfInfo 'Tesseract'
+    tesseractVersion = Get-Field $pdfInfo 'TesseractVersion'
+    note             = Get-Field $pdfInfo 'Note'
+}
 $manifest['hardware']       = $hw
 if (Test-WriteAllowed) {
     Save-ZoombieEnvManifest -Manifest $manifest | Out-Null
@@ -749,9 +958,13 @@ if (Test-WriteAllowed) {
 $missing = @()
 if (-not (Test-Path (Get-ZoombieEnvPath -Child 'bin','ffmpeg.exe')))  { $missing += 'ffmpeg' }
 if (-not (Test-Path (Get-ZoombieEnvPath -Child 'bin','ffprobe.exe'))) { $missing += 'ffprobe' }
-if (-not (Test-Path (Get-ZoombieEnvPath -Child 'bin','yt-dlp.exe')))  { $missing += 'yt-dlp' }
+if (-not $ytdlpVersion) { $missing += 'yt-dlp' }
 if (-not (Test-Path (Get-ZoombieEnvPath -Child 'bin','whisper','whisper-cli.exe'))) { $missing += 'whisper-cli' }
 if (-not (Test-Path (Get-ZoombieEnvPath -Child 'models')))            { $missing += 'models' }
+# PDF tooling is optional for the transcription pipeline, so it is reported as
+# missing only in CHECK mode (which is purely informational and writes nothing).
+if ($script:Check -and -not (Get-Field $pdfInfo 'Ok' $false))     { $missing += 'pdf-deps' }
+if ($script:Check -and -not (Get-Field $pdfInfo 'Tesseract'))     { $missing += 'tesseract (optional)' }
 
 if ($script:Check) {
     Write-ZoombieLog -Level Step -Message "CHECK complete. Missing: $(if ($missing) { $missing -join ', ' } else { 'none' })"

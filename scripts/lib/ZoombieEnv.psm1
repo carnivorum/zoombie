@@ -23,7 +23,7 @@ Set-StrictMode -Version Latest
 # ---------------------------------------------------------------------------
 
 # Marker written into every SKILL.md we own. Bump when skill content changes.
-$script:ZoombieSkillVersion = '3.0.0'
+$script:ZoombieSkillVersion = '3.1.0'
 
 # Marker key written into SKILL.md front matter to prove ownership.
 $script:ZoombieMarkerKey = 'cvrm-zoombie-version'
@@ -259,6 +259,123 @@ function Resolve-ZoombieTool {
     return $null
 }
 
+function Get-ZoombiePython {
+    <#
+    .SYNOPSIS
+        Absolute path of the Python interpreter this toolchain uses, or $null.
+
+    .DESCRIPTION
+        Python is a prerequisite of this repo and is used for more than one job:
+        the PDF -> Markdown helper (pymupdf4llm/pytesseract) and yt-dlp (invoked
+        as `python -m yt_dlp`). The dependencies for both are installed into this
+        one interpreter by setup-worker.ps1.
+
+        yt-dlp is pure Python, so - unlike whisper.cpp, which is native C++ and
+        breaks on non-ASCII paths - it is ASCII-path safe and needs no isolation.
+
+        Resolution order (first hit wins), so a stale PATH can never cause a
+        false negative:
+          1. python.path recorded in env.json (exactly what setup installed into)
+          2. the toolchain bin dirs
+          3. Get-Command python, after refreshing PATH, skipping the Microsoft
+             Store alias stub (which is not a real interpreter)
+    #>
+    [CmdletBinding()]
+    param()
+    $manifest = Get-ZoombieEnvManifest
+    $fromManifest = $null
+    if ($manifest) {
+        $prop = $manifest.PSObject.Properties['python']
+        if ($prop -and $prop.Value) {
+            $fromManifest = $prop.Value.path
+        }
+    }
+    if ($fromManifest -and (Test-Path -LiteralPath $fromManifest -PathType Leaf)) {
+        return (Resolve-Path -LiteralPath $fromManifest).Path
+    }
+
+    $resolved = Resolve-ZoombieTool -Name 'python'
+    if ($resolved -and -not (Test-ZoombieWindowsStoreStub $resolved)) {
+        return $resolved
+    }
+    return $null
+}
+
+function Get-ZoombiePipScriptDirs {
+    <#
+    .SYNOPSIS
+        Directories where pip may drop console entry-point shims for a --user install.
+
+    .DESCRIPTION
+        `pip install --user` can write small console launchers (e.g. pymupdf.exe)
+        into %APPDATA%\Python\<ver>\Scripts. Nothing in this toolchain calls them
+        (helpers import the libraries directly by absolute interpreter path), so
+        they are pure clutter. The directory is version-tagged, so it is
+        enumerated rather than assumed.
+    #>
+    [CmdletBinding()]
+    param()
+    $dirs = New-Object System.Collections.Generic.List[string]
+    $pyRoot = Join-Path $env:APPDATA 'Python'
+    if ($env:APPDATA -and (Test-Path -LiteralPath $pyRoot)) {
+        foreach ($child in @(Get-ChildItem -LiteralPath $pyRoot -Directory -ErrorAction SilentlyContinue)) {
+            $scripts = Join-Path $child.FullName 'Scripts'
+            if (Test-Path -LiteralPath $scripts) { $dirs.Add($scripts) }
+        }
+    }
+    return $dirs
+}
+
+function Get-ZoombiePipShimSnapshot {
+    <#
+    .SYNOPSIS
+        Snapshot of the file names present in every pip script directory.
+
+    .DESCRIPTION
+        Used before a pip install so the caller can tell exactly which shims that
+        install created, and therefore remove only those. Anything already there
+        (a foreign tool such as yt-dlp.exe) is preserved by construction.
+    #>
+    [CmdletBinding()]
+    param()
+    $snapshot = @{}
+    foreach ($dir in Get-ZoombiePipScriptDirs) {
+        $snapshot[$dir] = @(Get-ChildItem -LiteralPath $dir -File -ErrorAction SilentlyContinue |
+            Select-Object -ExpandProperty Name)
+    }
+    return $snapshot
+}
+
+function Remove-ZoombieNewPipShims {
+    <#
+    .SYNOPSIS
+        Remove only the pip shims created since a previous snapshot.
+
+    .DESCRIPTION
+        Deletion is best-effort: a locked file yields a warning, never an error,
+        so a stray shim can never fail the install.
+    #>
+    [CmdletBinding()]
+    param([Parameter(Mandatory)][hashtable]$Before)
+
+    $removed = 0
+    foreach ($dir in Get-ZoombiePipScriptDirs) {
+        $known = if ($Before.ContainsKey($dir)) { @($Before[$dir]) } else { @() }
+        $candidates = @(Get-ChildItem -LiteralPath $dir -File -ErrorAction SilentlyContinue |
+            Where-Object { $known -notcontains $_.Name })
+        foreach ($file in $candidates) {
+            try {
+                Remove-Item -LiteralPath $file.FullName -Force -ErrorAction Stop
+                $removed++
+            }
+            catch {
+                Write-ZoombieLog -Level Warn -Message "could not remove pip shim (in use?): $($file.FullName)"
+            }
+        }
+    }
+    return $removed
+}
+
 function Get-ZoombieToolVersion {
     <#
     .SYNOPSIS
@@ -488,6 +605,10 @@ Export-ModuleMember -Function @(
     'New-ZoombieEnvSkeleton',
     'Update-ZoombiePath',
     'Resolve-ZoombieTool',
+    'Get-ZoombiePython',
+    'Get-ZoombiePipScriptDirs',
+    'Get-ZoombiePipShimSnapshot',
+    'Remove-ZoombieNewPipShims',
     'Get-ZoombieToolVersion',
     'Test-ZoombieWindowsStoreStub',
     'Get-ZoombieSkillMarker',

@@ -121,6 +121,50 @@ try {
     if ($missing.Count -gt 0) {
         throw "transcript missing expected words: $($missing -join ', ')"
     }
+
+    # --- 7. readpdf (PDF -> Markdown), optional ------------------------------
+    # Skipped entirely when the PDF toolchain has not been installed, so this
+    # remains a pure regression test for the transcription pipeline. When it IS
+    # present, the PDF is generated with PyMuPDF and converted into the same
+    # Cyrillic destination, exercising the ASCII-isolation copy-back.
+    $pyForPdf = $null
+    $manifestPath = Join-Path (Split-Path -Parent (Split-Path -Parent $cli)) 'env.json'
+    if (Test-Path -LiteralPath $manifestPath) {
+        $pyForPdf = (Get-Content -LiteralPath $manifestPath -Raw | ConvertFrom-Json).python.path
+    }
+    if ($pyForPdf -and (Test-Path -LiteralPath $pyForPdf)) {
+        Say 'readpdf'
+        $pdfPath = Join-Path $scratch 'doc.pdf'
+        $gen = @'
+import sys
+import pymupdf
+doc = pymupdf.open()
+page = doc.new_page()
+page.insert_text((72, 72), "The quick brown fox jumps over the lazy dog.")
+doc.save(sys.argv[1])
+doc.close()
+'@
+        $genFile = Join-Path $scratch 'mkpdf.py'
+        [System.IO.File]::WriteAllText($genFile, $gen, (New-Object System.Text.UTF8Encoding($false)))
+        $prevEap = $ErrorActionPreference; $ErrorActionPreference = 'Continue'
+        try { & $pyForPdf $genFile $pdfPath 2>$null } finally { $ErrorActionPreference = $prevEap }
+
+        $mdBase = Join-Path $scratch 'doc-md'
+        $pdfJson = & $cli readpdf -Source $pdfPath -Output $mdBase | Select-Object -Last 1
+        $pdf = $pdfJson | ConvertFrom-Json
+        if (-not $pdf.ok) { throw "readpdf failed: $($pdf.error)" }
+        $mdPath = $pdf.data.output
+        if (-not (Test-Path -LiteralPath $mdPath)) { throw "readpdf produced no Markdown: $mdPath" }
+        $mdText = (Get-Content -LiteralPath $mdPath -Raw).ToLowerInvariant()
+        if ($mdText -notmatch 'quick' -or $mdText -notmatch 'fox') {
+            throw "Markdown missing expected text: $mdPath"
+        }
+        Info "markdown: $mdPath (pages=$($pdf.data.pages) ocr=$($pdf.data.ocrUsed))"
+        Say 'PASS: PDF -> Markdown worked end to end'
+    } else {
+        Say 'readpdf: skipped (PDF toolchain not installed)'
+    }
+
     Say 'PASS: Cyrillic destination path worked end to end'
     $done = $true
 }

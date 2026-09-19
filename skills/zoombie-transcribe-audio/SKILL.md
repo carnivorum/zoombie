@@ -1,6 +1,6 @@
 ---
 name: zoombie-transcribe-audio
-cvrm-zoombie-version: 3.0.0
+cvrm-zoombie-version: 3.1.0
 description: Transcribe an audio file to text (TXT and SRT, plus optional readable Markdown and summary) using a local whisper.cpp binary with a CUDA/Vulkan/CPU backend. Use when the user wants a speech-to-text transcript, subtitles, SRT/TXT output, or a cleaned-up readable version of a recording. Always inspects the project, proposes transcript output paths, and confirms the destination before writing anything.
 ---
 

@@ -1,7 +1,7 @@
 # zoombie
 
-A deterministic Windows speech-to-text toolchain: download video → extract
-audio → transcribe with whisper.cpp (CUDA/Vulkan/CPU).
+A deterministic Windows text-extraction toolchain: download video → extract
+audio → transcribe with whisper.cpp (CUDA/Vulkan/CPU), plus PDF → Markdown.
 
 Everything fragile lives in tested scripts, not in prose an agent re-interprets.
 The skills are thin wrappers that call one CLI.
@@ -27,24 +27,27 @@ The skills are thin wrappers that call one CLI.
 setup.md                        thin setup prompt that drives the scripts
 scripts/
   lib/ZoombieEnv.psm1           shared helpers (paths, ASCII guard, manifest, JSON result)
+  pdf/extract_pdf.py            PDF -> Markdown extractor (PyMuPDF4LLM + optional Tesseract OCR)
+  requirements-pdf.txt          Python dependencies for the PDF extractor
   setup.ps1                     thin entry point: fetch the latest setup-worker.ps1 and run it
   setup-worker.ps1              the installer/updater (install or update; -Check, -DryRun)
-  zoombie.ps1                   runtime CLI (doctor/download/extract/transcribe/pipeline/clean)
+  zoombie.ps1                   runtime CLI (doctor/download/extract/transcribe/readpdf/pipeline/clean)
   selftest.ps1                  end-to-end test incl. Cyrillic-path regression
 skills/
   zoombie-download-video/SKILL.md     thin wrapper -> zoombie.ps1 download
   zoombie-extract-audio/SKILL.md      thin wrapper -> zoombie.ps1 extract
   zoombie-transcribe-audio/SKILL.md   thin wrapper -> zoombie.ps1 transcribe
   zoombie-transcribe-video/SKILL.md   thin wrapper -> zoombie.ps1 pipeline
+  zoombie-pdf-to-md/SKILL.md          thin wrapper -> zoombie.ps1 readpdf
 ```
 
 The installed toolchain lives outside the repo, at an ASCII path:
 
 ```
 %USERPROFILE%\zoombie-env\
-  bin\ffmpeg.exe, ffprobe.exe, yt-dlp.exe
+  bin\ffmpeg.exe, ffprobe.exe
   bin\whisper\whisper-cli.exe (+ CUDA/Vulkan DLLs beside it)
-  bin\zoombie\zoombie.ps1, lib\ZoombieEnv.psm1   the deployed CLI
+  bin\zoombie\zoombie.ps1, lib\ZoombieEnv.psm1, pdf\extract_pdf.py   the deployed CLI
   models\ggml-*.bin
   work\<guid>\                                    ASCII scratch for each job
   tmp\                                            ASCII scratch for downloads/extraction
@@ -115,8 +118,9 @@ What travels in the repo vs. what each machine rebuilds:
 
 On a machine that is **already configured**, nothing further is needed: the
 deployed CLI at `%USERPROFILE%\zoombie-env\bin\zoombie\zoombie.ps1` is
-self-contained (it carries its own `lib\`), and the four `zoombie-*` skills live
-in the global root, so "transcribe this video" works from any workspace.
+self-contained (it carries its own `lib\` and `pdf\`), and the five `zoombie-*`
+skills live in the global root, so "transcribe this video" and "convert this PDF"
+work from any workspace.
 
 The bootstrap honors environment overrides, so a fork or branch can be used
 without editing the script:
@@ -138,6 +142,7 @@ $zoombie = "$env:USERPROFILE\zoombie-env\bin\zoombie\zoombie.ps1"
 & $zoombie download -Source "<url>" -DownloadDir "<dir>" [-AudioOnly]
 & $zoombie extract  -Source "<video>" -Output "<out>" [-Format wav|mp3|m4a|flac]
 & $zoombie transcribe -Source "<audio>" -Output "<basename>" [-Language auto] [-Srt]
+& $zoombie readpdf  -Source "<pdf>" -Output "<basename>" [-Ocr] [-Images] [-Pages "1-5,8"]
 & $zoombie pipeline -Source "<url-or-file>" -Output "<basename>" [-DownloadDir "<dir>"] [-Srt]
 & $zoombie clean                                          # remove scratch dirs
 ```
@@ -147,11 +152,18 @@ The input parameter is `-Source` (not `-Input`, which PowerShell reserves).
 
 ## Skills
 
-The four skills in [`skills/`](skills/) are the canonical sources. They only
+The five skills in [`skills/`](skills/) are the canonical sources. They only
 inspect the project, propose paths, collect the user's confirmation, and then
 call `zoombie.ps1`. They are namespaced `zoombie-*` so their names cannot
-collide with a foreign skill, and they carry `cvrm-zoombie-version: 3.0.0`,
+collide with a foreign skill, and they carry `cvrm-zoombie-version: 3.1.0`,
 which `setup.ps1` compares to decide `up to date` vs `updated`.
+
+`zoombie-pdf-to-md` converts a PDF to Markdown. Text PDFs need nothing extra;
+scanned PDFs use an opt-in Tesseract OCR fallback (`-Ocr`). It reuses the Python
+this repo already requires (the `pymupdf4llm`/`pytesseract` dependencies are
+installed into it with `pip --user`), and the source PDF is copied into an ASCII
+scratch dir first, so the Cyrillic-path invariant holds for PyMuPDF exactly as it
+does for whisper.cpp.
 
 ## Hacking
 
@@ -163,5 +175,14 @@ which `setup.ps1` compares to decide `up to date` vs `updated`.
   the working tree as-is and never hits the network. `scripts\setup.ps1` is the
   end-user path and always pulls the published worker.
 - Bump `ZoombieSkillVersion` in that module when skill content changes, so the
-  deployment step can tell an installed skill is out of date.
+  deployment step can tell an installed skill is out of date. It is currently
+  `3.1.0`; every `SKILL.md` carries the same value in `cvrm-zoombie-version`.
+- The PDF dependencies are installed with `pip install --user`. pip also writes
+  console launchers into `%APPDATA%\Python\<ver>\Scripts`, which this toolchain
+  never calls, so the installer snapshots that folder first and removes only the
+  shims its own install created (anything pre-existing is never touched).
+- `yt-dlp` is installed as a Python package and invoked as `python -m yt_dlp`. It
+  is pure Python and therefore ASCII-path safe (unlike whisper.cpp), so it needs
+  no local copy and no ASCII isolation, and running it as a module avoids PATH
+  and launcher-shim issues entirely.
 - Run `scripts\selftest.ps1` after any change that touches the pipeline.

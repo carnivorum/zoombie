@@ -1,0 +1,14 @@
+# Python dependencies for the zoombie PDF -> Markdown toolchain.
+#
+# Installed by scripts/setup-worker.ps1 into an isolated venv at
+# <zoombie-env>\bin\pdf\venv (an ASCII path), never into the system Python.
+#
+#   pymupdf4llm  Markdown-aware extraction (headings, lists, tables) on top of PyMuPDF
+#   pymupdf      PyMuPDF itself: PDF parsing, and page rasterization for OCR
+#   pytesseract  thin wrapper over the Tesseract OCR engine (optional fallback)
+#   Pillow       image objects handed to pytesseract
+
+pymupdf4llm>=0.0.17
+pymupdf>=1.24.0
+pytesseract>=0.3.10
+Pillow>=10.0.0
