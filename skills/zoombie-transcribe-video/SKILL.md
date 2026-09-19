@@ -1,6 +1,6 @@
 ---
 name: zoombie-transcribe-video
-cvrm-zoombie-version: 3.2.0
+cvrm-zoombie-version: 3.3.0
 description: End-to-end pipeline that turns a video file or a video URL into a transcript by chaining the zoombie download, extract and transcribe skills. Use when the user says things like "transcribe this video", "transcribe this link", "give me a transcript of this recording", or "make subtitles from this video". Collects every output-path confirmation up front in one pass, then runs download (when a URL is given), audio extraction, and whisper.cpp transcription in sequence.
 ---
 
@@ -27,7 +27,7 @@ if (-not $cli) { throw "zoombie CLI not found. Run scripts/setup.ps1 first." }
 Then call it — this is the only command this skill needs:
 
 ```powershell
-& $cli pipeline -Source "<url-or-file>" -Output "<confirmed-basename>" [-DownloadDir "<dir>"] [-Srt] [-Language auto] [-Force]
+& $cli pipeline -Source "<url-or-file>" -Output "<confirmed-basename>" [-DownloadDir "<dir>"] [-Srt] [-Language auto] [-Force] [-NoGpu] [-AllowCpuFallback]
 ```
 
 If the installed CLI is missing entirely, fall back to the repo copy:
@@ -80,6 +80,17 @@ too because the audio is written to ASCII before whisper sees it.
 - `zoombie-download-video`, `zoombie-extract-audio`, and
   `zoombie-transcribe-audio` document the individual stages; the `pipeline`
   subcommand runs them in sequence so you do not need to call them separately.
+- **A CPU run on a GPU machine is a failure, not a warning.** When a usable GPU
+  backend is configured, the pipeline refuses to return a CPU transcript:
+  `ok:false` with an `error` naming the reason (usually an incomplete CUDA
+  runtime, e.g. a missing `cublas64_*.dll`), and `data.logPath` points at the
+  preserved whisper log. Use `-NoGpu` only if the user explicitly wants the CPU.
+  A machine with no GPU is unaffected and transcribes on the CPU normally.
+- Read `data.deviceUsed` and `data.realtimeFactor` and report them. On a GPU
+  machine `deviceUsed` must be `cuda` (or `vulkan`) and `realtimeFactor` well
+  below `1.0`; `deviceSelected` proves the GPU was actually used, while
+  `backendInitialised` only means the backend loaded. `gpuAttemptWallMs` reports
+  time wasted by an abandoned GPU attempt before a CPU retry.
 - Never delete a user-supplied local source file. Never overwrite without
   asking.
 - Shell: PowerShell. If a command fails with *"is not recognized"*, the runner

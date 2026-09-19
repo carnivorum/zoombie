@@ -77,9 +77,113 @@ $backendConfigured = $doctor.data.report.whisper.backendConfigured
 $backendObserved   = $doctor.data.report.whisper.backendObserved
 Info ("backend: configured={0} observed={1}" -f $backendConfigured, $backendObserved)
 foreach ($w in @($doctor.data.warnings) | Where-Object { $_ }) { Info "WARN: $w" }
-if ($backendConfigured -eq 'cuda' -and $backendObserved -ne 'cuda') {
-    throw ("CUDA backend regression: configured 'cuda' but whisper initialises '{0}' - {1}" -f `
-        $backendObserved, $doctor.data.report.whisper.probeReason)
+if ($backendConfigured -eq 'cuda') {
+    if (-not $backendObserved) {
+        # 'could not be probed' is NOT 'probed cpu'. A build whose --help exits
+        # before backend init reports nothing, and treating that as a regression
+        # produced a false failure. It is reported as inconclusive instead.
+        Info ("probe inconclusive: {0}" -f $doctor.data.report.whisper.probeReason)
+    } elseif ($backendObserved -ne 'cuda') {
+        throw ("CUDA backend regression: configured 'cuda' but whisper initialises '{0}' - {1}" -f `
+            $backendObserved, $doctor.data.report.whisper.probeReason)
+    }
+}
+
+# --- 1c. CUDA runtime readiness is major-version aware ---------------------
+# The runtime ggml-cuda.dll loads is named by MAJOR version (cublas64_11.dll),
+# so a runtime of the wrong major must NOT be reported as "present". This is a
+# pure filesystem simulation: no download, no GPU, no whisper run.
+$modulePath = Join-Path (Split-Path -Parent (Split-Path -Parent $cli)) 'lib\ZoombieEnv.psm1'
+if (-not (Test-Path -LiteralPath $modulePath)) {
+    $modulePath = Join-Path (Split-Path -Parent $cli) 'lib\ZoombieEnv.psm1'
+}
+if (Test-Path -LiteralPath $modulePath) {
+    Import-Module $modulePath -Force
+    # Asset-name parsing drives which runtime is required.
+    $parsedMajor = Get-ZoombieCudaMajorFromAssetName -Name 'whisper-cublas-11.8.0-bin-x64.zip'
+    if ($parsedMajor -ne 11) { throw "asset name parse gave '$parsedMajor', expected 11" }
+    if ($null -ne (Get-ZoombieCudaMajorFromAssetName -Name 'whisper-bin-x64.zip')) {
+        throw 'an asset name without a CUDA version should parse to null'
+    }
+
+    $simDir = Join-Path $env:TEMP ("zoombie-cudalib-" + [guid]::NewGuid().ToString('N'))
+    New-Item -ItemType Directory -Force -Path $simDir | Out-Null
+    try {
+        $simExe = Join-Path $simDir 'whisper-cli.exe'
+        # No whisper dir at all must read as "not installed", not "all missing".
+        $absent = Get-ZoombieWhisperCudaRuntime -WhisperExe (Join-Path $simDir 'nope\whisper-cli.exe')
+        if (-not $absent.DirMissing) { throw 'a missing whisper dir should report DirMissing' }
+
+        # A CUDA build with no runtime is the exact broken state, named by DLL.
+        New-Item -ItemType File -Path (Join-Path $simDir 'ggml-cuda.dll') -Force | Out-Null
+        $noRuntime = Get-ZoombieWhisperCudaRuntime -WhisperExe $simExe -CudaMajor 11
+        if ($noRuntime.Ready) { throw 'ggml-cuda.dll alone must not be reported ready' }
+        if ($noRuntime.Missing -notcontains 'cublas64_11.dll') {
+            throw "expected cublas64_11.dll in Missing, got: $($noRuntime.Missing -join ', ')"
+        }
+
+        # A runtime of the WRONG major must still be reported missing.
+        New-Item -ItemType File -Path (Join-Path $simDir 'cublas64_12.dll') -Force | Out-Null
+        $wrongMajor = Get-ZoombieWhisperCudaRuntime -WhisperExe $simExe -CudaMajor 11
+        if ($wrongMajor.Ready) { throw 'a CUDA-12 cuBLAS must not satisfy a CUDA-11 requirement' }
+        if ($wrongMajor.Missing -notcontains 'cublas64_11.dll') {
+            throw 'a wrong-major runtime must not clear cublas64_11.dll from Missing'
+        }
+
+        # The matching runtime clears it. A CUDA-12 asset would instead be checked
+        # against cublas64_12.dll, and that major has no pinned redist, so
+        # provisioning must refuse rather than download something unverified.
+        New-Item -ItemType File -Path (Join-Path $simDir 'cublas64_11.dll') -Force | Out-Null
+        New-Item -ItemType File -Path (Join-Path $simDir 'cublasLt64_11.dll') -Force | Out-Null
+        $ready = Get-ZoombieWhisperCudaRuntime -WhisperExe $simExe -CudaMajor 11
+        if (-not $ready.Ready) { throw "a complete 11.x runtime should be Ready, missing: $($ready.Missing -join ', ')" }
+        if (Get-ZoombieCublasProvision -CudaMajor 12) {
+            throw 'CUDA 12 has no pinned redist; Get-ZoombieCublasProvision must return null for it'
+        }
+        Info 'CUDA runtime readiness: major-version aware (11 ok, 12 refused)'
+        Say 'PASS: CUDA runtime readiness checks behave correctly'
+    }
+    finally {
+        Remove-Item -Recurse -Force $simDir -ErrorAction SilentlyContinue
+    }
+}
+
+# --- 1d. Device classification: initialised is not the same as selected -----
+# The silent-CPU-fallback bug this suite exists to catch has a subtle second
+# form: a log that shows the CUDA backend LOADED but never selected. That must
+# classify as cpu (no device was used), with BackendInitialised kept separate so
+# a capability probe can still report the GPU as usable.
+if (Test-Path -LiteralPath $modulePath) {
+    $selected = Get-ZoombieWhisperDeviceInfo -LogLines @(
+        'ggml_cuda_init: found 1 CUDA devices',
+        'whisper_backend_init_gpu: using CUDA backend')
+    if (-not $selected.DeviceSelected -or $selected.Device -ne 'cuda') {
+        throw 'a selected CUDA device must classify as cuda/DeviceSelected'
+    }
+    $loadedOnly = Get-ZoombieWhisperDeviceInfo -LogLines @(
+        'ggml_cuda_init: found 1 CUDA devices',
+        'load_backend: loaded CUDA backend')
+    if ($loadedOnly.Device -ne 'cpu' -or -not $loadedOnly.BackendInitialised) {
+        throw ("a log with only a loaded backend must classify as cpu but keep BackendInitialised; got Device='{0}' BackendInitialised={1}" -f `
+            $loadedOnly.Device, $loadedOnly.BackendInitialised)
+    }
+    $ngRun = Get-ZoombieWhisperDeviceInfo -LogLines @(
+        'use gpu = 0',
+        'load_backend: loaded CUDA backend')
+    if ($ngRun.Device -ne 'cpu' -or $ngRun.DeviceSelected) {
+        throw 'a -ng run must classify as cpu, never cuda'
+    }
+    # GPU-failure-signature detection drives whether the CPU retry is attempted.
+    if (-not (Test-ZoombieWhisperGpuFailure -ExitCode 3 -LogLines @('CUDA error: out of memory'))) {
+        throw 'a CUDA error must be recognised as a GPU failure'
+    }
+    if (Test-ZoombieWhisperGpuFailure -ExitCode 3 -LogLines @('error: failed to open model file')) {
+        throw 'a non-GPU error must NOT be recognised as a GPU failure'
+    }
+    if (-not (Test-ZoombieWhisperGpuFailure -ExitCode 3 -LogLines @())) {
+        throw 'an unattributed crash should stay retryable'
+    }
+    Say 'PASS: device classification and GPU-failure detection behave correctly'
 }
 
 # --- 2. scratch folder with a CYRILLIC name (the regression test) ----------
@@ -138,6 +242,25 @@ try {
     if ($tx.data.silentCpuFallback) {
         throw ("Silent CPU fallback detected: {0}" -f $tx.data.fallbackReason)
     }
+
+    # --- 5b. The GPU policy must NOT fire for a deliberate CPU run -----------
+    # `-NoGpu` is the explicit opt-out, so the same audio must transcribe on the
+    # CPU with ok:true - if the strict policy were implemented as "always fail on
+    # cpu", a legitimate CPU-only machine (and this opt-out) would break. This
+    # also proves `use gpu = 0` is classified as a deliberate CPU run, not as a
+    # silent fallback.
+    Say 'transcribe -NoGpu (deliberate CPU)'
+    $baseNg = Join-Path $scratch 'transcript-ng'
+    $ngJson = & $cli transcribe -Source $extractOut -Output $baseNg -Language en -NoGpu | Select-Object -Last 1
+    $ng = $ngJson | ConvertFrom-Json
+    if (-not $ng.ok) { throw "deliberate CPU run unexpectedly failed: $($ng.error)" }
+    if ($ng.data.deviceUsed -ne 'cpu') {
+        throw ("-NoGpu must report deviceUsed cpu, got '{0}'" -f $ng.data.deviceUsed)
+    }
+    if ($ng.data.silentCpuFallback) {
+        throw '-NoGpu must not be reported as a silent CPU fallback'
+    }
+    Info ("-NoGpu: deviceUsed={0} ok={1}" -f $ng.data.deviceUsed, $ng.ok)
 
     # --- 6. verify ------------------------------------------------------------
     $text = (Get-Content -LiteralPath $txtPath -Raw).ToLowerInvariant()

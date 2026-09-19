@@ -518,12 +518,29 @@ function Install-CublasRuntime {
         A hashtable: @{ Ok; Installed; Missing; Version; Note }
     #>
     [CmdletBinding()]
-    param([Parameter(Mandatory)][string]$DestDir)
+    param(
+        [Parameter(Mandatory)][string]$DestDir,
+        # The cuBLAS major the installed ASSET loads. Derived from the asset name
+        # by the caller, so an upgrade to a CUDA-12 asset cannot quietly keep an
+        # 11.x runtime that ggml-cuda.dll will never load.
+        [int]$CudaMajor = 0
+    )
 
-    $spec = Get-ZoombieCublasProvision
-    $result = @{ Ok = $false; Installed = @(); Missing = @(); Version = $spec.version; Note = $null }
+    $major = if ($CudaMajor -gt 0) { $CudaMajor } else { Get-ZoombieCublasDefaultMajor }
+    $spec = Get-ZoombieCublasProvision -CudaMajor $major
+    $result = @{ Ok = $false; Installed = @(); Missing = @(); Major = $major; Version = $null; Note = $null }
 
-    $runtime = Get-ZoombieWhisperCudaRuntime -WhisperExe (Join-Path $DestDir 'whisper-cli.exe')
+    # No pinned, hash-verified redist for this major: refuse. Copying an
+    # unverified DLL into the process is not acceptable, and continuing would
+    # leave a CUDA build that silently transcribes on the CPU.
+    if (-not $spec) {
+        $result.Note = "no verified cuBLAS redist is pinned for CUDA $major; cannot provision the runtime the selected asset loads"
+        Write-ZoombieLog -Level Warn -Message "cuBLAS runtime: $($result.Note)"
+        return $result
+    }
+    $result.Version = $spec.version
+
+    $runtime = Get-ZoombieWhisperCudaRuntime -WhisperExe (Join-Path $DestDir 'whisper-cli.exe') -CudaMajor $major
     if ($runtime.Ready -and -not $script:Force) {
         $result.Ok = $true
         $result.Installed = @($runtime.Present)
@@ -578,7 +595,7 @@ function Install-CublasRuntime {
         Remove-Item -Recurse -Force $tmp -ErrorAction SilentlyContinue
     }
 
-    $after = Get-ZoombieWhisperCudaRuntime -WhisperExe (Join-Path $DestDir 'whisper-cli.exe')
+    $after = Get-ZoombieWhisperCudaRuntime -WhisperExe (Join-Path $DestDir 'whisper-cli.exe') -CudaMajor $major
     $result.Missing = @($after.Missing)
     $result.Ok = $after.Ready
     if ($result.Ok) {
@@ -592,48 +609,82 @@ function Install-CublasRuntime {
 
 function Install-Whisper {
     [CmdletBinding()]
-    param([Parameter(Mandatory)][string]$Backend)
+    param(
+        [Parameter(Mandatory)][ValidateSet('cuda', 'vulkan', 'cpu')][string]$Backend,
+        # The CURRENT hardware profile. When supplied its detected backend is
+        # authoritative: the install must match the machine it runs on, not the
+        # value some earlier run happened to write into env.json.
+        $Hardware = $null
+    )
     $destDir = Get-ZoombieEnvPath -Child 'bin', 'whisper'
     $exe = Join-Path $destDir 'whisper-cli.exe'
 
-    if ((Test-Path $exe) -and -not $script:Force) {
+    $detected = Get-Field $Hardware 'backend'
+    $desired  = if ($detected) { $detected } else { $Backend }
+
+    $prev            = Get-ZoombieEnvManifest
+    $prevTag         = Get-Field $prev 'whisper.tag'
+    $prevAsset       = Get-Field $prev 'whisper.asset'
+    $installedBackend = Get-Field $prev 'whisper.backend'
+
+    # A machine that gained (or lost) a GPU must not keep the old build. A
+    # backend that is sticky in env.json is how a CPU-only install stayed CPU on
+    # a CUDA box (and how a CUDA install kept claiming cuda with no GPU present).
+    $present = (Test-Path $exe) -and -not $script:Force
+    if ($present -and $installedBackend -and $installedBackend -ne $desired) {
+        if (Test-WriteAllowed) {
+            Write-ZoombieLog -Level Warn -Message "installed whisper backend '$installedBackend' no longer matches detected hardware '$desired'; reinstalling"
+            $present = $false
+        } else {
+            Write-ZoombieLog -Level Warn -Message "whisper backend mismatch: installed '$installedBackend' but hardware detects '$desired' (re-run without -Check to fix)"
+        }
+    }
+
+    if ($present) {
         Write-ZoombieLog -Level Info -Message "whisper-cli present: $exe"
         # Preserve tag/asset recorded by a previous run so the manifest stays complete.
         # Read StrictMode-safely: a legacy/partial env.json may have no `whisper`
         # section, in which case $prev.whisper.tag would throw under StrictMode.
-        $prev = Get-ZoombieEnvManifest
-        $prevTag     = Get-Field $prev 'whisper.tag'
-        $prevAsset   = Get-Field $prev 'whisper.asset'
-        $prevBackend = Get-Field $prev 'whisper.backend' $Backend
+        $effectiveBackend = if ($installedBackend) { $installedBackend } else { $desired }
         # If a previous run never recorded which asset it used, recover it with a
         # single release scan so env.json stays a complete record.
         if (-not $prevTag -and -not $script:Check -and -not $script:DryRun) {
-            $scan = Select-WhisperAsset -Backend $prevBackend
+            $scan = Select-WhisperAsset -Backend $effectiveBackend
             if ($scan) { $prevTag = $scan.Tag; $prevAsset = $scan.Name }
         }
         # The CUDA runtime is provisioned independently of the asset, so it is
         # repaired here even when the exe is already present: an install with the
         # asset but no cuBLAS is exactly the broken state this guards against.
+        $cudaMajor = $null
         $cublas = $null
-        if ($prevBackend -eq 'cuda') {
-            $cublas = Install-CublasRuntime -DestDir $destDir
+        if ($effectiveBackend -eq 'cuda') {
+            $cudaMajor = Get-ZoombieCudaMajorFromAssetName -Name $prevAsset
+            if (-not $cudaMajor) { $cudaMajor = Get-ZoombieCublasDefaultMajor }
+            $cublas = Install-CublasRuntime -DestDir $destDir -CudaMajor $cudaMajor
         }
-        return @{ Exe = $exe; Tag = $prevTag; Asset = $prevAsset; Backend = $prevBackend; Cublas = $cublas }
+        return @{ Exe = $exe; Tag = $prevTag; Asset = $prevAsset; Backend = $effectiveBackend; CudaMajor = $cudaMajor; Cublas = $cublas }
     }
 
-    $asset = Select-WhisperAsset -Backend $Backend
-    if (-not $asset -and $Backend -ne 'cpu') {
-        Write-ZoombieLog -Level Warn -Message "no $Backend asset found; falling back to CPU build"
+    $asset = Select-WhisperAsset -Backend $desired
+    if (-not $asset -and $desired -ne 'cpu') {
+        Write-ZoombieLog -Level Warn -Message "no $desired asset found; falling back to CPU build"
         $asset = Select-WhisperAsset -Backend 'cpu'
     }
     if (-not $asset) { throw 'No suitable whisper.cpp Windows asset found in any release.' }
 
     Write-ZoombieLog -Level Step -Message "selected whisper.cpp $($asset.Tag) asset $($asset.Name) [$($asset.Backend)]"
+    # The cuBLAS major is derived from the ASSET, not from a constant, so this
+    # stays correct if ggml-org publishes a CUDA-12 build.
+    $assetCudaMajor = Get-ZoombieCudaMajorFromAssetName -Name $asset.Name
+    if ($asset.Backend -eq 'cuda' -and -not $assetCudaMajor) {
+        Write-ZoombieLog -Level Warn -Message "asset '$($asset.Name)' names no CUDA version; assuming cuBLAS major $(Get-ZoombieCublasDefaultMajor)"
+    }
+
     if (-not (Test-WriteAllowed)) {
         Write-ZoombieLog -Level Info -Message "     would extract to $destDir"
         $cublasDry = $null
-        if ($asset.Backend -eq 'cuda') { $cublasDry = Install-CublasRuntime -DestDir $destDir }
-        return @{ Exe = $exe; Tag = $asset.Tag; Asset = $asset.Name; Backend = $asset.Backend; Cublas = $cublasDry }
+        if ($asset.Backend -eq 'cuda') { $cublasDry = Install-CublasRuntime -DestDir $destDir -CudaMajor $assetCudaMajor }
+        return @{ Exe = $exe; Tag = $asset.Tag; Asset = $asset.Name; Backend = $asset.Backend; CudaMajor = $assetCudaMajor; Cublas = $cublasDry }
     }
 
     $tmp = New-ZoombieAsciiTempDir -Prefix 'zoombie-whisper'
@@ -661,13 +712,13 @@ function Install-Whisper {
         # leave a build that silently transcribes on the CPU.
         $cublas = $null
         if ($asset.Backend -eq 'cuda') {
-            $cublas = Install-CublasRuntime -DestDir $destDir
+            $cublas = Install-CublasRuntime -DestDir $destDir -CudaMajor $assetCudaMajor
             if (-not $cublas.Ok) {
                 throw "CUDA backend selected but the cuBLAS runtime could not be provisioned: $($cublas.Note)"
             }
         }
         $script:Changes.Add("installed whisper.cpp $($asset.Tag) ($($asset.Backend))")
-        return @{ Exe = $exe; Tag = $asset.Tag; Asset = $asset.Name; Backend = $asset.Backend; Cublas = $cublas }
+        return @{ Exe = $exe; Tag = $asset.Tag; Asset = $asset.Name; Backend = $asset.Backend; CudaMajor = $assetCudaMajor; Cublas = $cublas }
     }
     finally {
         Remove-Item -Recurse -Force $tmp -ErrorAction SilentlyContinue
@@ -1003,7 +1054,9 @@ $ytDlpInfo = Install-YtDlp -Python $python
 
 # 5. whisper.cpp (backend-aware) into zoombie-env\bin\whisper.
 Write-ZoombieLog -Level Step -Message "ensuring whisper.cpp"
-$whisperInfo = Install-Whisper -Backend $hw.backend
+# $hw (the CURRENT hardware) is passed so the installed build is compared with
+# this machine, not with whatever backend a previous run recorded.
+$whisperInfo = Install-Whisper -Backend $hw.backend -Hardware $hw
 
 # 5b. Prove which backend whisper-cli can ACTUALLY initialise. The manifest
 # records what was INTENDED; only a probe reports what is usable, which is how a
@@ -1013,20 +1066,29 @@ $whisperInfo = Install-Whisper -Backend $hw.backend
 # -Check and -DryRun too.
 $whisperExe      = Get-Field $whisperInfo 'Exe'
 $backendConfig   = Get-Field $whisperInfo 'Backend'
+$cudaMajor       = Get-Field $whisperInfo 'CudaMajor'
 Write-ZoombieLog -Level Step -Message "probing whisper backend (what it can actually initialise)"
 $backendProbe    = Invoke-ZoombieWhisperBackendProbe -WhisperExe $whisperExe
 $backendObserved = Get-Field $backendProbe 'Device'
-$cudaRuntime     = Get-ZoombieWhisperCudaRuntime -WhisperExe $whisperExe
+$cudaRuntime     = Get-ZoombieWhisperCudaRuntime -WhisperExe $whisperExe -CudaMajor $(if ($cudaMajor) { [int]$cudaMajor } else { 0 })
 if ($backendObserved) {
     Write-ZoombieLog -Level Info -Message "backend observed: $backendObserved (configured: $backendConfig)"
 } else {
     Write-ZoombieLog -Level Warn -Message "backend not observed: $(Get-Field $backendProbe 'Reason')"
 }
 # The two ways this install can claim CUDA while being unable to use it.
+#
+# POLICY: if a GPU is fitted, the install must actually be able to use it. A
+# CUDA build that cannot initialise is therefore not a warning but a FAILURE -
+# leaving it in place is what let a 3080 transcribe on the CPU for hours while
+# every report said "cuda". A machine with no GPU (cpu/vulkan-only) is normal
+# and is not affected: it has no CUDA build to initialise in the first place.
 if ($backendConfig -eq 'cuda' -and -not $cudaRuntime.Ready) {
     Write-ZoombieLog -Level Warn -Message "CUDA build is missing its runtime: $($cudaRuntime.Missing -join ', ')"
 }
+$cudaInitFailed = $false
 if ($backendConfig -eq 'cuda' -and $backendObserved -and $backendObserved -ne 'cuda') {
+    $cudaInitFailed = $true
     Write-ZoombieLog -Level Warn -Message "backend MISMATCH: configured cuda but whisper initialised '$backendObserved' - $(Get-Field $backendProbe 'Reason')"
 }
 
@@ -1082,6 +1144,11 @@ $manifest['whisper']        = [ordered]@{
     tag     = Get-Field $whisperInfo 'Tag'
     asset   = Get-Field $whisperInfo 'Asset'
     backend = Get-Field $whisperInfo 'Backend'
+    # backendDetected is the CURRENT machine's hardware verdict, kept beside
+    # `backend` (the installed build) so a machine that gained or lost a GPU is
+    # visible in the record instead of being masked by a sticky old value.
+    backendDetected = $hw.backend
+    backendRecomputed = [bool]((Get-Field $whisperInfo 'Backend') -eq $hw.backend)
     # Recorded separately from `backend` because they answer different
     # questions: `backend` is what we asked for, `backendObserved` is what
     # whisper-cli can really initialise. They diverge when the CUDA runtime is
@@ -1089,10 +1156,12 @@ $manifest['whisper']        = [ordered]@{
     backendObserved  = $backendObserved
     cudaRuntimeReady = $cudaRuntime.Ready
     cudaRuntime      = [ordered]@{
-        gpuModule = $cudaRuntime.GpuModule
-        present   = @($cudaRuntime.Present)
-        missing   = @($cudaRuntime.Missing)
-        version   = (Get-ZoombieCublasProvision).version
+        gpuModule  = $cudaRuntime.GpuModule
+        cublasMajor = $cudaRuntime.CublasMajor
+        present    = @($cudaRuntime.Present)
+        missing    = @($cudaRuntime.Missing)
+        warnings   = @($cudaRuntime.Warnings)
+        version    = $cudaRuntime.ProvisionVersion
     }
 }
 $manifest['model']          = [ordered]@{
@@ -1131,22 +1200,47 @@ if (-not (Test-Path (Get-ZoombieEnvPath -Child 'models')))            { $missing
 if ($script:Check -and -not (Get-Field $pdfInfo 'Ok' $false))     { $missing += 'pdf-deps' }
 if ($script:Check -and -not (Get-Field $pdfInfo 'Tesseract'))     { $missing += 'tesseract (optional)' }
 
+# POLICY enforcement: a GPU is fitted and the build is CUDA, yet the backend
+# cannot initialise. That is a hard failure, not a note - the whole point is that
+# this machine must not silently transcribe on the CPU. A CPU/Vulkan-only
+# machine is unaffected (($hw.backend -ne 'cuda')), and CHECK/DRY-RUN stay
+# informational because they are allowed to inspect an unfinished install.
+$cudaPolicyFailed = ($backendConfig -eq 'cuda' -and
+                     ($cudaInitFailed -or -not $cudaRuntime.Ready) -and
+                     -not $script:Check -and -not $script:DryRun)
+if ($cudaPolicyFailed) {
+    Write-ZoombieLog -Level Warn -Message ("GPU policy: a CUDA-capable GPU is fitted but the CUDA backend cannot initialise; " +
+        "refusing to leave an install that would silently run on the CPU")
+}
+
 if ($script:Check) {
     Write-ZoombieLog -Level Step -Message "CHECK complete. Missing: $(if ($missing) { $missing -join ', ' } else { 'none' })"
 }
 
 # In CHECK/DRY-RUN, "missing" simply means "not installed yet" and is expected.
-$ok = ($missing.Count -eq 0) -or ($script:Check) -or ($script:DryRun)
+$ok = (($missing.Count -eq 0) -or ($script:Check) -or ($script:DryRun)) -and -not $cudaPolicyFailed
 $resultData = [ordered]@{
-    mode     = $mode
-    root     = $root
-    cli      = $cliPath
-    skills   = @($skillResults)
-    missing  = $missing
-    changes  = @($script:Changes)
-    manifest = $manifest
+    mode       = $mode
+    root       = $root
+    cli        = $cliPath
+    skills     = @($skillResults)
+    missing    = $missing
+    changes    = @($script:Changes)
+    gpuPolicy  = [ordered]@{
+        enforced          = [bool]$cudaPolicyFailed
+        hardwareBackend   = $hw.backend
+        installedBackend  = $backendConfig
+        backendObserved   = $backendObserved
+        cudaRuntimeReady  = $cudaRuntime.Ready
+    }
+    manifest   = $manifest
 }
-Write-ZoombieResult -Action 'setup' -Ok $ok -Data $resultData -ErrorMessage $(if ($missing.Count -gt 0 -and -not $script:Check) { "Missing after setup: $($missing -join ', ')" } else { $null })
+$errorMessage = if ($cudaPolicyFailed) {
+    "a CUDA-capable GPU is fitted but the CUDA backend cannot initialise (observed '$backendObserved'); the install would silently use the CPU"
+} elseif ($missing.Count -gt 0 -and -not $script:Check) {
+    "Missing after setup: $($missing -join ', ')"
+} else { $null }
+Write-ZoombieResult -Action 'setup' -Ok $ok -Data $resultData -ErrorMessage $errorMessage
 
 # Explicit process exit so the thin bootstrap (and CI) can chain on the result.
 if ($ok) { exit 0 } else { exit 1 }

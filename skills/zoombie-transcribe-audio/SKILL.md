@@ -1,6 +1,6 @@
 ---
 name: zoombie-transcribe-audio
-cvrm-zoombie-version: 3.2.0
+cvrm-zoombie-version: 3.3.0
 description: Transcribe an audio file to text (TXT and SRT, plus optional readable Markdown and summary) using a local whisper.cpp binary with a CUDA/Vulkan/CPU backend. Use when the user wants a speech-to-text transcript, subtitles, SRT/TXT output, or a cleaned-up readable version of a recording. Always inspects the project, proposes transcript output paths, and confirms the destination before writing anything.
 ---
 
@@ -27,8 +27,12 @@ if (-not $cli) { throw "zoombie CLI not found. Run scripts/setup.ps1 first." }
 Then call it — this is the only command this skill needs:
 
 ```powershell
-& $cli transcribe -Source "<audio>" -Output "<confirmed-basename>" [-Language auto] [-Srt] [-Force]
+& $cli transcribe -Source "<audio>" -Output "<confirmed-basename>" [-Language auto] [-Srt] [-Force] [-NoGpu] [-NoFlashAttn] [-Threads N] [-AllowCpuFallback]
 ```
+
+`-NoGpu` forces a deliberate CPU run; `-AllowCpuFallback` permits a CPU run on a
+machine whose GPU is configured and usable. You should need neither normally —
+see the GPU policy below.
 
 If the installed CLI is missing entirely, fall back to the repo copy:
 
@@ -73,11 +77,20 @@ do anything special — just pass the paths the user confirmed.
 ## Notes
 
 - Never overwrite without asking; pass `-Force` only with the user's consent.
-- If the CLI returns `ok:false`, report `error` plainly. A GPU/driver mismatch
-  is retried with CPU (`-ng`) before failing, and `data.fallbackReason` says so.
+- If the CLI returns `ok:false`, report `error` plainly.
+- **A CPU run on a GPU machine is a failure, not a warning.** When a usable GPU
+  backend is configured, the CLI refuses to return a CPU transcript: it returns
+  `ok:false` with an `error` naming the reason (most often an incomplete CUDA
+  runtime, e.g. a missing `cublas64_*.dll`), and `data.logPath` points at the
+  preserved whisper log. Pass `-NoGpu` only if the user explicitly wants the CPU.
+  A machine with no GPU is unaffected and transcribes on the CPU normally.
+- The GPU retry is narrow: it only re-runs on the CPU when the failure looks like
+  a GPU failure. An unrelated error (bad model, unsupported codec) surfaces
+  directly instead of being masked by a CPU re-run.
 - Read `data.deviceUsed` and `data.realtimeFactor` and report them. On a GPU
-  machine `deviceUsed` must be `cuda` and `realtimeFactor` well below `1.0`; a
-  CPU device, or `data.silentCpuFallback: true`, means the run was many times
-  slower than the hardware allows and should be reported, not glossed over.
+  machine `deviceUsed` must be `cuda` (or `vulkan`) and `realtimeFactor` well
+  below `1.0`. `deviceSelected` proves a GPU device was actually used, whereas
+  `backendInitialised` only means the backend loaded. `gpuAttemptWallMs` is the
+  time wasted by an abandoned GPU attempt before a CPU retry.
 - Shell: PowerShell. If a command fails with *"is not recognized"*, the runner
   is `cmd.exe`; wrap it as `powershell -NoProfile -Command "<one-line>"`.

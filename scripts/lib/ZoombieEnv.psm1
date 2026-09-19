@@ -23,9 +23,10 @@ Set-StrictMode -Version Latest
 # ---------------------------------------------------------------------------
 
 # Marker written into every SKILL.md we own. Bump when skill content changes.
-# 3.2.0: the CLIs now report the OBSERVED backend (deviceUsed) and the CUDA
-# runtime requirement, so the skills' front matter describes different behaviour.
-$script:ZoombieSkillVersion = '3.2.0'
+# 3.3.0: the GPU-fits policy (fail when a usable GPU exists but was not used),
+# probe-unavailable handled as unknown rather than cpu, and capability-probed
+# flash attention / thread flags all change reported behaviour.
+$script:ZoombieSkillVersion = '3.3.0'
 
 # Marker key written into SKILL.md front matter to prove ownership.
 $script:ZoombieMarkerKey = 'cvrm-zoombie-version'
@@ -544,27 +545,81 @@ function Copy-ZoombieIntoSafeWork {
 # reproducible without installing the CUDA Toolkit: the archived GPU build,
 # the manifest and the DLLs all agree on the 11.x cuBLAS ABI (repo hosts
 # today's asset; NVIDIA redistributes 11.x forever, so `-Force` can refresh).
-$script:ZoombieCublasDllNames    = @('cublas64_11.dll', 'cublasLt64_11.dll')
+# The CUDA major version this table can actually satisfy. It is NOT a cosmetic
+# pin: ggml-cuda.dll loads cuBLAS by major-versioned name (cublas64_11.dll), so
+# an asset built against a different major needs a different runtime. Keying the
+# runtime off the ASSET rather than hard-coding 11 is what stops a future
+# "cublas64_12.dll" install from passing a "runtime present" check while the GPU
+# silently never initialises.
+$script:ZoombieCublasDefaultMajor = 11
 
-$script:ZoombieCudaRedistVersion = '11.11.3.6'
-$script:ZoombieCudaRedistUrl     = 'https://developer.download.nvidia.com/compute/cuda/redist/libcublas/windows-x86_64/libcublas-windows-x86_64-11.11.3.6-archive.zip'
-$script:ZoombieCudaRedistSha256  = '67B0934A6359E4EE26FFF823C356021589D392C4FD49CA12624F570EDC08E2B9'
+# Per-major cuBLAS provisioning records. Each row is one NVIDIA redist archive
+# with a published sha256, so "provisioning" never means "install the CUDA
+# Toolkit", and adding a major means adding one verified row - nothing more.
+# An asset whose major is absent here is refused at setup time (see
+# Install-CublasRuntime) instead of being left without the DLLs it loads.
+$script:ZoombieCublasProvisions = @{
+    11 = [ordered]@{
+        major   = 11
+        version = '11.11.3.6'
+        url     = 'https://developer.download.nvidia.com/compute/cuda/redist/libcublas/windows-x86_64/libcublas-windows-x86_64-11.11.3.6-archive.zip'
+        sha256  = '67B0934A6359E4EE26FFF823C356021589D392C4FD49CA12624F570EDC08E2B9'
+        dlls    = @('cublas64_11.dll', 'cublasLt64_11.dll')
+    }
+}
+
+function Get-ZoombieCublasDefaultMajor {
+    <#
+    .SYNOPSIS
+        The cuBLAS major version the provisioning table falls back to.
+    #>
+    [CmdletBinding()]
+    param()
+    return $script:ZoombieCublasDefaultMajor
+}
 
 function Get-ZoombieCublasProvision {
     <#
     .SYNOPSIS
-        The deterministic cuBLAS runtime provisioning record (names, version,
-        URL, sha256) so installers and reports agree on one source of truth.
+        The deterministic cuBLAS runtime provisioning record (major, names,
+        version, URL, sha256) so installers and reports agree on one source of
+        truth.
+
+    .DESCRIPTION
+        Returns $null for a major that has no verified redist row pinned. That
+        is deliberate: the caller must then refuse the install (naming the
+        asset and the missing major) rather than download an unverified binary
+        or leave ggml-cuda.dll without the runtime it loads.
     #>
     [CmdletBinding()]
-    param()
-    return [ordered]@{
-        version = $script:ZoombieCudaRedistVersion
-        url     = $script:ZoombieCudaRedistUrl
-        sha256  = $script:ZoombieCudaRedistSha256
-        dlls    = @($script:ZoombieCublasDllNames)
-    }
+    param([int]$CudaMajor = 0)
+    if ($CudaMajor -le 0) { $CudaMajor = $script:ZoombieCublasDefaultMajor }
+    if (-not $script:ZoombieCublasProvisions.ContainsKey($CudaMajor)) { return $null }
+    return $script:ZoombieCublasProvisions[$CudaMajor]
 }
+
+function Get-ZoombieCudaMajorFromAssetName {
+    <#
+    .SYNOPSIS
+        Extract the CUDA major version a whisper.cpp asset was built against.
+
+    .DESCRIPTION
+        ggml-org names its assets after the CUDA toolkit they were built with
+        (e.g. `whisper-cublas-11.8.0-bin-x64.zip`). Parsing that name is how the
+        installer knows which cuBLAS runtime the asset will load, instead of
+        assuming 11 forever. Returns $null when the name carries no version, in
+        which case the caller falls back to the default major.
+    #>
+    [CmdletBinding()]
+    param([Parameter(Mandatory)][AllowNull()][string]$Name)
+    if (-not $Name) { return $null }
+    if ($Name -match 'cublas-(\d+)[.\-_]') { return [int]$Matches[1] }
+    if ($Name -match '\bcuda[-_ ]?(\d+)[.\-_]') { return [int]$Matches[1] }
+    return $null
+}
+
+# Cache for the per-exe capability probe, so a single run reads --help once.
+$script:ZoombieWhisperCapabilityCache = @{}
 
 function Get-ZoombieWhisperCudaRuntime {
     <#
@@ -572,35 +627,65 @@ function Get-ZoombieWhisperCudaRuntime {
         Report whether the CUDA build of whisper.cpp can actually initialise.
 
     .DESCRIPTION
-        A CUDA build needs two things side by side next to whisper-cli.exe:
-        ggml-cuda.dll (in the asset) and the cuBLAS runtime that ggml-cuda.dll
-        loads (NOT in the asset). Checking both is what turns "we downloaded the
-        CUDA asset" into "the CUDA backend can really be used", and it is what
-        names precisely which DLL is missing when it cannot.
+        A CUDA build needs, side by side next to whisper-cli.exe:
+          * ggml-cuda.dll (shipped in the asset), and
+          * the cuBLAS runtime ggml-cuda.dll loads by MAJOR-versioned name
+            (cublas64_<major>.dll / cublasLt64_<major>.dll), which the asset
+            does NOT ship.
 
-        Only meaningful for a CUDA build - a CPU/Vulkan install has no
-        ggml-cuda.dll and correctly reports Ready=$false with no Missing list.
+        The required major comes from the asset (see
+        Get-ZoombieCudaMajorFromAssetName) or from whatever cublas64_*.dll is
+        already present, so the check cannot be fooled by a runtime of the
+        wrong major sitting in the folder.
+
+        Three states are kept distinct, because conflating them is what made a
+        broken CUDA install look healthy:
+          * DirMissing  - there is no whisper folder (not installed), which is
+                          NOT "all DLLs are missing";
+          * no GpuModule - a CPU/Vulkan build, where cuBLAS is irrelevant;
+          * Ready       - a CUDA build whose own runtime is complete.
+
+        Sibling CUDA DLLs that are loaded but not provisioned here (cudart64_*)
+        are reported in Warnings rather than Missing, so readiness still means
+        "the buyer's DLLs we install", not "every possible DLL".
 
     .OUTPUTS
-        A hashtable: @{ Exe; Dir; GpuModule; Present; Missing; Ready }
+        A hashtable:
+        @{ Exe; Dir; DirMissing; GpuModule; CublasMajor; Present; Missing;
+           Warnings; Ready; ProvisionVersion }
     #>
     [CmdletBinding()]
-    param([Parameter(Mandatory)][AllowNull()][string]$WhisperExe)
+    # NOT [Parameter(Mandatory)]: under PowerShell, a Mandatory [string] coerces a
+    # $null argument to '' and then REJECTS it as an empty string, so a missing or
+    # uninstalled toolchain produced an opaque parameter-binding error instead of
+    # this function's own "not installed" result. AllowNull + AllowEmptyString
+    # keeps the diagnostic meaningful when there is no whisper-cli.exe yet.
+    param(
+        [AllowNull()][AllowEmptyString()][string]$WhisperExe,
+        [int]$CudaMajor = 0
+    )
 
     $result = [ordered]@{
-        Exe       = $WhisperExe
-        Dir       = $null
-        GpuModule = $false
-        Present   = @()
-        Missing   = @()
-        Ready     = $false
+        Exe              = $WhisperExe
+        Dir              = $null
+        DirMissing       = $false
+        GpuModule        = $false
+        CublasMajor      = $null
+        Present          = @()
+        Missing          = @()
+        Warnings         = @()
+        Ready            = $false
+        ProvisionVersion = $null
     }
     if (-not $WhisperExe) { return $result }
 
     $dir = Split-Path -Parent $WhisperExe
     $result.Dir = $dir
     if (-not (Test-Path -LiteralPath $dir)) {
-        $result.Missing = @($script:ZoombieCublasDllNames)
+        # No whisper folder at all means "not installed yet". Reporting every
+        # cuBLAS DLL as missing here was a false alarm on CPU-only installs,
+        # where the runtime was never relevant in the first place.
+        $result.DirMissing = $true
         return $result
     }
 
@@ -609,42 +694,39 @@ function Get-ZoombieWhisperCudaRuntime {
     # false alarm; report the runtime state only for a CUDA build.
     if (-not $result.GpuModule) { return $result }
 
-    foreach ($dll in $script:ZoombieCublasDllNames) {
+    # Required major: explicit wins, else infer from an existing cublas64_N.dll,
+    # else the default. Inferring from what is present keeps a re-run honest
+    # about the runtime the installed asset actually expects.
+    $required = $CudaMajor
+    if ($required -le 0) {
+        $existing = @(Get-ChildItem -LiteralPath $dir -Filter 'cublas64_*.dll' -ErrorAction SilentlyContinue)
+        if ($existing.Count -gt 0 -and $existing[0].Name -match 'cublas64_(\d+)\.dll') {
+            $required = [int]$Matches[1]
+        } else {
+            $required = $script:ZoombieCublasDefaultMajor
+        }
+    }
+    $result.CublasMajor = $required
+
+    $spec = Get-ZoombieCublasProvision -CudaMajor $required
+    if ($spec) { $result.ProvisionVersion = $spec.version }
+    $names = if ($spec) { @($spec.dlls) } else { @("cublas64_$required.dll", "cublasLt64_$required.dll") }
+
+    foreach ($dll in $names) {
         $dllPath = Join-Path $dir $dll
         if (Test-Path -LiteralPath $dllPath) { $result.Present += $dll }
         else { $result.Missing += $dll }
     }
+
+    # Loaded but not provisioned by us: report, never block on it.
+    foreach ($pattern in @('cudart64_*.dll', 'ggml-base.dll')) {
+        if (-not @(Get-ChildItem -LiteralPath $dir -Filter $pattern -ErrorAction SilentlyContinue).Count) {
+            $result.Warnings += "no $pattern beside whisper-cli.exe"
+        }
+    }
+
     $result.Ready = ($result.Missing.Count -eq 0)
     return $result
-}
-
-function Test-ZoombieZipEntry {
-    <#
-    .SYNOPSIS
-        $true when a zip archive contains an entry whose name matches $Pattern.
-
-    .DESCRIPTION
-        Reads the archive's central directory only (no extraction), so an
-        installer can ask "does this asset ship cuBLAS?" before downloading and
-        unpacking 400 MB, and can locate the entry path without guessing it.
-    #>
-    [CmdletBinding()]
-    param(
-        [Parameter(Mandatory)][string]$ZipPath,
-        [Parameter(Mandatory)][string]$Pattern
-    )
-    if (-not (Test-Path -LiteralPath $ZipPath)) { return $false }
-    try {
-        Add-Type -AssemblyName System.IO.Compression.FileSystem -ErrorAction SilentlyContinue
-        $zip = [System.IO.Compression.ZipFile]::OpenRead($ZipPath)
-        try {
-            return [bool](@($zip.Entries | Where-Object { $_.FullName -match $Pattern }) | Select-Object -First 1)
-        }
-        finally { $zip.Dispose() }
-    }
-    catch {
-        return $false
-    }
 }
 
 function Read-ZoombieWhisperLog {
@@ -659,7 +741,9 @@ function Read-ZoombieWhisperLog {
         parsers below treat as "no information" rather than "CPU".
     #>
     [CmdletBinding()]
-    param([Parameter(Mandatory)][AllowNull()][string]$Path)
+    # Not Mandatory for the same reason as Get-ZoombieWhisperCudaRuntime: an empty
+    # path must yield an empty array, not a binding error.
+    param([AllowNull()][AllowEmptyString()][string]$Path)
     if (-not $Path -or -not (Test-Path -LiteralPath $Path)) { return @() }
     try { return @(Get-Content -LiteralPath $Path -ErrorAction Stop) }
     catch { return @() }
@@ -674,27 +758,39 @@ function Get-ZoombieWhisperDeviceInfo {
         The signals are checked in a deliberate order, because the later ones
         are also present in the negative cases:
 
-          1. `whisper_backend_init_gpu: using <NAME> backend` - definitive for a
-             real transcription: the GPU backend was actually selected.
+          1. `whisper_backend_init_gpu: using <NAME> backend` - the GPU backend
+             was actually SELECTED for decoding. This is the only signal that
+             proves the GPU was used.
           2. `use gpu = 0` - the caller disabled the GPU (`-ng`). This must be
              checked BEFORE the `loaded CUDA backend` signal, because `-ng` still
              loads the CUDA module and would otherwise be reported as a GPU run.
           3. `ggml_cuda_init: found <n> CUDA devices` / `load_backend: loaded
-             CUDA backend` - the CUDA backend initialised. This is what the
+             CUDA backend` - the CUDA backend INITIALISED. This is what the
              `--help` capability probe shows (it initialises backends but never
-             loads a model, so signal 1 never appears), and it is exactly the
-             state that fails when the cuBLAS runtime is missing.
-          4. `load_backend: loaded Vulkan backend` - same, for Vulkan.
-        A successful exit with device `cpu` is the silent fallback this whole
-        report exists to expose, so a Reason is always produced for it.
+             loads a model, so signal 1 never appears). It is capability, not
+             usage, so it must never be reported as "the GPU was used": a
+             successful exit whose only GPU signal is this one is still a silent
+             CPU fallback.
+
+        Device is therefore 'cuda'/'vulkan' ONLY when the device was actually
+        selected. DeviceSelected and BackendInitialised expose the two facts
+        separately, so a caller can require proof (transcribe) or accept mere
+        capability (the --help probe). A Reason is always produced when the run
+        did not demonstrably use a GPU.
 
     .OUTPUTS
-        A hashtable: @{ Device; DeviceName; Reason }
+        A hashtable: @{ Device; DeviceName; DeviceSelected; BackendInitialised; Reason }
     #>
     [CmdletBinding()]
     param([AllowNull()][string[]]$LogLines)
 
-    $info = [ordered]@{ Device = 'cpu'; DeviceName = $null; Reason = $null }
+    $info = [ordered]@{
+        Device             = 'cpu'
+        DeviceName         = $null
+        DeviceSelected     = $false
+        BackendInitialised = $false
+        Reason             = $null
+    }
     $text = if ($LogLines) { ($LogLines -join "`n") } else { '' }
     if (-not $text.Trim()) {
         $info.Reason = 'whisper wrote no log output; the device could not be verified'
@@ -703,26 +799,35 @@ function Get-ZoombieWhisperDeviceInfo {
 
     # 1. The backend that was actually selected (definitive, real runs only).
     if ($text -match 'whisper_backend_init_gpu:\s+using\s+(\S+)\s+backend') {
-        $info.DeviceName = $Matches[1]
-        $info.Device     = if ($Matches[1] -match 'Vulkan') { 'vulkan' } else { 'cuda' }
+        $info.DeviceName         = $Matches[1]
+        $info.Device             = if ($Matches[1] -match 'Vulkan') { 'vulkan' } else { 'cuda' }
+        $info.DeviceSelected     = $true
+        $info.BackendInitialised = $true
         return $info
     }
 
     # 2. GPU explicitly disabled by the caller (-ng) - a deliberate CPU run.
     if ($text -match 'use gpu\s*=\s*0') {
         $info.Reason = 'GPU explicitly disabled for this run (-ng): use gpu = 0'
+        $info.BackendInitialised = ($text -match 'load_backend:\s+loaded CUDA backend' -or
+                                    $text -match 'ggml_cuda_init:\s*found \d+ CUDA devices' -or
+                                    $text -match 'load_backend:\s+loaded Vulkan backend')
         return $info
     }
 
-    # 3. A GPU backend initialised (this is what the --help probe shows).
+    # 3. A GPU backend initialised but NO device was selected: capability only,
+    # not usage. Reported as cpu (the device that actually decoded), with the
+    # distinction preserved in BackendInitialised.
     if ($text -match 'load_backend:\s+loaded CUDA backend' -or $text -match 'ggml_cuda_init:\s*found \d+ CUDA devices') {
-        $info.DeviceName = 'CUDA'
-        $info.Device     = 'cuda'
+        $info.DeviceName         = 'CUDA'
+        $info.BackendInitialised = $true
+        $info.Reason             = 'a CUDA backend initialised but no device was selected for decoding (silent CPU fallback)'
         return $info
     }
     if ($text -match 'load_backend:\s+loaded Vulkan backend') {
-        $info.DeviceName = 'Vulkan'
-        $info.Device     = 'vulkan'
+        $info.DeviceName         = 'Vulkan'
+        $info.BackendInitialised = $true
+        $info.Reason             = 'a Vulkan backend initialised but no device was selected for decoding (silent CPU fallback)'
         return $info
     }
 
@@ -779,7 +884,9 @@ function Invoke-ZoombieWhisperBackendProbe {
         the probe could not run at all (e.g. whisper-cli.exe is absent).
     #>
     [CmdletBinding()]
-    param([Parameter(Mandatory)][AllowNull()][string]$WhisperExe)
+    # See Get-ZoombieWhisperCudaRuntime: not Mandatory, so a $null/empty path is
+    # reported as "not found" rather than raising a binding error.
+    param([AllowNull()][AllowEmptyString()][string]$WhisperExe)
 
     $result = [ordered]@{ Device = $null; DeviceName = $null; Reason = $null; Log = @() }
     if (-not $WhisperExe -or -not (Test-Path -LiteralPath $WhisperExe -PathType Leaf)) {
@@ -798,11 +905,92 @@ function Invoke-ZoombieWhisperBackendProbe {
 
     $lines = @($text -split "`r?`n" | Where-Object { $_.Trim() })
     $result.Log = $lines
+
+    # No captured output at all is "unknown", NOT "cpu". Returning 'cpu' here is
+    # what made a build whose --help exits before backend init look like a failed
+    # GPU machine, and turned the self-test into a false regression.
+    if ($lines.Count -eq 0) {
+        $result.Device = $null
+        $result.Reason = 'whisper-cli --help produced no output; the backend could not be probed'
+        return $result
+    }
+
     $info = Get-ZoombieWhisperDeviceInfo -LogLines $lines
+    # --help never loads a model, so the device-selected signal (1) does not
+    # appear even on a healthy CUDA box. Capability is therefore taken from
+    # BackendInitialised, while DeviceSelected stays reserved for real runs.
+    if ($info.BackendInitialised -and -not $info.DeviceSelected) {
+        $result.Device     = if ($info.DeviceName -match 'Vulkan') { 'vulkan' } else { 'cuda' }
+        $result.DeviceName = $info.DeviceName
+        $result.Reason     = "backend initialised ($($info.DeviceName)); reported as capability, not as a selected device"
+        return $result
+    }
     $result.Device = $info.Device
     $result.DeviceName = $info.DeviceName
     $result.Reason = $info.Reason
     return $result
+}
+
+function Get-ZoombieWhisperCapabilities {
+    <#
+    .SYNOPSIS
+        Which optional whisper-cli flags the installed build advertises.
+
+    .DESCRIPTION
+        Flags such as flash attention (`-fa`), a thread count (`-t`) and the VAD
+        options exist only in some builds, and passing an unknown flag aborts the
+        run. `whisper-cli --help` lists exactly the flags the binary accepts, so
+        it is read once here and cached per exe path. This is the "probe the
+        binary, never assume" rule: a false negative merely omits a flag, while a
+        false positive fails the run.
+
+    .OUTPUTS
+        A hashtable with a boolean per probed flag, plus Ok (the probe ran) and
+        Help (the raw text, for reporting when Ok is false).
+    #>
+    [CmdletBinding()]
+    # See Get-ZoombieWhisperCudaRuntime: not Mandatory, so an uninstalled
+    # toolchain reports "no capabilities" instead of failing to bind.
+    param([AllowNull()][AllowEmptyString()][string]$WhisperExe)
+
+    $empty = [ordered]@{
+        Checked = $false; Ok = $false; Raw = ''
+        FlashAttention = $false; Threads = $false
+        Vad = $false; VadModel = $false; BestOf = $false; NoFallback = $false
+    }
+    if (-not $WhisperExe -or -not (Test-Path -LiteralPath $WhisperExe -PathType Leaf)) {
+        # The executable is absent, so there is nothing honest to report. All
+        # flags stay false, which makes the caller omit them rather than guess.
+        return $empty
+    }
+
+    if ($script:ZoombieWhisperCapabilityCache.ContainsKey($WhisperExe)) {
+        return $script:ZoombieWhisperCapabilityCache[$WhisperExe]
+    }
+
+    $prevEap = $ErrorActionPreference; $ErrorActionPreference = 'Continue'
+    try { $raw = (& $WhisperExe '--help' 2>&1 | Out-String) }
+    catch { $raw = '' }
+    finally { $ErrorActionPreference = $prevEap }
+
+    $caps = [ordered]@{
+        Checked = $true; Ok = $false; Raw = ''
+        FlashAttention = $false; Threads = $false
+        Vad = $false; VadModel = $false; BestOf = $false; NoFallback = $false
+    }
+    if ($raw -and $raw.Trim()) {
+        $caps.Ok = $true
+        $caps.Raw = $raw
+        if ($raw -match '(?m)^\s*-fa\b|--flash-attn\b')            { $caps.FlashAttention = $true }
+        if ($raw -match '(?m)^\s*-t\b[^\r\n]*threads|--threads\b') { $caps.Threads = $true }
+        if ($raw -match '--vad\b')                                  { $caps.Vad = $true }
+        if ($raw -match '(?m)^\s*-vm\b|--vad-model\b')             { $caps.VadModel = $true }
+        if ($raw -match '(?m)^\s*-bs\b|--beam-size\b|--best-of\b') { $caps.BestOf = $true }
+        if ($raw -match '(?m)^\s*-nf\b|--no-fallback\b')           { $caps.NoFallback = $true }
+    }
+
+    $script:ZoombieWhisperCapabilityCache[$WhisperExe] = $caps
+    return $caps
 }
 
 function Get-ZoombieWhisperTimings {
@@ -840,6 +1028,64 @@ function Get-ZoombieWhisperTimings {
         }
     }
     return $result
+}
+
+function Test-ZoombieWhisperGpuFailure {
+    <#
+    .SYNOPSIS
+        Does a non-zero whisper exit LOOK like a GPU failure worth retrying?
+
+    .DESCRIPTION
+        The CPU retry restarts the WHOLE job, so it must only fire when the
+        failure is plausibly the GPU's. The old code retried on ANY non-zero
+        exit, which means a bad model path or an unsupported codec was silently
+        re-run at CPU speed and the real cause was buried under the retry's own
+        output.
+
+        An EMPTY log with a non-zero exit is treated as retryable: there is no
+        evidence either way, and refusing the retry there would turn a transient
+        native crash into a hard failure. A log that shows a non-GPU error is
+        not retried.
+
+    .OUTPUTS
+        A boolean.
+    #>
+    [CmdletBinding()]
+    param(
+        [int]$ExitCode,
+        [AllowNull()][string[]]$LogLines
+    )
+    if ($ExitCode -eq 0) { return $false }
+
+    $text = if ($LogLines) { ($LogLines -join "`n") } else { '' }
+    # No captured output: cannot attribute the failure, so allow the retry
+    # rather than convert an unexplained crash into a guaranteed failure.
+    if (-not $text.Trim()) { return $true }
+
+    if ($text -match 'gpu|ggml_backend_cuda|ggml_cuda_init|CUDA error|cudaError|CUDA_ERROR|out of memory|CUBLAS_STATUS|cublas|cublasLt|device-side|uncorrectable|invalid device|no CUDA devices|failed to load [^\r\n]*cuda|driver') {
+        return $true
+    }
+    return $false
+}
+
+function Get-ZoombieCpuThreadCount {
+    <#
+    .SYNOPSIS
+        A sensible default thread count for the CPU path, or $null.
+
+    .DESCRIPTION
+        Used for `whisper-cli -t` on a deliberate CPU run (and on the retry),
+        which is exactly where the build's own default hurts most. The logical
+        processor count is taken from the environment rather than a CIM query so
+        this stays cheap and dependency-free; $null means "let whisper decide"
+        rather than guessing a number the machine may not have.
+    #>
+    [CmdletBinding()]
+    param()
+    $n = 0
+    if ($env:NUMBER_OF_PROCESSORS) { [void][int]::TryParse($env:NUMBER_OF_PROCESSORS, [ref]$n) }
+    if ($n -gt 0) { return $n }
+    return $null
 }
 
 # ---------------------------------------------------------------------------
@@ -933,13 +1179,17 @@ Export-ModuleMember -Function @(
     'New-ZoombieAsciiTempDir',
     'Copy-ZoombieIntoSafeWork',
     'Get-ZoombieCublasProvision',
+    'Get-ZoombieCublasDefaultMajor',
+    'Get-ZoombieCudaMajorFromAssetName',
     'Get-ZoombieWhisperCudaRuntime',
-    'Test-ZoombieZipEntry',
     'Read-ZoombieWhisperLog',
     'Get-ZoombieWhisperDeviceInfo',
     'Get-ZoombieWhisperDevice',
     'Invoke-ZoombieWhisperBackendProbe',
+    'Get-ZoombieWhisperCapabilities',
     'Get-ZoombieWhisperTimings',
+    'Test-ZoombieWhisperGpuFailure',
+    'Get-ZoombieCpuThreadCount',
     'Write-ZoombieResult',
     'Write-ZoombieLog',
     'Set-ZoombieUtf8Console'

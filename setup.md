@@ -206,11 +206,19 @@ The self-test:
 5. verifies the transcript contains all seven key words, and that the run really
    used the configured backend (`deviceUsed`). On a CUDA machine a CPU run is a
    hard failure, because whisper.cpp exits 0 while quietly falling back,
-6. reports the measured `realtimeFactor` for the run,
-6. when the PDF toolchain is installed, generates a small PDF and runs `readpdf`
-   into the same Cyrillic destination, asserting the Markdown is correct
-   (otherwise this step is skipped),
-7. cleans up.
+6. re-runs the same audio with `-NoGpu` and asserts a deliberate CPU run succeeds
+   and reports `deviceUsed: cpu` (proving the GPU policy does not break a
+   legitimate CPU run),
+7. simulates a CUDA build with no runtime and with a wrong-major runtime, and
+   asserts each is reported as NOT ready — the exact state that used to look
+   healthy,
+8. checks device classification: a log showing only a *loaded* CUDA backend
+   classifies as `cpu` (capability, not use), and a `-ng` run is never `cuda`,
+9. reports the measured `realtimeFactor` for the run,
+10. when the PDF toolchain is installed, generates a small PDF and runs `readpdf`
+    into the same Cyrillic destination, asserting the Markdown is correct
+    (otherwise this step is skipped),
+11. cleans up.
 
 A pass ends with `PASS: Cyrillic destination path worked end to end` and exit
 code 0. If it fails, report the `error` field from the JSON result; do not
@@ -234,9 +242,16 @@ Give the user a final table with:
 - ffmpeg and ffprobe versions and paths, and the yt-dlp version (via `python -m yt_dlp`),
 - whisper.cpp release tag + asset, the backend **configured** and the backend
   **observed** (`data.manifest.whisper.backendObserved`) plus whether the CUDA
-  runtime was provisioned (`data.manifest.whisper.cudaRuntimeReady`), and the
-  binary path. If those two backends disagree, or a CUDA machine reports no
-  cuBLAS DLLs, say so plainly: the install will run on the CPU only.
+  runtime was provisioned (`data.manifest.whisper.cudaRuntimeReady`) and for
+  which cuBLAS major (`data.manifest.whisper.cudaRuntime.cublasMajor`), and the
+  binary path. Also report `backendDetected` (the current machine's hardware
+  verdict): if it differs from the installed `backend`, the build was replaced to
+  match this machine. If the two backends disagree, or a CUDA machine reports no
+  cuBLAS DLLs, say so plainly.
+- GPU policy outcome (`data.gpuPolicy`). On a machine with a fitted GPU,
+  `setup` FAILS (`ok:false`) when the CUDA backend cannot initialise, naming the
+  reason and the preserved whisper log. Report that plainly; do not present it as
+  a working GPU install. A CPU-only machine is never subject to this.
 - model name and size,
 - PDF toolchain: the Python used and whether the dependencies installed cleanly
   (`data.manifest.pdf.ok`), and whether Tesseract was detected
@@ -258,16 +273,18 @@ cause and the fix rather than overstating the result.
 [ ] User confirmed the download, then `setup.ps1` applied
 [ ] Toolchain installed under the ASCII root %USERPROFILE%\zoombie-env
 [ ] Backend selected from hardware (cuda > vulkan > cpu) and explained
+[ ] Installed backend matches the CURRENT hardware (`backendDetected`), not a sticky value from an earlier run
 [ ] Model downloaded and recorded in env.json
 [ ] CLI deployed to zoombie-env\bin\zoombie\zoombie.ps1
-[ ] Five zoombie-* skills deployed to %USERPROFILE%\.roo\skills\ with cvrm-zoombie-version 3.2.0
+[ ] Five zoombie-* skills deployed to %USERPROFILE%\.roo\skills\ with cvrm-zoombie-version 3.3.0
 [ ] No stray .roo\skills directory outside %USERPROFILE%
 [ ] A skill invocation routes through zoombie.ps1 (not raw ffmpeg/whisper/python commands)
 [ ] PDF dependencies installed into the existing Python; Tesseract detection noted (optional)
-[ ] Backend verified, not assumed: `backendObserved` matches `backendConfigured`; on a CUDA machine the cuBLAS runtime (`cublas64_11.dll`, `cublasLt64_11.dll`) is present beside `whisper-cli.exe`
+[ ] Backend verified, not assumed: `backendObserved` matches `backendConfigured`; on a CUDA machine the cuBLAS runtime for the ASSET's major (e.g. `cublas64_11.dll`, `cublasLt64_11.dll`) is present beside `whisper-cli.exe`
+[ ] GPU policy holds: a machine with a fitted GPU reports `deviceUsed: cuda` on a real transcription, or `setup` FAILED and said why
 [ ] A real transcription reports `deviceUsed: cuda` and a `realtimeFactor` well below 1.0
 [ ] Non-ASCII (Cyrillic) paths handled: inputs isolated in ASCII work dirs
-[ ] `selftest.ps1` passed (7/7 key words, Cyrillic destination, GPU backend assertion)
+[ ] `selftest.ps1` passed (7/7 key words, Cyrillic destination, GPU assertion, deliberate `-NoGpu` run)
 [ ] `readpdf` (PDF -> Markdown) verified or reported as skipped
 [ ] No pre-existing project file was modified
 ```

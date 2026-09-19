@@ -20,11 +20,17 @@ The skills are thin wrappers that call one CLI.
   destination. Non-ASCII input names, output folders, and user profiles are safe.
 - **Clean output.** whisper runs with `-nt` (no timestamps) and its log banner
   is kept off stdout; UTF-8 is forced so non-ASCII transcript text survives.
-- **The GPU is proved, not assumed.** `env.json` records what was *intended*
-  (`backend`). Every report also carries what whisper.cpp can *actually*
-  initialise (`backendObserved`), because those diverge whenever the CUDA
-  runtime is incomplete — and a CUDA build missing its cuBLAS DLLs exits 0
-  while transcribing on the CPU.
+- **The GPU is proved, not assumed — and required when it exists.** `env.json`
+  records what was *intended* (`backend`). Every report also carries what
+  whisper.cpp can *actually* initialise (`backendObserved`), because those
+  diverge whenever the CUDA runtime is incomplete — and a CUDA build missing its
+  cuBLAS DLLs exits 0 while transcribing on the CPU. A `transcribe` on a machine
+  whose GPU fits the model therefore **fails** rather than quietly returning a
+  slow CPU transcript. A CPU-only machine (no CUDA/Vulkan backend) runs on the
+  CPU normally; `-NoGpu` forces the CPU deliberately.
+- **Optional flags are probed, not assumed.** `whisper-cli --help` decides
+  whether `-fa` (flash attention) and `-t` (threads) exist before they are
+  passed, because an unknown flag aborts the run.
 
 ## Layout
 
@@ -52,8 +58,9 @@ The installed toolchain lives outside the repo, at an ASCII path:
 %USERPROFILE%\zoombie-env\
   bin\ffmpeg.exe, ffprobe.exe
   bin\whisper\whisper-cli.exe (+ CUDA/Vulkan DLLs beside it, incl. the cuBLAS
-               runtime cublas64_11.dll/cublasLt64_11.dll, provisioned separately
-               because the whisper.cpp asset does not ship it)
+               runtime cublas64_<major>.dll/cublasLt64_<major>.dll, provisioned
+               separately because the whisper.cpp asset does not ship it; the
+               required major is read from the asset name, not hard-coded)
   bin\zoombie\zoombie.ps1, lib\ZoombieEnv.psm1, pdf\extract_pdf.py   the deployed CLI
   models\ggml-*.bin
   work\<guid>\                                    ASCII scratch for each job
@@ -148,7 +155,7 @@ $zoombie = "$env:USERPROFILE\zoombie-env\bin\zoombie\zoombie.ps1"
 & $zoombie doctor                                         # report tool status
 & $zoombie download -Source "<url>" -DownloadDir "<dir>" [-AudioOnly]
 & $zoombie extract  -Source "<video>" -Output "<out>" [-Format wav|mp3|m4a|flac]
-& $zoombie transcribe -Source "<audio>" -Output "<basename>" [-Language auto] [-Srt]
+& $zoombie transcribe -Source "<audio>" -Output "<basename>" [-Language auto] [-Srt] [-NoGpu] [-NoFlashAttn] [-Threads N] [-AllowCpuFallback]
 & $zoombie readpdf  -Source "<pdf>" -Output "<basename>" [-Ocr] [-Images] [-Pages "1-5,8"]
 & $zoombie pipeline -Source "<url-or-file>" -Output "<basename>" [-DownloadDir "<dir>"] [-Srt]
 & $zoombie clean                                          # remove scratch dirs
@@ -165,18 +172,47 @@ slowdown is impossible to miss:
 | Field | Meaning |
 |-------|---------|
 | `deviceUsed` | the device whisper used for THIS run (`cuda`, `vulkan` or `cpu`) |
+| `deviceSelected` | `true` only when a GPU backend was actually selected for decoding |
+| `backendInitialised` | `true` when the backend loaded — capability, not proof of use |
+| `gpuCapable` / `gpuRequired` | whether the GPU can initialise, and whether this run was obliged to use it |
 | `deviceName` | the backend whisper initialised, e.g. `CUDA0` |
 | `backendConfigured` | what `env.json` intended (usually equals the above) |
+| `flashAttention` / `threads` | the optional flags actually passed (capability-probed) |
 | `loadMs` / `totalMs` / `encodeMs` / `decodeMs` | the `whisper_print_timings` block |
 | `audioDurationSec` | input duration from `ffprobe` |
 | `realtimeFactor` | `totalMs` / audio duration — **lower is faster** |
 | `fallbackReason` | present when the run fell back (GPU error, or a silent CPU fallback) |
-| `silentCpuFallback` | `true` when whisper exited 0 but used no GPU device |
+| `silentCpuFallback` | `true` when a GPU backend was configured but no GPU device was used |
+| `gpuAttemptWallMs` | wall time of an abandoned GPU attempt before the CPU retry |
+| `logPath` | a preserved whisper log, written on any fallback or policy violation |
 
 `realtimeFactor` is the number to watch: roughly `0.03-0.10` is a working GPU
 (a 90-minute file in a few minutes), while `~1.0` means the CPU is doing the
 work (a 90-minute file takes about 90 minutes). The same lines are on stderr and
 in `data.log`.
+
+### GPU policy: a fitted GPU must be used
+
+If the installed backend is `cuda` or `vulkan` and the GPU can actually
+initialise, a `transcribe`/`pipeline` run that ends up on the CPU is a **failure**,
+not a warning. The GPU-retry path is also narrower than it used to be:
+
+- the CPU retry only fires when a non-zero exit *looks like* a GPU failure
+  (`cuda`, `cublas`, `out of memory`, `driver`, …). Unrelated errors — a missing
+  model, an unsupported codec — no longer trigger a full CPU re-run that hides
+  the real cause;
+- the abandoned GPU attempt's wall time is reported as `gpuAttemptWallMs`;
+- the two attempts log to separate files, so the GPU error survives.
+
+Opt out explicitly when a CPU run is what you actually want:
+
+```powershell
+& $zoombie transcribe -Source "<audio>" -Output "<base>" -NoGpu        # deliberate CPU run
+& $zoombie transcribe -Source "<audio>" -Output "<base>" -AllowCpuFallback  # permit a CPU fallback
+```
+
+A machine with no GPU is unaffected: its backend is neither `cuda` nor `vulkan`,
+so nothing is ever required of it.
 
 ### CUDA runtime requirement (why the GPU can silently not be used)
 
@@ -187,13 +223,21 @@ device and whisper.cpp falls back to the CPU **while still exiting 0**. Nothing
 in the pipeline sees a failure: `env.json` keeps saying `cuda`, and only the run
 time reveals the problem.
 
-`setup-worker.ps1` therefore provisions the matching cuBLAS 11.x runtime
-separately, from NVIDIA's CUDA 11.8 redist manifest — a single deterministic JSON
-document with one published sha256 per component, which is what makes the
-download reproducible without installing the CUDA Toolkit. The archive's sha256
-is verified before anything is copied next to the binary, and a CUDA install
-whose runtime is still incomplete is reported as missing (by exact DLL name) and
-fails loudly rather than being left silently CPU-only.
+`setup-worker.ps1` therefore provisions the matching cuBLAS runtime separately,
+from NVIDIA's redist archives — one deterministic record with one published
+sha256 per component, which is what makes the download reproducible without
+installing the CUDA Toolkit. The required **major** is derived from the selected
+asset name (`whisper-cublas-11.8.0-bin-x64.zip` → cuBLAS 11), so an asset built
+against a different CUDA major needs a different runtime instead of silently
+reusing the wrong one. A major with no pinned, hash-verified redist is **refused**
+rather than downloaded unverified. The archive's sha256 is checked before
+anything is copied next to the binary, and a CUDA install whose runtime is still
+incomplete is reported as missing (by exact DLL name) and fails loudly rather
+than being left silently CPU-only.
+
+The install also stops trusting a sticky `env.json`: the backend recorded there
+is compared with the **current** hardware probe, and a machine that gained or
+lost a GPU gets the matching build reinstalled instead of keeping the old one.
 
 To check the state at any time:
 
@@ -210,7 +254,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File scripts\setup-worker.ps1 -Ch
 The five skills in [`skills/`](skills/) are the canonical sources. They only
 inspect the project, propose paths, collect the user's confirmation, and then
 call `zoombie.ps1`. They are namespaced `zoombie-*` so their names cannot
-collide with a foreign skill, and they carry `cvrm-zoombie-version: 3.2.0`,
+collide with a foreign skill, and they carry `cvrm-zoombie-version: 3.3.0`,
 which `setup.ps1` compares to decide `up to date` vs `updated`.
 
 `zoombie-pdf-to-md` converts a PDF to Markdown. Text PDFs need nothing extra;

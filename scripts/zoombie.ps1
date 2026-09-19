@@ -59,7 +59,19 @@
     transcribe: also emit .srt subtitles.
 
 .PARAMETER NoGpu
-    transcribe: force CPU (-ng) even when a GPU backend is configured.
+    transcribe: force CPU (-ng) even when a GPU backend is configured. This is
+    the explicit opt-out, so the GPU policy below does not apply to it.
+
+.PARAMETER NoFlashAttn
+    transcribe: do not pass -fa even when the installed build supports it.
+
+.PARAMETER Threads
+    transcribe: thread count for the CPU path (-t). Default: physical cores.
+
+.PARAMETER AllowCpuFallback
+    transcribe: permit a CPU run even though a GPU backend is configured and
+    usable. The default is to FAIL in that case, because a machine whose GPU fits
+    must actually use it; a CPU/Vulkan-only machine is unaffected.
 
 .PARAMETER DryRun
     Print planned actions and emit a JSON result. Writes no artifacts.
@@ -100,6 +112,9 @@ param(
     [string]$Language = 'auto',
     [switch]$Srt,
     [switch]$NoGpu,
+    [switch]$NoFlashAttn,
+    [int]$Threads = 0,
+    [switch]$AllowCpuFallback,
     [switch]$Ocr,
     [switch]$Images,
     [string]$Pages,
@@ -218,6 +233,7 @@ function Invoke-Doctor {
     $backendObserved   = $probe.Device
     $cudaRuntime       = Get-ZoombieWhisperCudaRuntime -WhisperExe $env.whisper
     $probeReason       = $probe.Reason
+    $caps              = Get-ZoombieWhisperCapabilities -WhisperExe $env.whisper
     # Name the likely cause when the runtime DLLs are absent, so the mismatch is
     # actionable rather than a bare "cpu".
     if ($backendConfigured -eq 'cuda' -and -not $cudaRuntime.Ready) {
@@ -239,11 +255,22 @@ function Invoke-Doctor {
             deviceName        = $probe.DeviceName
             probeReason       = $probeReason
             cudaRuntime       = @{
-                gpuModule = $cudaRuntime.GpuModule
-                ready     = $cudaRuntime.Ready
-                present   = @($cudaRuntime.Present)
-                missing   = @($cudaRuntime.Missing)
-                version   = (Get-ZoombieCublasProvision).version
+                gpuModule   = $cudaRuntime.GpuModule
+                ready       = $cudaRuntime.Ready
+                cublasMajor = $cudaRuntime.CublasMajor
+                present     = @($cudaRuntime.Present)
+                missing     = @($cudaRuntime.Missing)
+                warnings    = @($cudaRuntime.Warnings)
+                version     = $cudaRuntime.ProvisionVersion
+            }
+            # The flags the installed build actually advertises, so a caller can
+            # tell "flash attention is unavailable" from "it was not requested".
+            capabilities      = @{
+                probed         = $caps.Checked
+                available      = $caps.Ok
+                flashAttention = $caps.FlashAttention
+                threads        = $caps.Threads
+                vad            = $caps.Vad
             }
         }
         model     = @{ path = $env.model; exists = ($env.model -and (Test-Path -LiteralPath $env.model)) }
@@ -397,7 +424,10 @@ function Invoke-WhisperOnSafeCopy {
         [Parameter(Mandatory)][string]$OutputBase,
         [switch]$WantSrt,
         [string]$WorkRoot,
-        [switch]$KeepWork
+        [switch]$KeepWork,
+        [switch]$NoFlashAttn,
+        [int]$Threads = 0,
+        [switch]$AllowCpuFallback
     )
     $whisper = Assert-Tool -Path $Env.whisper -Name 'whisper-cli'
     if (-not $Env.model -or -not (Test-Path -LiteralPath $Env.model)) {
@@ -422,17 +452,47 @@ function Invoke-WhisperOnSafeCopy {
     }
     $outBase = Join-Path $work 'out'
 
+    # Probe the binary ONCE for the flags it actually advertises and for whether
+    # a GPU backend can initialise at all. Optional flags (-fa, -t) exist only in
+    # some builds and an unknown flag aborts the run, so they are added only when
+    # --help lists them ("probe the binary, never assume").
+    $caps       = Get-ZoombieWhisperCapabilities -WhisperExe $whisper
+    $probeLines = if ($caps.Raw) { @($caps.Raw -split "`r?`n") } else { @() }
+    $capInfo    = Get-ZoombieWhisperDeviceInfo -LogLines $probeLines
+    $gpuCapable = [bool]$capInfo.BackendInitialised
+
+    # GPU policy input: a GPU backend is CONFIGURED for this install. Whether the
+    # machine must then actually use the GPU is decided from that plus the probe,
+    # so a CPU-only machine (backend 'cpu') is never forced into a failure.
+    $gpuBackendConfigured = ($Env.backend -eq 'cuda' -or $Env.backend -eq 'vulkan')
+    $gpuRequired = $gpuBackendConfigured -and -not $NoGpu -and -not $AllowCpuFallback
+
+    $threads = if ($Threads -gt 0) { $Threads } else { Get-ZoombieCpuThreadCount }
+
     $args = @('-m', $Env.model, '-f', $safe.InputPath, '-l', $Language,
               '-otxt', '-nt')
     if ($WantSrt) { $args += '-osrt' }
     if ($NoGpu)   { $args += '-ng' }
     $args += @('-of', $outBase)
+    # Flash attention: GPU runs only, and only when the build advertises -fa.
+    $flashAttn = $false
+    if (-not $NoGpu -and -not $NoFlashAttn -and $caps.FlashAttention) {
+        $args += '-fa'
+        $flashAttn = $true
+    }
+    # Thread count: the CPU path is exactly where it matters most, so it is set
+    # on a deliberate -ng run rather than left at the build's default.
+    if ($NoGpu -and $caps.Threads -and $threads -gt 0) { $args += @('-t', "$threads") }
 
     Write-ZoombieLog -Level Step -Message "whisper-cli (ascii-safe) -> $OutputBase"
-    Write-ZoombieLog -Level Info -Message "  work=$work  backend=$($Env.backend)  model=$(Split-Path -Leaf $Env.model)"
+    Write-ZoombieLog -Level Info -Message "  work=$work  backend=$($Env.backend)  gpuCapable=$gpuCapable  model=$(Split-Path -Leaf $Env.model)"
     if ($script:DryRun) {
         Write-ZoombieResult -Action 'transcribe' -Ok $true -Data ([ordered]@{
             dryRun = $true; work = $work; outputBase = $OutputBase; args = $args
+            capabilities = [ordered]@{
+                probed = $caps.Checked; flashAttention = $flashAttn
+                threads = $threads; gpuCapable = $gpuCapable; gpuRequired = $gpuRequired
+            }
         })
         return
     }
@@ -450,7 +510,12 @@ function Invoke-WhisperOnSafeCopy {
     # the scratch dir, so it is ASCII-safe and is removed with the work dir; the
     # transcript .txt is still written by whisper from stdout-only content.
     $whisperLog = Join-Path $work 'whisper.log'
+    # The retry gets its OWN log. Redirecting both attempts to one file truncated
+    # the GPU attempt's banner - the only evidence of WHY the fallback happened -
+    # the moment the retry started writing.
+    $retryLog       = Join-Path $work 'whisper.retry.log'
     $fallbackReason = $null
+    $gpuWallMs      = $null
     $prevUtf8 = $env:PYTHONUTF8; $env:PYTHONUTF8 = '1'
     $prevEap  = $ErrorActionPreference
     $ErrorActionPreference = 'Continue'
@@ -462,18 +527,30 @@ function Invoke-WhisperOnSafeCopy {
         # away. stderr (the banner and the timings block) goes to the log file.
         & $whisper @args 2>$whisperLog | Out-Null
         $exit = $LASTEXITCODE
-        # The GPU path may fail mid-run (driver mismatch, VRAM pressure, a
-        # cuBLAS failure). Fall back to the CPU, but say so: this restarts the
-        # WHOLE job, so a long file pays for the failed attempt AND the retry.
+        # The GPU path may fail mid-run (driver mismatch, VRAM pressure, a cuBLAS
+        # failure). Two things changed here:
+        #   1. the retry is now conditional on the failure actually LOOKING like a
+        #      GPU failure. Retrying on any non-zero exit re-ran the whole job -
+        #      at CPU speed - for unrelated errors such as a bad model path or an
+        #      unsupported codec, hiding the real cause behind the retry's own
+        #      output;
+        #   2. the GPU attempt's wall time is recorded, so the cost of the failed
+        #      attempt is visible instead of being erased by a stopwatch restart.
+        $gpuFailure = $false
         if ($exit -ne 0 -and -not $NoGpu) {
-            $fallbackReason = "whisper exited $exit on the GPU path; the whole job was restarted on the CPU (-ng)"
-            Write-ZoombieLog -Level Warn -Message $fallbackReason
-            $argsRetry = @('-m', $Env.model, '-f', $safe.InputPath, '-l', $Language, '-otxt', '-nt', '-ng')
-            if ($WantSrt) { $argsRetry += '-osrt' }
-            $argsRetry += @('-of', $outBase)
-            $stopwatch.Restart()
-            & $whisper @argsRetry 2>$whisperLog | Out-Null
-            $exit = $LASTEXITCODE
+            $gpuFailure = Test-ZoombieWhisperGpuFailure -ExitCode $exit -LogLines (Read-ZoombieWhisperLog -Path $whisperLog)
+            if ($gpuFailure) {
+                $gpuWallMs      = [math]::Round($stopwatch.Elapsed.TotalMilliseconds, 1)
+                $fallbackReason = "whisper exited $exit on the GPU path; the whole job was restarted on the CPU (-ng)"
+                Write-ZoombieLog -Level Warn -Message $fallbackReason
+                $argsRetry = @('-m', $Env.model, '-f', $safe.InputPath, '-l', $Language, '-otxt', '-nt', '-ng')
+                if ($WantSrt) { $argsRetry += '-osrt' }
+                if ($caps.Threads -and $threads -gt 0) { $argsRetry += @('-t', "$threads") }
+                $argsRetry += @('-of', $outBase)
+                $stopwatch.Restart()
+                & $whisper @argsRetry 2>$retryLog | Out-Null
+                $exit = $LASTEXITCODE
+            }
         }
     }
     finally {
@@ -481,7 +558,12 @@ function Invoke-WhisperOnSafeCopy {
         $env:PYTHONUTF8 = $prevUtf8
         $ErrorActionPreference = $prevEap
     }
-    if ($exit -ne 0) { throw "whisper-cli failed (exit $exit)" }
+    if ($exit -ne 0) {
+        $why = if ($exit -ne 0 -and -not $NoGpu -and -not $gpuFailure) {
+            " (exit $exit does not match a GPU failure signature, so no CPU retry was attempted; the GPU attempt's own error is the cause)"
+        } else { '' }
+        throw "whisper-cli failed (exit $exit)$why"
+    }
 
     # Copy artifacts back to the real (possibly non-ASCII) destination.
     $outDir = Split-Path -Parent $OutputBase
@@ -530,9 +612,9 @@ function Invoke-WhisperOnSafeCopy {
         $realtimeFactor = [math]::Round(($totalMs / 1000.0) / $durationSec, 4)
     }
 
-    # A successful exit that used no GPU device is the SILENT CPU fallback: exit
-    # code 0, no error, hours of CPU work. It must never pass unnoticed again.
-    $silentFallback = ($deviceInfo.Device -eq 'cpu' -and -not $NoGpu)
+    # A successful exit that used no GPU device WHILE a GPU backend is configured
+    # is the SILENT CPU fallback: exit code 0, no error, hours of CPU work.
+    $silentFallback = (-not $NoGpu -and $gpuBackendConfigured -and $deviceInfo.Device -ne $Env.backend)
     if ($silentFallback -and -not $fallbackReason) {
         $fallbackReason = "whisper exited 0 but used the CPU ($($deviceInfo.Reason))"
     }
@@ -543,7 +625,51 @@ function Invoke-WhisperOnSafeCopy {
         Write-ZoombieLog -Level Info -Message "  device=$($deviceInfo.Device) (timings unavailable)"
     }
 
+    # GPU POLICY: if a GPU backend is configured for this install and the user did
+    # not opt out (-NoGpu / -AllowCpuFallback), the run MUST have used the GPU.
+    # A CPU-only machine never reaches this because its backend is neither cuda
+    # nor vulkan. Both failure shapes are covered:
+    #   * the backend cannot initialise at all (the missing-cuBLAS case, which
+    #     exits 0), caught by the probe before the run and by the log after it;
+    #   * the backend initialised but no device was selected.
+    $gpuPolicyViolation = $false
+    $gpuPolicyReason    = $null
+    if ($gpuRequired) {
+        if (-not $gpuCapable) {
+            $gpuPolicyViolation = $true
+            $gpuPolicyReason = "the '$($Env.backend)' backend cannot initialise on this machine, so whisper would run on the CPU"
+        } elseif ($deviceInfo.Device -ne $Env.backend) {
+            $gpuPolicyViolation = $true
+            $gpuPolicyReason = "whisper ran on '$($deviceInfo.Device)' but the configured backend is '$($Env.backend)'"
+        }
+    }
+
+    # Diagnostics must outlive the scratch dir. The old behaviour deleted the log
+    # with the work dir, so the one file that explains a fallback disappeared
+    # exactly when it was needed. A fallback or a policy violation always keeps a
+    # copy next to the transcript.
+    $preservedLog = $null
+    if ($silentFallback -or $fallbackReason -or $gpuPolicyViolation) {
+        $outDirForLog = Split-Path -Parent $OutputBase
+        if ($outDirForLog -and -not (Test-Path -LiteralPath $outDirForLog)) {
+            New-Item -ItemType Directory -Force -Path $outDirForLog | Out-Null
+        }
+        $preservedLog = "$OutputBase.whisper.log"
+        try {
+            Copy-Item -LiteralPath $whisperLog -Destination $preservedLog -Force
+            if (Test-Path -LiteralPath $retryLog) {
+                Copy-Item -LiteralPath $retryLog -Destination "$OutputBase.whisper.retry.log" -Force
+            }
+        }
+        catch { $preservedLog = $null }
+    }
+
     if (-not $KeepWork) { Remove-Item -Recurse -Force $work -ErrorAction SilentlyContinue }
+
+    if ($gpuPolicyViolation) {
+        throw ("GPU policy violation: $gpuPolicyReason. A GPU backend is configured and usable, so the toolchain refuses to report success from a CPU run; pass -NoGpu to force the CPU deliberately, or -AllowCpuFallback to permit it." +
+               $(if ($preservedLog) { " Whisper log: $preservedLog" } else { '' }))
+    }
 
     Write-ZoombieResult -Action 'transcribe' -Ok $true -Data ([ordered]@{
         outputBase     = $OutputBase
@@ -554,6 +680,13 @@ function Invoke-WhisperOnSafeCopy {
         backendConfigured = $Env.backend
         deviceUsed     = $deviceInfo.Device
         deviceName     = $deviceInfo.DeviceName
+        deviceSelected = $deviceInfo.DeviceSelected
+        backendInitialised = $deviceInfo.BackendInitialised
+        gpuCapable     = $gpuCapable
+        gpuRequired    = $gpuRequired
+        # Flags actually passed, so a report can be reconciled with the argv.
+        flashAttention = $flashAttn
+        threads        = if ($NoGpu) { $threads } else { $null }
         loadMs         = $timings.LoadMs
         totalMs        = $totalMs
         encodeMs       = $timings.EncodeMs
@@ -561,9 +694,13 @@ function Invoke-WhisperOnSafeCopy {
         audioDurationSec = $durationSec
         realtimeFactor = $realtimeFactor
         wallMs         = [math]::Round($stopwatch.Elapsed.TotalMilliseconds, 1)
+        # Wall time of the abandoned GPU attempt, so the cost of the fallback is
+        # visible instead of being erased by the retry's stopwatch restart.
+        gpuAttemptWallMs = $gpuWallMs
         fallbackReason = $fallbackReason
         silentCpuFallback = $silentFallback
-        log            = @($logLines | Where-Object { "$_" -match 'load_backend|ggml_cuda_init|using CUDA|use gpu|backend_init_gpu' } | Select-Object -First 6)
+        logPath        = $preservedLog
+        log            = @($logLines | Where-Object { "$_" -match 'load_backend|ggml_cuda_init|using CUDA|use gpu|backend_init_gpu|error|cannot|fail' } | Select-Object -First 12)
         asciiSafe      = $true
     })
 }
@@ -578,7 +715,8 @@ function Invoke-Transcribe {
     $base = [System.IO.Path]::GetFullPath($base)
     if ([System.IO.Path]::GetExtension($base)) { $base = [System.IO.Path]::ChangeExtension($base, $null) }
 
-    Invoke-WhisperOnSafeCopy -Env $Env -AudioPath $Source -OutputBase $base -WantSrt:$Srt -WorkRoot $WorkRoot -KeepWork:$KeepWork
+    Invoke-WhisperOnSafeCopy -Env $Env -AudioPath $Source -OutputBase $base -WantSrt:$Srt -WorkRoot $WorkRoot -KeepWork:$KeepWork `
+        -NoFlashAttn:$NoFlashAttn -Threads $Threads -AllowCpuFallback:$AllowCpuFallback
 }
 
 # ---------------------------------------------------------------------------
@@ -781,7 +919,8 @@ function Invoke-Pipeline {
     finally { $ErrorActionPreference = $prevEap }
     if ($ffExit -ne 0) { throw "ffmpeg failed (exit $ffExit)" }
 
-    Invoke-WhisperOnSafeCopy -Env $Env -AudioPath $audioOut -OutputBase $base -WantSrt:$Srt -WorkRoot $workRoot -KeepWork:$KeepWork
+    Invoke-WhisperOnSafeCopy -Env $Env -AudioPath $audioOut -OutputBase $base -WantSrt:$Srt -WorkRoot $workRoot -KeepWork:$KeepWork `
+        -NoFlashAttn:$NoFlashAttn -Threads $Threads -AllowCpuFallback:$AllowCpuFallback
 
     if (-not $KeepWork) {
         # Remove the downloaded video (its transcript is the actual output), the
