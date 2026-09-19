@@ -1,43 +1,44 @@
 #Requires -Version 5.1
 <#
 .SYNOPSIS
-    Deterministic, idempotent setup for the zoombie speech-to-text toolchain.
+    Thin entry point: always fetch the latest setup worker and run it.
 
 .DESCRIPTION
-    Replaces the old prose setup prompt. Everything is installed into a single
-    ASCII root (default %USERPROFILE%\zoombie-env) so that:
+    This script is deliberately minimal. It downloads the CURRENT
+    scripts/setup-worker.ps1 from GitHub and runs it, so any start of setup —
+    a fresh machine or an already-configured one — means "install or update to
+    the latest". There is no state to go stale and no gate that can skip the
+    update: the worker is always re-fetched and invoked with -Refresh, which
+    makes it re-pull the repo files (module, CLI, self-test, skills) too.
 
-      * whisper.cpp never sees a non-ASCII / Cyrillic path (the bug we are fixing),
-      * nothing depends on install locations or a refreshed PATH,
-      * a re-run is a no-op for anything already present.
+    The heavy lifting (hardware probe, component installs, CLI + skill
+    deployment, env.json) lives in setup-worker.ps1, not here.
 
-    Tools are fetched straight into the root; winget is not required.
+    Local development is a different path on purpose: run
+    scripts/setup-worker.ps1 directly. That installs your working tree as-is and
+    does NOT touch the network, so uncommitted edits are what gets installed.
 
-    This script is also the distribution entry point. Downloaded on its own from
-    GitHub raw, it bootstraps the rest of the repo (shared module, runtime CLI,
-    self-test, skills) into a local checkout and then runs. When the repo is
-    already present next to it, the bootstrap is skipped.
+    Every exception is allowed to propagate: if the download or the worker
+    fails, the failure is what the caller sees. There is no silent fallback to
+    a possibly-stale local copy.
 
 .PARAMETER Check
-    Detect only. Report what is present/missing. Writes nothing.
+    Detect only (passed through). Report what is present/missing. Writes nothing.
 
 .PARAMETER DryRun
-    Print the actions that would be taken. Writes nothing.
+    Print the actions that would be taken (passed through). Writes nothing.
 
 .PARAMETER Model
-    Whisper model name to ensure (e.g. large-v3-turbo, small, base-q5_0).
-    Default: the size recommended from the detected hardware.
+    Whisper model name to ensure (passed through).
 
 .PARAMETER Root
-    Override the toolchain root. Default: %USERPROFILE%\zoombie-env.
+    Override the toolchain root (passed through).
 
 .PARAMETER Force
-    Re-download even if a component looks present.
+    Re-download even if a component looks present (passed through).
 
 .EXAMPLE
     pwsh -File scripts/setup.ps1 -Check
-.EXAMPLE
-    pwsh -File scripts/setup.ps1 -DryRun
 .EXAMPLE
     pwsh -File scripts/setup.ps1
 #>
@@ -53,702 +54,73 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
-# ---------------------------------------------------------------------------
-# 0. Bootstrap: fetch the rest of the repo when run standalone
-# ---------------------------------------------------------------------------
-# This script is the single entry point. It can be downloaded on its own (a
-# one-liner from GitHub raw) and will fetch the rest of the repo — the shared
-# module, the runtime CLI, the self-test, and the skills — into a local checkout
-# before doing anything else. When the whole repo is already present (the normal
-# case: running from a clone), this block is a no-op.
+# Where to fetch the worker from. Honors the same overrides as the bootstrap so
+# a fork or branch can be used without editing the script.
+$repoSlug = if ($env:ZOOMBIE_REPO_SLUG) { $env:ZOOMBIE_REPO_SLUG } else { 'carnivorum/zoombie' }
+$repoRef  = if ($env:ZOOMBIE_REPO_REF)  { $env:ZOOMBIE_REPO_REF }  else { 'main' }
+$rawBase  = "https://raw.githubusercontent.com/$repoSlug/$repoRef"
+$workerUrl = "$rawBase/scripts/setup-worker.ps1"
 
-$script:RepoSlug       = if ($env:ZOOMBIE_REPO_SLUG) { $env:ZOOMBIE_REPO_SLUG } else { 'carnivorum/zoombie' }
-$script:RepoRef        = if ($env:ZOOMBIE_REPO_REF)  { $env:ZOOMBIE_REPO_REF }  else { 'main' }
-$script:RepoRawBase    = "https://raw.githubusercontent.com/$($script:RepoSlug)/$($script:RepoRef)"
-$script:RepoArchiveUrl = "https://codeload.github.com/$($script:RepoSlug)/zip/refs/heads/$($script:RepoRef)"
+# Stage the freshest worker in an ASCII temp dir (never the repo/install root,
+# so a local working copy is never silently used instead of the network copy).
+$stamp      = [guid]::NewGuid().ToString('N')
+$workerPath = Join-Path $env:TEMP "zoombie-setup-$stamp\setup-worker.ps1"
+$workerDir  = Split-Path -Parent $workerPath
+New-Item -ItemType Directory -Force -Path $workerDir | Out-Null
 
-function Get-ZoombieRepoFile {
-    <#
-    .SYNOPSIS
-        Fetch one file from the repo and write it into the local checkout.
+[Console]::Error.WriteLine("==> zoombie bootstrap: fetching the latest setup worker")
+[Console]::Error.WriteLine("    $workerUrl")
 
-    .DESCRIPTION
-        $RepoPath is the path inside the repository (e.g. scripts/lib/...), used
-        to build the raw URL. $DestRelative is where it lands relative to this
-        script, which mirrors the repo's scripts\ folder layout.
-    #>
-    [CmdletBinding()]
-    param(
-        [Parameter(Mandatory)][string]$RepoPath,
-        [Parameter(Mandatory)][string]$DestRelative
-    )
-    $dest = Join-Path $PSScriptRoot $DestRelative
-    $dir  = Split-Path -Parent $dest
-    New-Item -ItemType Directory -Force -Path $dir | Out-Null
-    $url = "$($script:RepoRawBase)/$($RepoPath -replace '\\', '/')"
-    [Console]::Error.WriteLine("==> fetch $url")
-    $prevEap = $ErrorActionPreference; $ErrorActionPreference = 'Continue'
-    try {
-        & curl.exe -L --fail --retry 3 --silent --show-error -o $dest $url 2>$null
+$prevEap = $ErrorActionPreference; $ErrorActionPreference = 'Continue'
+try {
+    $curl = Get-Command curl.exe -ErrorAction SilentlyContinue
+    if ($curl) {
+        & curl.exe -L --fail --retry 3 --silent --show-error -o $workerPath $workerUrl 2>$null
         $code = $LASTEXITCODE
-    }
-    finally { $ErrorActionPreference = $prevEap }
-    if ($code -ne 0) { throw "Failed to fetch $url (curl exit $code)" }
-}
-
-if (-not (Test-Path -LiteralPath (Join-Path $PSScriptRoot 'lib\ZoombieEnv.psm1'))) {
-    [Console]::Error.WriteLine('==> standalone run: fetching the rest of the repo')
-
-    # Prefer a single archive download: it is one request and keeps the tree
-    # consistent. Fall back to per-file raw fetches if the archive is blocked.
-    $fetched = $false
-    $tmpZip = Join-Path $env:TEMP ("zoombie-repo-" + [guid]::NewGuid().ToString('N') + '.zip')
-    $tmpEx  = New-ZoombieAsciiTempDir -Prefix 'zoombie-repo'
-    try {
-        [Console]::Error.WriteLine("==> download $($script:RepoArchiveUrl)")
-        $prevEap = $ErrorActionPreference; $ErrorActionPreference = 'Continue'
-        try { & curl.exe -L --fail --retry 3 --silent --show-error -o $tmpZip $script:RepoArchiveUrl 2>$null; $code = $LASTEXITCODE }
-        finally { $ErrorActionPreference = $prevEap }
-        if ($code -eq 0) {
-            Expand-Archive -LiteralPath $tmpZip -DestinationPath $tmpEx -Force
-            $rootInZip = Get-ChildItem -LiteralPath $tmpEx -Directory | Select-Object -First 1
-            if ($rootInZip) {
-                # Copy the repo's own folders next to this script so relative
-                # paths (lib\, zoombie.ps1, ..\skills) keep working.
-                foreach ($f in @('lib', 'zoombie.ps1', 'selftest.ps1')) {
-                    $from = Join-Path $rootInZip.FullName (Join-Path 'scripts' $f)
-                    if (Test-Path -LiteralPath $from) {
-                        Copy-Item -LiteralPath $from -Destination $PSScriptRoot -Recurse -Force
-                    }
-                }
-                $skillsFrom = Join-Path $rootInZip.FullName 'skills'
-                if (Test-Path -LiteralPath $skillsFrom) {
-                    Copy-Item -LiteralPath $skillsFrom -Destination (Split-Path -Parent $PSScriptRoot) -Recurse -Force
-                }
-                $fetched = $true
-                [Console]::Error.WriteLine('==> repo fetched from archive')
-            }
-        }
-    }
-    catch {
-        [Console]::Error.WriteLine("WARN archive fetch failed: $($_.Exception.Message)")
-    }
-    finally {
-        Remove-Item -LiteralPath $tmpZip -Force -ErrorAction SilentlyContinue
-        Remove-Item -Recurse -Force $tmpEx -ErrorAction SilentlyContinue
-    }
-
-    if (-not $fetched) {
-        [Console]::Error.WriteLine('==> falling back to per-file download')
-        # The local checkout mirrors the repo's scripts\ folder, so the repo path
-        # carries the `scripts/` prefix while the destination does not.
-        $fileMap = @(
-            @{ Repo = 'scripts/lib/ZoombieEnv.psm1'; Dest = 'lib\ZoombieEnv.psm1' },
-            @{ Repo = 'scripts/zoombie.ps1';         Dest = 'zoombie.ps1' },
-            @{ Repo = 'scripts/selftest.ps1';        Dest = 'selftest.ps1' }
-        )
-        foreach ($m in $fileMap) {
-            Get-ZoombieRepoFile -RepoPath $m.Repo -DestRelative $m.Dest
-        }
-        foreach ($skill in @('zoombie-download-video', 'zoombie-extract-audio', 'zoombie-transcribe-audio', 'zoombie-transcribe-video')) {
-            $destSkill = Join-Path (Split-Path -Parent $PSScriptRoot) "skills\$skill\SKILL.md"
-            $dir = Split-Path -Parent $destSkill
-            New-Item -ItemType Directory -Force -Path $dir | Out-Null
-            $url = "$($script:RepoRawBase)/skills/$skill/SKILL.md"
-            [Console]::Error.WriteLine("==> fetch $url")
-            $prevEap = $ErrorActionPreference; $ErrorActionPreference = 'Continue'
-            try { & curl.exe -L --fail --retry 3 --silent --show-error -o $destSkill $url 2>$null; $code = $LASTEXITCODE }
-            finally { $ErrorActionPreference = $prevEap }
-            if ($code -ne 0) { throw "Failed to fetch $url (curl exit $code)" }
-        }
-    }
-}
-
-$modulePath = Join-Path $PSScriptRoot 'lib\ZoombieEnv.psm1'
-Import-Module $modulePath -Force
-
-if ($Root) { $env:ZOOMBIE_ENV_ROOT = $Root }
-Set-ZoombieUtf8Console
-
-$script:DryRun = [bool]$DryRun
-$script:Check  = [bool]$Check
-$script:Force  = [bool]$Force
-$script:Changes = New-Object System.Collections.Generic.List[string]
-
-# ---------------------------------------------------------------------------
-# Small helpers
-# ---------------------------------------------------------------------------
-
-function Test-WriteAllowed {
-    # In -Check and -DryRun we never touch the filesystem.
-    return (-not $script:Check -and -not $script:DryRun)
-}
-
-function Get-Field {
-    <#
-    .SYNOPSIS
-        StrictMode-safe read of a (optionally dotted) field from an object.
-
-    .DESCRIPTION
-        Under Set-StrictMode -Version Latest, reading a MISSING member of a
-        PSCustomObject (e.g. one parsed from a legacy/partial env.json) throws
-        and aborts the caller. Reading is done through PSObject.Properties so a
-        missing field yields $Default instead. Dotted paths walk nested objects,
-        so a missing intermediate section also yields $Default, never an error.
-
-        Declared here (with the other small helpers) because Install-Whisper
-        runs before the main flow and needs it.
-    #>
-    param($Object, [Parameter(Mandatory)][string]$Path, $Default = $null)
-    $current = $Object
-    foreach ($key in $Path.Split('.')) {
-        if ($null -eq $current) { return $Default }
-        if ($current -is [System.Collections.IDictionary]) {
-            if (-not $current.Contains($key)) { return $Default }
-            $current = $current[$key]
-            continue
-        }
-        $prop = $current.PSObject.Properties[$key]
-        if (-not $prop) { return $Default }
-        $current = $prop.Value
-    }
-    if ($null -eq $current) { return $Default }
-    return $current
-}
-
-function Invoke-ZoombieDownload {
-    [CmdletBinding()]
-    param(
-        [Parameter(Mandatory)][string]$Url,
-        [Parameter(Mandatory)][string]$OutFile
-    )
-    Write-ZoombieLog -Level Step -Message "download $Url"
-    Write-ZoombieLog -Level Info -Message "     -> $OutFile"
-    if (-not (Test-WriteAllowed)) { return }
-    if ((Test-Path -LiteralPath $OutFile) -and -not $script:Force) {
-        Write-ZoombieLog -Level Info -Message "     already present, skipping"
-        return
-    }
-    $parent = Split-Path -Parent $OutFile
-    New-Item -ItemType Directory -Force -Path $parent | Out-Null
-    $prevEap = $ErrorActionPreference; $ErrorActionPreference = 'Continue'
-    try { & curl.exe -L --fail --retry 3 --silent --show-error -o $OutFile $Url 2>$null; $curlExit = $LASTEXITCODE }
-    finally { $ErrorActionPreference = $prevEap }
-    if ($curlExit -ne 0) {
-        throw "Download failed (curl exit $curlExit): $Url"
-    }
-}
-
-function Get-GitHubReleases {
-    <#
-    .SYNOPSIS
-        Fetch releases (newest first) for a repo. Returns an array of release objects.
-    #>
-    [CmdletBinding()]
-    param([Parameter(Mandatory)][string]$Repo, [int]$Count = 30)
-    $uri = "https://api.github.com/repos/$Repo/releases?per_page=$Count"
-    $headers = @{ 'User-Agent' = 'zoombie-setup'; 'Accept' = 'application/vnd.github+json' }
-    try {
-        return Invoke-RestMethod -Uri $uri -Headers $headers -UseBasicParsing
-    }
-    catch {
-        throw "Could not query GitHub releases for $Repo`: $($_.Exception.Message)"
-    }
-}
-
-# ---------------------------------------------------------------------------
-# Hardware probe + model recommendation
-# ---------------------------------------------------------------------------
-
-function Get-HardwareProfile {
-    [CmdletBinding()]
-    param()
-    $cpu = Get-CimInstance Win32_Processor | Select-Object -First 1
-    $ramGb = [math]::Round((Get-CimInstance Win32_ComputerSystem).TotalPhysicalMemory / 1GB, 1)
-    $gpus = @(Get-CimInstance Win32_VideoController | Select-Object -ExpandProperty Name)
-
-    $nvidiaName = $null
-    $vramMb = $null
-    $driver = $null
-    $smi = Resolve-ZoombieTool -Name 'nvidia-smi'
-    if ($smi) {
-        try {
-            # Machine-readable: name,total VRAM,driver. AdapterRAM is unusable (>4GB overflow).
-            $csv = & $smi --query-gpu=name,memory.total,driver_version --format=csv,noheader,nounits 2>$null
-            $first = @($csv) | Select-Object -First 1
-            if ($first) {
-                $parts = ($first -split ',').Trim()
-                $nvidiaName = $parts[0]
-                if ($parts.Count -ge 2) { $vramMb = [int]($parts[1] -replace '[^0-9]', '') }
-                if ($parts.Count -ge 3) { $driver = $parts[2] }
-            }
-        }
-        catch { }
-    }
-
-    $backend = 'cpu'
-    if ($nvidiaName) { $backend = 'cuda' }
-    elseif ($gpus.Count -gt 0) { $backend = 'vulkan' }
-
-    return [ordered]@{
-        cpuName    = if ($cpu) { $cpu.Name } else { $null }
-        cpuCores   = if ($cpu) { $cpu.NumberOfCores } else { $null }
-        cpuThreads = if ($cpu) { $cpu.NumberOfLogicalProcessors } else { $null }
-        ramGb      = $ramGb
-        gpus       = $gpus
-        nvidia     = $nvidiaName
-        vramMb     = $vramMb
-        gpuDriver  = $driver
-        backend    = $backend
-    }
-}
-
-function Get-RecommendedModel {
-    <#
-    .SYNOPSIS
-        Pick a model size from the hardware profile. Smaller/faster when constrained.
-    #>
-    [CmdletBinding()]
-    param([Parameter(Mandatory)]$Hw)
-    if ($Hw.backend -eq 'cuda' -and $Hw.vramMb) {
-        if ($Hw.vramMb -ge 8000) { return 'large-v3-turbo' }
-        if ($Hw.vramMb -ge 4000) { return 'medium' }
-        return 'small'
-    }
-    if ($Hw.backend -eq 'vulkan') { return 'small' }
-    if ($Hw.ramGb -ge 16) { return 'medium' }
-    if ($Hw.ramGb -ge 8)  { return 'small' }
-    if ($Hw.ramGb -ge 4)  { return 'base' }
-    return 'tiny'
-}
-
-# ---------------------------------------------------------------------------
-# Component installers
-# ---------------------------------------------------------------------------
-
-function Install-FFmpeg {
-    [CmdletBinding()]
-    param([Parameter(Mandatory)][string]$BinDir)
-    $ffmpeg  = Get-ZoombieEnvPath -Child 'bin', 'ffmpeg.exe'
-    $ffprobe = Get-ZoombieEnvPath -Child 'bin', 'ffprobe.exe'
-
-    if ((Test-Path $ffmpeg) -and (Test-Path $ffprobe) -and -not $script:Force) {
-        Write-ZoombieLog -Level Info -Message "ffmpeg present: $(Get-ZoombieToolVersion -Exe $ffmpeg -VersionArgs '-version')"
-        return $true
-    }
-    if (-not (Test-WriteAllowed)) { Write-ZoombieLog -Level Step -Message "would install ffmpeg -> $BinDir"; return $false }
-
-    $tmp = New-ZoombieAsciiTempDir -Prefix 'zoombie-ffmpeg'
-    try {
-        $zip = Join-Path $tmp 'ffmpeg.zip'
-        # BtbN static GPL build: ships ffmpeg + ffprobe in bin\.
-        Invoke-ZoombieDownload -Url 'https://github.com/BtbN/FFmpeg-Builds/releases/latest/download/ffmpeg-master-latest-win64-gpl.zip' -OutFile $zip
-        $extract = Join-Path $tmp 'x'
-        Expand-Archive -LiteralPath $zip -DestinationPath $extract -Force
-        $binSrc = Get-ChildItem -Path $extract -Recurse -Filter 'ffmpeg.exe' | Select-Object -First 1
-        if (-not $binSrc) { throw 'ffmpeg.exe not found in archive' }
-        Copy-Item -LiteralPath $binSrc.FullName -Destination $ffmpeg -Force
-        $probeSrc = Get-ChildItem -Path $binSrc.Directory.FullName -Filter 'ffprobe.exe' | Select-Object -First 1
-        if ($probeSrc) { Copy-Item -LiteralPath $probeSrc.FullName -Destination $ffprobe -Force }
-        $script:Changes.Add('installed ffmpeg/ffprobe')
-        return $true
-    }
-    finally {
-        Remove-Item -Recurse -Force $tmp -ErrorAction SilentlyContinue
-    }
-}
-
-function Install-YtDlp {
-    [CmdletBinding()]
-    param([Parameter(Mandatory)][string]$BinDir)
-    $exe = Get-ZoombieEnvPath -Child 'bin', 'yt-dlp.exe'
-    if ((Test-Path $exe) -and -not $script:Force) {
-        Write-ZoombieLog -Level Info -Message "yt-dlp present: $(Get-ZoombieToolVersion -Exe $exe -VersionArgs '--version')"
-        return $true
-    }
-    if (-not (Test-WriteAllowed)) { Write-ZoombieLog -Level Step -Message "would install yt-dlp -> $BinDir"; return $false }
-    New-Item -ItemType Directory -Force -Path $BinDir | Out-Null
-    Invoke-ZoombieDownload -Url 'https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp.exe' -OutFile $exe
-    $script:Changes.Add('installed yt-dlp')
-    return $true
-}
-
-function Select-WhisperAsset {
-    <#
-    .SYNOPSIS
-        Scan releases newest-first and pick the first that actually ships a suitable
-        Windows x64 binary asset (tagged releases often have no binaries attached).
-
-    .OUTPUTS
-        A hashtable: @{ Tag; Name; Url; Backend }
-    #>
-    [CmdletBinding()]
-    param([Parameter(Mandatory)][ValidateSet('cuda', 'vulkan', 'cpu')][string]$Backend)
-
-    # Preference order of asset filename fragments per backend.
-    $patterns = switch ($Backend) {
-        'cuda'   { @('cublas.*bin-x64\.zip$', 'cuda.*bin-x64\.zip$') }
-        'vulkan' { @('vulkan.*bin-x64\.zip$') }
-        'cpu'    { @('^whisper-bin-x64\.zip$', 'bin-x64\.zip$') }
-    }
-
-    $releases = Get-GitHubReleases -Repo 'ggml-org/whisper.cpp'
-    foreach ($rel in $releases) {
-        if (-not $rel.assets -or $rel.assets.Count -eq 0) { continue }
-        foreach ($pattern in $patterns) {
-            $hit = $rel.assets | Where-Object { $_.name -match $pattern } | Select-Object -First 1
-            if ($hit) {
-                return @{
-                    Tag     = $rel.tag_name
-                    Name    = $hit.name
-                    Url     = $hit.browser_download_url
-                    Backend = $Backend
-                }
-            }
-        }
-    }
-    return $null
-}
-
-function Install-Whisper {
-    [CmdletBinding()]
-    param([Parameter(Mandatory)][string]$Backend)
-    $destDir = Get-ZoombieEnvPath -Child 'bin', 'whisper'
-    $exe = Join-Path $destDir 'whisper-cli.exe'
-
-    if ((Test-Path $exe) -and -not $script:Force) {
-        Write-ZoombieLog -Level Info -Message "whisper-cli present: $exe"
-        # Preserve tag/asset recorded by a previous run so the manifest stays complete.
-        # Read StrictMode-safely: a legacy/partial env.json may have no `whisper`
-        # section, in which case $prev.whisper.tag would throw under StrictMode.
-        $prev = Get-ZoombieEnvManifest
-        $prevTag     = Get-Field $prev 'whisper.tag'
-        $prevAsset   = Get-Field $prev 'whisper.asset'
-        $prevBackend = Get-Field $prev 'whisper.backend' $Backend
-        # If a previous run never recorded which asset it used, recover it with a
-        # single release scan so env.json stays a complete record.
-        if (-not $prevTag -and -not $script:Check -and -not $script:DryRun) {
-            $scan = Select-WhisperAsset -Backend $prevBackend
-            if ($scan) { $prevTag = $scan.Tag; $prevAsset = $scan.Name }
-        }
-        return @{ Exe = $exe; Tag = $prevTag; Asset = $prevAsset; Backend = $prevBackend }
-    }
-
-    $asset = Select-WhisperAsset -Backend $Backend
-    if (-not $asset -and $Backend -ne 'cpu') {
-        Write-ZoombieLog -Level Warn -Message "no $Backend asset found; falling back to CPU build"
-        $asset = Select-WhisperAsset -Backend 'cpu'
-    }
-    if (-not $asset) { throw 'No suitable whisper.cpp Windows asset found in any release.' }
-
-    Write-ZoombieLog -Level Step -Message "selected whisper.cpp $($asset.Tag) asset $($asset.Name) [$($asset.Backend)]"
-    if (-not (Test-WriteAllowed)) {
-        Write-ZoombieLog -Level Info -Message "     would extract to $destDir"
-        return @{ Exe = $exe; Tag = $asset.Tag; Asset = $asset.Name; Backend = $asset.Backend }
-    }
-
-    $tmp = New-ZoombieAsciiTempDir -Prefix 'zoombie-whisper'
-    try {
-        $zip = Join-Path $tmp 'whisper.zip'
-        Invoke-ZoombieDownload -Url $asset.Url -OutFile $zip
-        New-Item -ItemType Directory -Force -Path $destDir | Out-Null
-        # Keep DLLs next to the exe: the CUDA bundle needs them adjacent.
-        Expand-Archive -LiteralPath $zip -DestinationPath $destDir -Force
-        $found = Get-ChildItem -Path $destDir -Recurse -Filter 'whisper-cli.exe' | Select-Object -First 1
-        if (-not $found) { throw 'whisper-cli.exe not found in archive' }
-        if ($found.Directory.FullName -ne $destDir) {
-            # Flatten one level if the archive nested the binaries.
-            Get-ChildItem -Path $found.Directory.FullName -File | ForEach-Object {
-                Copy-Item -LiteralPath $_.FullName -Destination (Join-Path $destDir $_.Name) -Force
-            }
-            $exe = Join-Path $destDir 'whisper-cli.exe'
-        }
-        $script:Changes.Add("installed whisper.cpp $($asset.Tag) ($($asset.Backend))")
-        return @{ Exe = $exe; Tag = $asset.Tag; Asset = $asset.Name; Backend = $asset.Backend }
-    }
-    finally {
-        Remove-Item -Recurse -Force $tmp -ErrorAction SilentlyContinue
-    }
-}
-
-function Install-WhisperModel {
-    [CmdletBinding()]
-    param([Parameter(Mandatory)][string]$ModelName)
-    $modelsDir = Get-ZoombieEnvPath -Child 'models'
-    $fileName = if ($ModelName -like 'ggml-*.bin') { $ModelName } else { "ggml-$ModelName.bin" }
-    $dest = Join-Path $modelsDir $fileName
-
-    if ((Test-Path $dest) -and -not $script:Force) {
-        $sizeMb = [math]::Round((Get-Item $dest).Length / 1MB, 1)
-        Write-ZoombieLog -Level Info -Message "model present: $fileName ($sizeMb MB)"
-        return @{ Path = $dest; Name = $fileName; SizeMb = $sizeMb }
-    }
-    $url = "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/$fileName"
-    if (-not (Test-WriteAllowed)) {
-        Write-ZoombieLog -Level Step -Message "would download model $fileName"
-        return @{ Path = $dest; Name = $fileName; SizeMb = 0 }
-    }
-    New-Item -ItemType Directory -Force -Path $modelsDir | Out-Null
-    Invoke-ZoombieDownload -Url $url -OutFile $dest
-    $sizeMb = [math]::Round((Get-Item $dest).Length / 1MB, 1)
-    if ($sizeMb -lt 1) { throw "Downloaded model looks too small ($sizeMb MB): $dest" }
-    $script:Changes.Add("installed model $fileName")
-    return @{ Path = $dest; Name = $fileName; SizeMb = $sizeMb }
-}
-
-# ---------------------------------------------------------------------------
-# CLI + skill deployment
-# ---------------------------------------------------------------------------
-
-function Install-ZoombieCli {
-    <#
-    .SYNOPSIS
-        Copy the CLI (scripts + lib) to a stable ASCII location under zoombie-env.
-
-    .DESCRIPTION
-        Skills invoke the CLI by an absolute, stable path so that they work from
-        any project and never depend on PATH or on where this repo was cloned.
-        $PSScriptRoot-relative resolution in zoombie.ps1 keeps lib discovery
-        working because the layout (zoombie.ps1 + lib\ZoombieEnv.psm1) is preserved.
-    #>
-    [CmdletBinding()]
-    param()
-    $destDir = Get-ZoombieEnvPath -Child 'bin', 'zoombie'
-    $destCli = Join-Path $destDir 'zoombie.ps1'
-    $destLib = Join-Path $destDir 'lib\ZoombieEnv.psm1'
-    $srcCli  = Join-Path $PSScriptRoot 'zoombie.ps1'
-    $srcLib  = Join-Path $PSScriptRoot 'lib\ZoombieEnv.psm1'
-
-    if (-not (Test-WriteAllowed)) {
-        Write-ZoombieLog -Level Step -Message "would install CLI -> $destDir"
-        return $destCli
-    }
-    New-Item -ItemType Directory -Force -Path (Join-Path $destDir 'lib') | Out-Null
-    Copy-Item -LiteralPath $srcCli -Destination $destCli -Force
-    Copy-Item -LiteralPath $srcLib -Destination $destLib -Force
-    Write-ZoombieLog -Level Info -Message "CLI installed: $destCli"
-    return $destCli
-}
-
-function Install-ZoombieSkills {
-    <#
-    .SYNOPSIS
-        Deploy skills\<name>\SKILL.md into the global Zoo skills root.
-
-    .DESCRIPTION
-        Global root is the ABSOLUTE path %USERPROFILE%\.roo\skills (never a
-        relative ..\.. path).
-
-        Every skill is namespaced `zoombie-*`, so a name can never collide with a
-        foreign skill; deployment simply overwrites. The version compare only
-        decides whether to report `up to date` or `updated`.
-    #>
-    [CmdletBinding()]
-    param()
-    $skillsRoot = Join-Path $env:USERPROFILE '.roo\skills'
-    $srcRoot = Join-Path (Split-Path $PSScriptRoot -Parent) 'skills'
-    $mine = Get-ZoombieSkillVersion
-    $results = New-Object System.Collections.Generic.List[object]
-
-    if (-not (Test-Path -LiteralPath $srcRoot)) {
-        Write-ZoombieLog -Level Warn -Message "no skills\ folder in the repo; skipping skill deployment"
-        return $results
-    }
-
-    foreach ($dir in Get-ChildItem -LiteralPath $srcRoot -Directory) {
-        $name = $dir.Name
-        $src = Join-Path $dir.FullName 'SKILL.md'
-        if (-not (Test-Path -LiteralPath $src)) { continue }
-        $dest = Join-Path $skillsRoot "$name\SKILL.md"
-
-        $action = 'created'
-        if (Test-Path -LiteralPath $dest) {
-            $marker = Get-ZoombieSkillMarker -Path $dest
-            if ($marker.Version -eq $mine) {
-                $action = 'up to date'
-            } elseif ($marker.Version) {
-                $action = "updated ($($marker.Version) -> $mine)"
-            } else {
-                $action = 'updated (no version -> ' + $mine + ')'
-            }
-        }
-
-        if ($action -ne 'up to date') {
-            if (Test-WriteAllowed) {
-                New-Item -ItemType Directory -Force -Path (Split-Path $dest -Parent) | Out-Null
-                Copy-Item -LiteralPath $src -Destination $dest -Force
-            }
-        }
-        $results.Add([pscustomobject]@{ skill = $name; action = $action; path = $dest })
-    }
-
-    $deployed = $results.Count
-    if (-not (Test-WriteAllowed)) {
-        Write-ZoombieLog -Level Step -Message "would deploy $deployed skills -> $skillsRoot"
     } else {
-        Write-ZoombieLog -Level Info -Message "skills deployed -> $skillsRoot"
-    }
-    return $results
-}
-
-# ---------------------------------------------------------------------------
-# Main flow
-# ---------------------------------------------------------------------------
-
-$mode = if ($script:Check) { 'CHECK' } elseif ($script:DryRun) { 'DRY-RUN' } else { 'APPLY' }
-$root = Get-ZoombieEnvRoot
-
-Write-ZoombieLog -Level Step -Message "zoombie setup [$mode]"
-Write-ZoombieLog -Level Info -Message "toolchain root: $root"
-
-# The root must be ASCII because whisper.cpp breaks on non-ASCII paths. When the
-# user name is not ASCII (e.g. C:\Users\Мария) and no explicit -Root was given,
-# Get-ZoombieEnvRoot already falls back to %PUBLIC%\zoombie-env. Guard the two
-# remaining cases: a bad explicit override, or no ASCII location at all.
-if (-not (Test-ZoombieAsciiPath $root)) {
-    if (Test-ZoombieRootIsDefault) {
-        $asciiFallback = Join-Path $env:PUBLIC 'zoombie-env'
-        if ($env:PUBLIC -and (Test-ZoombieAsciiPath $asciiFallback)) {
-            $env:ZOOMBIE_ENV_ROOT = $asciiFallback
-            $root = $asciiFallback
-            Write-ZoombieLog -Level Warn -Message "%USERPROFILE% is not ASCII; using $root instead"
-        } else {
-            throw "No ASCII toolchain root available. Pass an explicit -Root on an ASCII path (Cyrillic paths break whisper.cpp)."
-        }
-    } else {
-        throw "The -Root you passed is not ASCII (Cyrillic paths break whisper.cpp): $root"
+        Invoke-WebRequest -Uri $workerUrl -OutFile $workerPath -UseBasicParsing
+        $code = 0
     }
 }
-
-# NOTE: PowerShell variable names are case-insensitive, so these locals must NOT
-# collide with the -Model parameter. $whisperInfo / $modelInfo are the results.
-$python       = $null
-$whisperInfo  = $null
-$modelInfo    = $null
-$hw           = $null
-$cliPath      = $null
-$skillResults = @()
-
-Write-ZoombieLog -Level Step -Message "PowerShell $($PSVersionTable.PSVersion) on $([System.Environment]::OSVersion.VersionString)"
-
-$manifest = Get-ZoombieEnvManifest
-if (-not $manifest) { $manifest = [ordered]@{} }
-
-if (Test-WriteAllowed) { New-ZoombieEnvSkeleton | Out-Null }
-
-# 1. Hardware probe (needed for whisper backend + model choice).
-Write-ZoombieLog -Level Step -Message "probing hardware"
-$hw = Get-HardwareProfile
-Write-ZoombieLog -Level Info -Message "cpu=$($hw.cpuName) cores=$($hw.cpuCores)/$($hw.cpuThreads) ram=$($hw.ramGb)GB"
-Write-ZoombieLog -Level Info -Message "gpu=$($hw.gpus -join ', ') nvidia=$($hw.nvidia) vramMb=$($hw.vramMb) backend=$($hw.backend)"
-
-# 2. Python (tooling only; whisper.cpp does not need it, but the prompt requests it).
-Write-ZoombieLog -Level Step -Message "checking Python"
-Update-ZoombiePath | Out-Null
-$pyCmd = Get-Command python -ErrorAction SilentlyContinue
-if ($pyCmd -and -not (Test-ZoombieWindowsStoreStub $pyCmd.Source)) {
-    $python = $pyCmd.Source
-} else {
-    $candidates = @()
-    foreach ($v in @('313', '312', '311', '310')) {
-        $candidates += (Join-Path $env:LOCALAPPDATA "Programs\Python\Python$v\python.exe")
-    }
-    $python = Resolve-ZoombieTool -Name 'python' -Candidates $candidates
-    if ($python -and (Test-ZoombieWindowsStoreStub $python)) { $python = $null }
+catch {
+    $code = 1
 }
-if ($python) {
-    Write-ZoombieLog -Level Info -Message "python: $python ($(Get-ZoombieToolVersion -Exe $python -VersionArgs '--version'))"
-} else {
-    Write-ZoombieLog -Level Warn -Message "python not found. Optional for this pipeline. Install with: winget install Python.Python.3.12"
+finally {
+    $ErrorActionPreference = $prevEap
+}
+if ($code -ne 0 -or -not (Test-Path -LiteralPath $workerPath)) {
+    throw "Could not download the setup worker from $workerUrl (curl exit $code). Check the network, or set ZOOMBIE_REPO_SLUG / ZOOMBIE_REPO_REF."
 }
 
-# 3. ffmpeg + ffprobe into zoombie-env\bin.
-Write-ZoombieLog -Level Step -Message "ensuring ffmpeg/ffprobe"
-Install-FFmpeg -BinDir (Get-ZoombieEnvPath -Child 'bin') | Out-Null
+# Run the freshly fetched worker. -Refresh makes it pull the repo files again,
+# so every bootstrap run updates rather than re-installs what is already there.
+$workerArgs = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $workerPath, '-Refresh')
+if ($Check)  { $workerArgs += '-Check' }
+if ($DryRun) { $workerArgs += '-DryRun' }
+if ($Model)  { $workerArgs += @('-Model', $Model) }
+if ($Root)   { $workerArgs += @('-Root', $Root) }
+if ($Force)  { $workerArgs += '-Force' }
 
-# 4. yt-dlp into zoombie-env\bin.
-Write-ZoombieLog -Level Step -Message "ensuring yt-dlp"
-Install-YtDlp -BinDir (Get-ZoombieEnvPath -Child 'bin') | Out-Null
+[Console]::Error.WriteLine("==> running $workerPath")
 
-# 5. whisper.cpp (backend-aware) into zoombie-env\bin\whisper.
-Write-ZoombieLog -Level Step -Message "ensuring whisper.cpp"
-$whisperInfo = Install-Whisper -Backend $hw.backend
-
-# 6. Model.
-if (-not $Model) { $Model = Get-RecommendedModel -Hw $hw }
-Write-ZoombieLog -Level Step -Message "ensuring whisper model '$Model'"
-$modelInfo = Install-WhisperModel -ModelName $Model
-
-# 6b. CLI + skills.
-Write-ZoombieLog -Level Step -Message "installing CLI to zoombie-env\bin\zoombie"
-$cliPath = Install-ZoombieCli
-Write-ZoombieLog -Level Step -Message "deploying skills to the global root"
-$skillResults = Install-ZoombieSkills
-
-# 7. Persist the manifest.
-# Built incrementally rather than as one big literal: under StrictMode on
-# Windows PowerShell 5.1, a single bad member reference inside a large
-# [ordered]@{} literal aborts the whole statement with a vague error line.
-$envRoot     = Get-ZoombieEnvRoot
-$ffmpegPath  = Join-Path $envRoot 'bin\ffmpeg.exe'
-$ffprobePath = Join-Path $envRoot 'bin\ffprobe.exe'
-$ytdlpPath   = Join-Path $envRoot 'bin\yt-dlp.exe'
-
-$pythonVersion = $null
-if ($python) { $pythonVersion = Get-ZoombieToolVersion -Exe $python -VersionArgs '--version' }
-$ffmpegVersion  = Get-ZoombieToolVersion -Exe $ffmpegPath  -VersionArgs '-version'
-$ffprobeVersion = Get-ZoombieToolVersion -Exe $ffprobePath -VersionArgs '-version'
-$ytdlpVersion   = Get-ZoombieToolVersion -Exe $ytdlpPath   -VersionArgs '--version'
-
-# Read result fields defensively (Get-Field lives with the small helpers above),
-# so a missing key can never abort the run under StrictMode.
-
-$manifest = [ordered]@{}
-$manifest['zoombieVersion'] = Get-ZoombieSkillVersion
-$manifest['updatedUtc']     = (Get-Date).ToUniversalTime().ToString('o')
-$manifest['root']           = $root
-$manifest['asciiRoot']      = (Test-ZoombieAsciiPath $root)
-$manifest['python']         = [ordered]@{ path = $python; version = $pythonVersion }
-$manifest['ffmpeg']         = [ordered]@{ path = $ffmpegPath;  version = $ffmpegVersion }
-$manifest['ffprobe']        = [ordered]@{ path = $ffprobePath; version = $ffprobeVersion }
-$manifest['ytDlp']          = [ordered]@{ path = $ytdlpPath;   version = $ytdlpVersion }
-$manifest['whisper']        = [ordered]@{
-    path    = Get-Field $whisperInfo 'Exe'
-    tag     = Get-Field $whisperInfo 'Tag'
-    asset   = Get-Field $whisperInfo 'Asset'
-    backend = Get-Field $whisperInfo 'Backend'
+$prevEap = $ErrorActionPreference; $ErrorActionPreference = 'Continue'
+try {
+    $output = & powershell @workerArgs
+    $exit   = $LASTEXITCODE
 }
-$manifest['model']          = [ordered]@{
-    path   = Get-Field $modelInfo 'Path'
-    name   = Get-Field $modelInfo 'Name'
-    sizeMb = Get-Field $modelInfo 'SizeMb' 0
-}
-$manifest['hardware']       = $hw
-if (Test-WriteAllowed) {
-    Save-ZoombieEnvManifest -Manifest $manifest | Out-Null
-    Write-ZoombieLog -Level Info -Message "manifest written: $(Get-ZoombieEnvPath -Child 'env.json')"
-}
+finally { $ErrorActionPreference = $prevEap }
 
-$missing = @()
-if (-not (Test-Path (Get-ZoombieEnvPath -Child 'bin','ffmpeg.exe')))  { $missing += 'ffmpeg' }
-if (-not (Test-Path (Get-ZoombieEnvPath -Child 'bin','ffprobe.exe'))) { $missing += 'ffprobe' }
-if (-not (Test-Path (Get-ZoombieEnvPath -Child 'bin','yt-dlp.exe')))  { $missing += 'yt-dlp' }
-if (-not (Test-Path (Get-ZoombieEnvPath -Child 'bin','whisper','whisper-cli.exe'))) { $missing += 'whisper-cli' }
-if (-not (Test-Path (Get-ZoombieEnvPath -Child 'models')))            { $missing += 'models' }
+# Reproduce the worker's single JSON result line on our stdout so callers (and
+# the setup.md flow) parse setup.ps1 exactly as they parsed setup.ps1 before.
+$resultLine = @($output) | Where-Object { "$_" -match '^\s*\{' } | Select-Object -Last 1
+if ($resultLine) { Write-Output $resultLine }
 
-if ($script:Check) {
-    Write-ZoombieLog -Level Step -Message "CHECK complete. Missing: $(if ($missing) { $missing -join ', ' } else { 'none' })"
+# Derive a clean exit code from the result; fall back to the child's code.
+$workerOk = $null
+if ($resultLine) {
+    try { $workerOk = [bool]($resultLine | ConvertFrom-Json).ok } catch { $workerOk = $null }
 }
-
-# In CHECK/DRY-RUN, "missing" simply means "not installed yet" and is expected.
-$ok = ($missing.Count -eq 0) -or ($script:Check) -or ($script:DryRun)
-$resultData = [ordered]@{
-    mode     = $mode
-    root     = $root
-    cli      = $cliPath
-    skills   = @($skillResults)
-    missing  = $missing
-    changes  = @($script:Changes)
-    manifest = $manifest
+if ($null -eq $workerOk) {
+    if ($exit -ne 0) { exit $exit } else { exit 0 }
 }
-Write-ZoombieResult -Action 'setup' -Ok $ok -Data $resultData -ErrorMessage $(if ($missing.Count -gt 0 -and -not $script:Check) { "Missing after setup: $($missing -join ', ')" } else { $null })
+if ($workerOk) { exit 0 } else { exit 1 }

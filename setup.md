@@ -19,7 +19,11 @@ You are setting up a Windows PC so the user can extract audio from video and
 transcribe audio/video to text. **Do not improvise install or media commands.**
 The repo already contains a tested, idempotent implementation:
 
-- [`scripts/setup.ps1`](scripts/setup.ps1) — installs the whole toolchain into an ASCII root.
+- [`scripts/setup.ps1`](scripts/setup.ps1) — thin entry point. It always fetches
+  the latest worker from GitHub and runs it, so **any start of setup means
+  install or update to the latest**.
+- [`scripts/setup-worker.ps1`](scripts/setup-worker.ps1) — the installer/updater
+  that actually does the work (also used directly for local development).
 - [`scripts/zoombie.ps1`](scripts/zoombie.ps1) — the runtime CLI. All skills call this.
 - [`scripts/selftest.ps1`](scripts/selftest.ps1) — end-to-end verification.
 - [`skills/`](skills/) — the canonical skill sources, deployed to the global root.
@@ -81,7 +85,9 @@ If `curl.exe` is available it also works:
 `curl.exe -L -o "$src\setup.ps1" https://raw.githubusercontent.com/carnivorum/zoombie/main/scripts/setup.ps1`
 
 > If `zoombie-env` already exists with a checkout, this step just refreshes
-> `setup.ps1`; the install itself is idempotent.
+> `setup.ps1`. On the next run `setup.ps1` re-fetches the latest
+> `setup-worker.ps1` from GitHub, so a re-run always updates to the latest
+> rather than re-installing a stale copy. The install itself is idempotent.
 
 ### 0.2 Shell note
 

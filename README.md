@@ -27,7 +27,8 @@ The skills are thin wrappers that call one CLI.
 setup.md                        thin setup prompt that drives the scripts
 scripts/
   lib/ZoombieEnv.psm1           shared helpers (paths, ASCII guard, manifest, JSON result)
-  setup.ps1                     install/verify orchestrator (-Check, -DryRun)
+  setup.ps1                     thin entry point: fetch the latest setup-worker.ps1 and run it
+  setup-worker.ps1              the installer/updater (install or update; -Check, -DryRun)
   zoombie.ps1                   runtime CLI (doctor/download/extract/transcribe/pipeline/clean)
   selftest.ps1                  end-to-end test incl. Cyrillic-path regression
 skills/
@@ -61,27 +62,37 @@ Skills are deployed to the global root `%USERPROFILE%\.roo\skills\`.
 ## Quick start
 
 ```powershell
+# LOCAL DEV: install/update from THIS working tree (no network)
 # detect only (writes nothing)
-powershell -NoProfile -ExecutionPolicy Bypass -File scripts\setup.ps1 -Check
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts\setup-worker.ps1 -Check
 
 # show the plan (writes nothing)
-powershell -NoProfile -ExecutionPolicy Bypass -File scripts\setup.ps1 -DryRun
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts\setup-worker.ps1 -DryRun
 
-# install / update everything (idempotent)
-powershell -NoProfile -ExecutionPolicy Bypass -File scripts\setup.ps1
+# install / update everything from the working tree (idempotent)
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts\setup-worker.ps1
 
 # verify end to end (includes a Cyrillic-path regression test)
 powershell -NoProfile -ExecutionPolicy Bypass -File scripts\selftest.ps1
 ```
 
+```powershell
+# END USERS: any invocation of setup.ps1 installs or updates to the LATEST
+# (it fetches the latest setup-worker.ps1 from GitHub and runs it)
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts\setup.ps1 -Check
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts\setup.ps1
+```
+
 ## Distributing to other machines
 
-[`scripts/setup.ps1`](scripts/setup.ps1) is the single entry point and is
-**self-bootstrapping**: pulled on its own from GitHub raw, it downloads the rest
-of the repo (shared module, runtime CLI, self-test, skills) into a local
-checkout, then installs. So the distribution unit is one URL.
+[`scripts/setup.ps1`](scripts/setup.ps1) is the single entry point and is a
+**thin bootstrap**: it always fetches the CURRENT
+[`scripts/setup-worker.ps1`](scripts/setup-worker.ps1) from GitHub and runs it
+with `-Refresh`. So any start of setup means *install or update to the latest* —
+there is no cached copy to go stale and no gate that can skip the update.
 
-On a new, **unconfigured** machine, download and run that one file:
+That makes the distribution unit a single URL. On any machine, configured or
+not:
 
 ```powershell
 $src = "$env:USERPROFILE\zoombie-env\src"
@@ -91,8 +102,8 @@ powershell -NoProfile -ExecutionPolicy Bypass -File "$src\setup.ps1"
 ```
 
 Or just paste [`setup.md`](setup.md) into a Zoo task — its Step 0 is exactly this.
-Re-running the same command updates the scripts in place (the install is
-idempotent).
+Re-running the same command re-fetches the latest worker and updates in place
+(the install is idempotent, so only what changed does work).
 
 What travels in the repo vs. what each machine rebuilds:
 
@@ -145,6 +156,12 @@ which `setup.ps1` compares to decide `up to date` vs `updated`.
 ## Hacking
 
 - Shared logic belongs in [`scripts/lib/ZoombieEnv.psm1`](scripts/lib/ZoombieEnv.psm1).
+- Install/update logic belongs in [`scripts/setup-worker.ps1`](scripts/setup-worker.ps1).
+  Keep [`scripts/setup.ps1`](scripts/setup.ps1) thin: it only fetches the worker
+  and runs it, so there is nothing in it to update.
+- When iterating locally, run `scripts\setup-worker.ps1` directly — it installs
+  the working tree as-is and never hits the network. `scripts\setup.ps1` is the
+  end-user path and always pulls the published worker.
 - Bump `ZoombieSkillVersion` in that module when skill content changes, so the
   deployment step can tell an installed skill is out of date.
 - Run `scripts\selftest.ps1` after any change that touches the pipeline.
