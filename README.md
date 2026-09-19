@@ -20,6 +20,11 @@ The skills are thin wrappers that call one CLI.
   destination. Non-ASCII input names, output folders, and user profiles are safe.
 - **Clean output.** whisper runs with `-nt` (no timestamps) and its log banner
   is kept off stdout; UTF-8 is forced so non-ASCII transcript text survives.
+- **The GPU is proved, not assumed.** `env.json` records what was *intended*
+  (`backend`). Every report also carries what whisper.cpp can *actually*
+  initialise (`backendObserved`), because those diverge whenever the CUDA
+  runtime is incomplete — and a CUDA build missing its cuBLAS DLLs exits 0
+  while transcribing on the CPU.
 
 ## Layout
 
@@ -46,7 +51,9 @@ The installed toolchain lives outside the repo, at an ASCII path:
 ```
 %USERPROFILE%\zoombie-env\
   bin\ffmpeg.exe, ffprobe.exe
-  bin\whisper\whisper-cli.exe (+ CUDA/Vulkan DLLs beside it)
+  bin\whisper\whisper-cli.exe (+ CUDA/Vulkan DLLs beside it, incl. the cuBLAS
+               runtime cublas64_11.dll/cublasLt64_11.dll, provisioned separately
+               because the whisper.cpp asset does not ship it)
   bin\zoombie\zoombie.ps1, lib\ZoombieEnv.psm1, pdf\extract_pdf.py   the deployed CLI
   models\ggml-*.bin
   work\<guid>\                                    ASCII scratch for each job
@@ -150,12 +157,60 @@ $zoombie = "$env:USERPROFILE\zoombie-env\bin\zoombie\zoombie.ps1"
 Every subcommand accepts `-DryRun` (plan only) and most accept `-Force`.
 The input parameter is `-Source` (not `-Input`, which PowerShell reserves).
 
+## Performance: proving the GPU is really used
+
+`transcribe` and `pipeline` report how the run actually executed, so a silent
+slowdown is impossible to miss:
+
+| Field | Meaning |
+|-------|---------|
+| `deviceUsed` | the device whisper used for THIS run (`cuda`, `vulkan` or `cpu`) |
+| `deviceName` | the backend whisper initialised, e.g. `CUDA0` |
+| `backendConfigured` | what `env.json` intended (usually equals the above) |
+| `loadMs` / `totalMs` / `encodeMs` / `decodeMs` | the `whisper_print_timings` block |
+| `audioDurationSec` | input duration from `ffprobe` |
+| `realtimeFactor` | `totalMs` / audio duration — **lower is faster** |
+| `fallbackReason` | present when the run fell back (GPU error, or a silent CPU fallback) |
+| `silentCpuFallback` | `true` when whisper exited 0 but used no GPU device |
+
+`realtimeFactor` is the number to watch: roughly `0.03-0.10` is a working GPU
+(a 90-minute file in a few minutes), while `~1.0` means the CPU is doing the
+work (a 90-minute file takes about 90 minutes). The same lines are on stderr and
+in `data.log`.
+
+### CUDA runtime requirement (why the GPU can silently not be used)
+
+The ggml-org `whisper-cublas-*` asset ships `ggml-cuda.dll` but **not the cuBLAS
+runtime** that `ggml-cuda.dll` loads on first use. Without `cublas64_11.dll` and
+`cublasLt64_11.dll` beside `whisper-cli.exe`, `ggml_cuda_init` cannot create a
+device and whisper.cpp falls back to the CPU **while still exiting 0**. Nothing
+in the pipeline sees a failure: `env.json` keeps saying `cuda`, and only the run
+time reveals the problem.
+
+`setup-worker.ps1` therefore provisions the matching cuBLAS 11.x runtime
+separately, from NVIDIA's CUDA 11.8 redist manifest — a single deterministic JSON
+document with one published sha256 per component, which is what makes the
+download reproducible without installing the CUDA Toolkit. The archive's sha256
+is verified before anything is copied next to the binary, and a CUDA install
+whose runtime is still incomplete is reported as missing (by exact DLL name) and
+fails loudly rather than being left silently CPU-only.
+
+To check the state at any time:
+
+```powershell
+# names the exact missing DLLs when a CUDA install cannot initialise
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts\setup-worker.ps1 -Check
+
+# backendConfigured vs backendObserved, with a warning on mismatch
+& "$env:USERPROFILE\zoombie-env\bin\zoombie\zoombie.ps1" doctor
+```
+
 ## Skills
 
 The five skills in [`skills/`](skills/) are the canonical sources. They only
 inspect the project, propose paths, collect the user's confirmation, and then
 call `zoombie.ps1`. They are namespaced `zoombie-*` so their names cannot
-collide with a foreign skill, and they carry `cvrm-zoombie-version: 3.1.0`,
+collide with a foreign skill, and they carry `cvrm-zoombie-version: 3.2.0`,
 which `setup.ps1` compares to decide `up to date` vs `updated`.
 
 `zoombie-pdf-to-md` converts a PDF to Markdown. Text PDFs need nothing extra;
@@ -176,7 +231,7 @@ does for whisper.cpp.
   end-user path and always pulls the published worker.
 - Bump `ZoombieSkillVersion` in that module when skill content changes, so the
   deployment step can tell an installed skill is out of date. It is currently
-  `3.1.0`; every `SKILL.md` carries the same value in `cvrm-zoombie-version`.
+  `3.2.0`; every `SKILL.md` carries the same value in `cvrm-zoombie-version`.
 - The PDF dependencies are installed with `pip install --user`. pip also writes
   console launchers into `%APPDATA%\Python\<ver>\Scripts`, which this toolchain
   never calls, so the installer snapshots that folder first and removes only the

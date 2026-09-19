@@ -206,24 +206,72 @@ function Invoke-Doctor {
     [CmdletBinding()]
     param()
     $env = Get-Environment
+
+    # backendConfigured comes from env.json (what was INTENDED at install time).
+    # backendObserved comes from running whisper-cli, which is the only way to
+    # know what it can ACTUALLY initialise. Reporting only the former is exactly
+    # how a CUDA install with a missing cuBLAS runtime looked healthy while every
+    # run silently used the CPU. The probe is `whisper-cli --help`, which performs
+    # the full backend init and exits: no model, no audio, no filesystem writes.
+    $backendConfigured = $env.backend
+    $probe             = Invoke-ZoombieWhisperBackendProbe -WhisperExe $env.whisper
+    $backendObserved   = $probe.Device
+    $cudaRuntime       = Get-ZoombieWhisperCudaRuntime -WhisperExe $env.whisper
+    $probeReason       = $probe.Reason
+    # Name the likely cause when the runtime DLLs are absent, so the mismatch is
+    # actionable rather than a bare "cpu".
+    if ($backendConfigured -eq 'cuda' -and -not $cudaRuntime.Ready) {
+        $probeReason = "the CUDA runtime is incomplete (missing: $($cudaRuntime.Missing -join ', ')); ggml-cuda.dll cannot create a device, so whisper falls back to the CPU"
+    }
+
     $report = [ordered]@{
         root      = $env.root
         asciiRoot = (Test-ZoombieAsciiPath $env.root)
         ffmpeg    = @{ path = $env.ffmpeg;  version = if ($env.ffmpeg)  { Get-ZoombieToolVersion -Exe $env.ffmpeg  -VersionArgs '-version' } else { $null } }
         ffprobe   = @{ path = $env.ffprobe; version = if ($env.ffprobe) { Get-ZoombieToolVersion -Exe $env.ffprobe -VersionArgs '-version' } else { $null } }
         ytDlp     = @{ via = 'python -m yt_dlp'; python = $env.python; version = if ($env.python) { Get-ZoombieToolVersion -Exe $env.python -VersionArgs @('-m', 'yt_dlp', '--version') } else { $null } }
-        whisper   = @{ path = $env.whisper; backend = $env.backend }
+        whisper   = @{
+            path              = $env.whisper
+            # Kept for existing callers; equals backendConfigured.
+            backend           = $backendConfigured
+            backendConfigured = $backendConfigured
+            backendObserved   = $backendObserved
+            deviceName        = $probe.DeviceName
+            probeReason       = $probeReason
+            cudaRuntime       = @{
+                gpuModule = $cudaRuntime.GpuModule
+                ready     = $cudaRuntime.Ready
+                present   = @($cudaRuntime.Present)
+                missing   = @($cudaRuntime.Missing)
+                version   = (Get-ZoombieCublasProvision).version
+            }
+        }
         model     = @{ path = $env.model; exists = ($env.model -and (Test-Path -LiteralPath $env.model)) }
     }
+
     $missing = @()
     if (-not $report.ffmpeg.path)  { $missing += 'ffmpeg' }
     if (-not $report.ffprobe.path) { $missing += 'ffprobe' }
     if (-not $report.ytDlp.version) { $missing += 'yt-dlp' }
     if (-not $report.whisper.path) { $missing += 'whisper-cli' }
     if (-not $report.model.exists) { $missing += 'model' }
+
+    # A mismatch is a warning, not a failure: the CPU fallback still transcribes,
+    # it is just orders of magnitude slower, and the user must be told.
+    $warnings = New-Object System.Collections.Generic.List[string]
+    if ($backendConfigured -and $backendObserved -and $backendConfigured -ne $backendObserved) {
+        $warnings.Add("backend mismatch: configured '$backendConfigured' but whisper initialises '$backendObserved' ($probeReason)")
+    }
+    if ($backendConfigured -eq 'cuda' -and -not $cudaRuntime.Ready) {
+        $warnings.Add("CUDA runtime incomplete (missing: $($cudaRuntime.Missing -join ', '))")
+    }
+    if (-not $backendObserved) { $warnings.Add("backend could not be probed: $probeReason") }
+    foreach ($warning in $warnings) { Write-ZoombieLog -Level Warn -Message $warning }
+
     Write-ZoombieResult -Action 'doctor' -Ok ($missing.Count -eq 0) -Data ([ordered]@{
-        report  = $report
-        missing = $missing
+        report   = $report
+        missing  = $missing
+        warnings = @($warnings)
     }) -ErrorMessage $(if ($missing.Count) { "Missing: $($missing -join ', ')" } else { $null })
 }
 
@@ -390,29 +438,46 @@ function Invoke-WhisperOnSafeCopy {
     }
 
     # Hardened invocation.
-    # IMPORTANT (Windows PowerShell 5.1): whisper-cli writes a log banner to
-    # stderr. With $ErrorActionPreference='Stop' that native stderr output is
-    # turned into a terminating error, so the preference is relaxed for the
-    # duration of the native call. stdout is captured on its own so the banner
-    # never pollutes the transcript file.
+    # IMPORTANT (Windows PowerShell 5.1): whisper-cli writes its backend banner
+    # and its whisper_print_timings block to stderr, NOT stdout. With
+    # $ErrorActionPreference='Stop' that native stderr output is turned into a
+    # terminating error, so the preference is relaxed for the native calls.
+    #
+    # stderr is redirected to a file inside the ASCII work dir rather than to
+    # $null: the previous `2>$null` threw away the only evidence of the device
+    # actually used and of how long the run took, so a silent CPU fallback was
+    # invisible and no realtime factor could ever be reported. The file lives in
+    # the scratch dir, so it is ASCII-safe and is removed with the work dir; the
+    # transcript .txt is still written by whisper from stdout-only content.
+    $whisperLog = Join-Path $work 'whisper.log'
+    $fallbackReason = $null
     $prevUtf8 = $env:PYTHONUTF8; $env:PYTHONUTF8 = '1'
     $prevEap  = $ErrorActionPreference
     $ErrorActionPreference = 'Continue'
+    $stopwatch = [System.Diagnostics.Stopwatch]::StartNew()
     try {
-        $stdout = @(& $whisper @args 2>$null)
+        # stdout carries whisper's own copy of the transcript. It must NOT reach
+        # the console: this CLI's contract is exactly one JSON line on stdout, so
+        # the transcript is taken from the -otxt/-osrt files and stdout is merged
+        # away. stderr (the banner and the timings block) goes to the log file.
+        & $whisper @args 2>$whisperLog | Out-Null
         $exit = $LASTEXITCODE
-
+        # The GPU path may fail mid-run (driver mismatch, VRAM pressure, a
+        # cuBLAS failure). Fall back to the CPU, but say so: this restarts the
+        # WHOLE job, so a long file pays for the failed attempt AND the retry.
         if ($exit -ne 0 -and -not $NoGpu) {
-            # GPU path may fail on driver mismatch: retry once forcing CPU.
-            Write-ZoombieLog -Level Warn -Message "whisper exited $exit; retrying with -ng (CPU)"
+            $fallbackReason = "whisper exited $exit on the GPU path; the whole job was restarted on the CPU (-ng)"
+            Write-ZoombieLog -Level Warn -Message $fallbackReason
             $argsRetry = @('-m', $Env.model, '-f', $safe.InputPath, '-l', $Language, '-otxt', '-nt', '-ng')
             if ($WantSrt) { $argsRetry += '-osrt' }
             $argsRetry += @('-of', $outBase)
-            $stdout = @(& $whisper @argsRetry 2>$null)
+            $stopwatch.Restart()
+            & $whisper @argsRetry 2>$whisperLog | Out-Null
             $exit = $LASTEXITCODE
         }
     }
     finally {
+        $stopwatch.Stop()
         $env:PYTHONUTF8 = $prevUtf8
         $ErrorActionPreference = $prevEap
     }
@@ -436,17 +501,70 @@ function Invoke-WhisperOnSafeCopy {
         }
     }
 
-    # Log banner captured from stdout (kept out of the .txt file).
-    $banner = @($stdout) | Where-Object { "$_" -match 'ggml_cuda_init|whisper_init|GPU|CUDA' } | Select-Object -First 6
+    # Read the captured stderr log for the device ACTUALLY used and the timings.
+    # This replaces the old stdout grep, which could never match because
+    # whisper.cpp emits those lines on stderr.
+    $logLines = Read-ZoombieWhisperLog -Path $whisperLog
+    $deviceInfo = Get-ZoombieWhisperDeviceInfo -LogLines $logLines
+    $timings = Get-ZoombieWhisperTimings -LogLines $logLines
+
+    # The audio duration drives the realtime factor. ffprobe may be absent, in
+    # which case the factor is reported as null rather than guessed.
+    $durationSec = $null
+    if ($Env.ffprobe -and (Test-Path -LiteralPath $Env.ffprobe)) {
+        $prevEapProbe = $ErrorActionPreference; $ErrorActionPreference = 'Continue'
+        try {
+            $probeOut = & $Env.ffprobe -v error -show_entries format=duration -of csv=p=0 $AudioPath 2>$null
+        }
+        finally { $ErrorActionPreference = $prevEapProbe }
+        $invariant = [System.Globalization.CultureInfo]::InvariantCulture
+        $parsedDuration = 0.0
+        if ([double]::TryParse(("$probeOut").Trim(), [System.Globalization.NumberStyles]::Float, $invariant, [ref]$parsedDuration) -and $parsedDuration -gt 0) {
+            $durationSec = $parsedDuration
+        }
+    }
+
+    $totalMs = $timings.TotalMs
+    $realtimeFactor = $null
+    if ($totalMs -and $durationSec) {
+        $realtimeFactor = [math]::Round(($totalMs / 1000.0) / $durationSec, 4)
+    }
+
+    # A successful exit that used no GPU device is the SILENT CPU fallback: exit
+    # code 0, no error, hours of CPU work. It must never pass unnoticed again.
+    $silentFallback = ($deviceInfo.Device -eq 'cpu' -and -not $NoGpu)
+    if ($silentFallback -and -not $fallbackReason) {
+        $fallbackReason = "whisper exited 0 but used the CPU ($($deviceInfo.Reason))"
+    }
+    if ($fallbackReason) { Write-ZoombieLog -Level Warn -Message "CPU fallback: $fallbackReason" }
+    if ($realtimeFactor) {
+        Write-ZoombieLog -Level Info -Message ("  device=$($deviceInfo.Device) totalMs=$totalMs realtimeFactor=$realtimeFactor")
+    } else {
+        Write-ZoombieLog -Level Info -Message "  device=$($deviceInfo.Device) (timings unavailable)"
+    }
 
     if (-not $KeepWork) { Remove-Item -Recurse -Force $work -ErrorAction SilentlyContinue }
 
     Write-ZoombieResult -Action 'transcribe' -Ok $true -Data ([ordered]@{
-        outputBase = $OutputBase
-        artifacts  = $artifacts
-        backend    = $Env.backend
-        log        = $banner
-        asciiSafe  = $true
+        outputBase     = $OutputBase
+        artifacts      = $artifacts
+        backend        = $Env.backend
+        # backendConfigured is the manifest's intent; deviceUsed is what the run
+        # actually did. They diverge in exactly the failure this fixes.
+        backendConfigured = $Env.backend
+        deviceUsed     = $deviceInfo.Device
+        deviceName     = $deviceInfo.DeviceName
+        loadMs         = $timings.LoadMs
+        totalMs        = $totalMs
+        encodeMs       = $timings.EncodeMs
+        decodeMs       = $timings.DecodeMs
+        audioDurationSec = $durationSec
+        realtimeFactor = $realtimeFactor
+        wallMs         = [math]::Round($stopwatch.Elapsed.TotalMilliseconds, 1)
+        fallbackReason = $fallbackReason
+        silentCpuFallback = $silentFallback
+        log            = @($logLines | Where-Object { "$_" -match 'load_backend|ggml_cuda_init|using CUDA|use gpu|backend_init_gpu' } | Select-Object -First 6)
+        asciiSafe      = $true
     })
 }
 

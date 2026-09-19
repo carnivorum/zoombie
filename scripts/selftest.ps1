@@ -67,6 +67,21 @@ $doctor = $doctorJson | ConvertFrom-Json
 Info ("ok={0} missing={1}" -f $doctor.ok, ($doctor.data.missing -join ', '))
 if (-not $doctor.ok) { throw "doctor reported missing: $($doctor.data.missing -join ', ')" }
 
+# --- 1b. Backend regression guard (configured vs actually initialised) ------
+# `doctor` reports two different things: backendConfigured (what env.json
+# intends) and backendObserved (what whisper-cli can really initialise). A CUDA
+# install missing its cuBLAS runtime used to report `cuda` while every run
+# silently fell back to the CPU, so this asserts the two agree instead of
+# trusting the manifest. On a CPU/Vulkan machine the check is a no-op.
+$backendConfigured = $doctor.data.report.whisper.backendConfigured
+$backendObserved   = $doctor.data.report.whisper.backendObserved
+Info ("backend: configured={0} observed={1}" -f $backendConfigured, $backendObserved)
+foreach ($w in @($doctor.data.warnings) | Where-Object { $_ }) { Info "WARN: $w" }
+if ($backendConfigured -eq 'cuda' -and $backendObserved -ne 'cuda') {
+    throw ("CUDA backend regression: configured 'cuda' but whisper initialises '{0}' - {1}" -f `
+        $backendObserved, $doctor.data.report.whisper.probeReason)
+}
+
 # --- 2. scratch folder with a CYRILLIC name (the regression test) ----------
 $cyr = -join ([char[]]@(0x442, 0x435, 0x441, 0x442))  # "тест"
 $scratch = Join-Path $env:TEMP ("zoombie-selftest-" + $cyr)
@@ -110,6 +125,19 @@ try {
     if (-not $tx.ok) { throw "transcribe failed: $($tx.error)" }
     $txtPath = $tx.data.artifacts.txt.path
     Info "transcript: $txtPath"
+    Info ("deviceUsed={0} deviceName={1} realtimeFactor={2} totalMs={3} audioSec={4}" -f `
+        $tx.data.deviceUsed, $tx.data.deviceName, $tx.data.realtimeFactor, $tx.data.totalMs, $tx.data.audioDurationSec)
+
+    # Regression guard for the silent CPU fallback: a successful run (exit 0) on
+    # the CPU while CUDA is configured is the exact failure this suite exists to
+    # catch, so it is a hard failure rather than a note.
+    if ($backendConfigured -eq 'cuda' -and $tx.data.deviceUsed -ne 'cuda') {
+        throw ("CUDA backend regression: transcription ran on '{0}' while 'cuda' is configured ({1})" -f `
+            $tx.data.deviceUsed, $tx.data.fallbackReason)
+    }
+    if ($tx.data.silentCpuFallback) {
+        throw ("Silent CPU fallback detected: {0}" -f $tx.data.fallbackReason)
+    }
 
     # --- 6. verify ------------------------------------------------------------
     $text = (Get-Content -LiteralPath $txtPath -Raw).ToLowerInvariant()

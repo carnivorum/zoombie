@@ -36,7 +36,9 @@ Hard rules:
 3. **Ask before installing.** Before the real `setup.ps1` run (which downloads
    ffmpeg, whisper.cpp and a model, and pip-installs yt-dlp plus the PDF
    dependencies), tell the user what will be fetched and roughly how large it is,
-   then wait for confirmation.
+   then wait for confirmation. On a machine with an NVIDIA GPU this also fetches
+   the CUDA 11.8 cuBLAS runtime (~400 MB), because the whisper.cpp CUDA asset does
+   not ship the cuBLAS DLLs that `ggml-cuda.dll` needs.
 4. **Never write media output without a confirmed destination.** Every skill
    inspects the project, proposes candidate paths, and asks before writing.
 5. **Never modify files that are not yours.** Do not edit the project's source,
@@ -141,6 +143,7 @@ What it does (all idempotent — anything present is skipped):
 | ffmpeg + ffprobe | `zoombie-env\bin\` | static build, downloaded directly |
 | yt-dlp | the existing Python | `pip install --user`, invoked as `python -m yt_dlp` (pure Python, so no ASCII constraint) |
 | whisper.cpp | `zoombie-env\bin\whisper\` | prebuilt CUDA/Vulkan/CPU asset, DLLs kept beside the exe |
+| cuBLAS runtime | `zoombie-env\bin\whisper\` | **on a CUDA machine only**: the asset ships `ggml-cuda.dll` but *not* the cuBLAS DLLs it loads, so the matching 11.x runtime (`cublas64_11.dll`, `cublasLt64_11.dll`) is fetched from NVIDIA's CUDA 11.8 redist manifest and its sha256 verified before it is placed beside `whisper-cli.exe` |
 | whisper model | `zoombie-env\models\` | size chosen from the detected hardware (~0.15–3 GB) |
 | PDF dependencies | the existing Python | `pymupdf4llm` + `pytesseract` via `pip install --user`; Python is already required |
 | pip shims | `%APPDATA%\Python\<ver>\Scripts` | any launcher this install creates is removed again; pre-existing tools are left alone |
@@ -171,7 +174,7 @@ Versioning:
 
 - Every skill is namespaced `zoombie-*`, so its name can never collide with a
   foreign skill — deployment simply overwrites.
-- Each skill carries `cvrm-zoombie-version: 3.1.0`; on a re-run the version is
+- Each skill carries `cvrm-zoombie-version: 3.2.0`; on a re-run the version is
   compared and the skill is reported as `up to date` or `updated`.
 
 If the user prefers project-local skills, they are already versioned sources in
@@ -200,7 +203,10 @@ The self-test:
 3. writes the artifacts into a scratch folder whose name contains **Cyrillic**
    characters — this is the regression test for the whisper path bug,
 4. runs `extract` and `transcribe` through the CLI,
-5. verifies the transcript contains all seven key words,
+5. verifies the transcript contains all seven key words, and that the run really
+   used the configured backend (`deviceUsed`). On a CUDA machine a CPU run is a
+   hard failure, because whisper.cpp exits 0 while quietly falling back,
+6. reports the measured `realtimeFactor` for the run,
 6. when the PDF toolchain is installed, generates a small PDF and runs `readpdf`
    into the same Cyrillic destination, asserting the Markdown is correct
    (otherwise this step is skipped),
@@ -226,7 +232,11 @@ Give the user a final table with:
 - toolchain root and whether it is ASCII (`data.root`, `data.asciiRoot`),
 - Python version/path (used by both yt-dlp and the PDF toolchain),
 - ffmpeg and ffprobe versions and paths, and the yt-dlp version (via `python -m yt_dlp`),
-- whisper.cpp release tag + asset + backend and the binary path,
+- whisper.cpp release tag + asset, the backend **configured** and the backend
+  **observed** (`data.manifest.whisper.backendObserved`) plus whether the CUDA
+  runtime was provisioned (`data.manifest.whisper.cudaRuntimeReady`), and the
+  binary path. If those two backends disagree, or a CUDA machine reports no
+  cuBLAS DLLs, say so plainly: the install will run on the CPU only.
 - model name and size,
 - PDF toolchain: the Python used and whether the dependencies installed cleanly
   (`data.manifest.pdf.ok`), and whether Tesseract was detected
@@ -250,12 +260,14 @@ cause and the fix rather than overstating the result.
 [ ] Backend selected from hardware (cuda > vulkan > cpu) and explained
 [ ] Model downloaded and recorded in env.json
 [ ] CLI deployed to zoombie-env\bin\zoombie\zoombie.ps1
-[ ] Five zoombie-* skills deployed to %USERPROFILE%\.roo\skills\ with cvrm-zoombie-version 3.1.0
+[ ] Five zoombie-* skills deployed to %USERPROFILE%\.roo\skills\ with cvrm-zoombie-version 3.2.0
 [ ] No stray .roo\skills directory outside %USERPROFILE%
 [ ] A skill invocation routes through zoombie.ps1 (not raw ffmpeg/whisper/python commands)
 [ ] PDF dependencies installed into the existing Python; Tesseract detection noted (optional)
+[ ] Backend verified, not assumed: `backendObserved` matches `backendConfigured`; on a CUDA machine the cuBLAS runtime (`cublas64_11.dll`, `cublasLt64_11.dll`) is present beside `whisper-cli.exe`
+[ ] A real transcription reports `deviceUsed: cuda` and a `realtimeFactor` well below 1.0
 [ ] Non-ASCII (Cyrillic) paths handled: inputs isolated in ASCII work dirs
-[ ] `selftest.ps1` passed (7/7 key words, Cyrillic destination)
+[ ] `selftest.ps1` passed (7/7 key words, Cyrillic destination, GPU backend assertion)
 [ ] `readpdf` (PDF -> Markdown) verified or reported as skipped
 [ ] No pre-existing project file was modified
 ```

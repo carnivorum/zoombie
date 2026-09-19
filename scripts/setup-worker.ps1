@@ -491,6 +491,105 @@ function Select-WhisperAsset {
     return $null
 }
 
+function Install-CublasRuntime {
+    <#
+    .SYNOPSIS
+        Ensure the cuBLAS runtime that ggml-cuda.dll loads is beside whisper-cli.exe.
+
+    .DESCRIPTION
+        The ggml-org `whisper-cublas-*` asset ships ggml-cuda.dll but NOT the
+        cuBLAS DLLs that ggml-cuda.dll loads on first use. Verified on this
+        machine: the asset zip contains only `Release\<files>` and no
+        cublas64_11.dll. Without them ggml_cuda_init cannot create a CUDA device,
+        whisper.cpp then transcribes on the CPU and STILL exits 0, so the install
+        looks healthy while every run is CPU-slow.
+
+        The runtime is therefore provisioned separately, from NVIDIA's CUDA 11.8
+        redist manifest - one deterministic document with one sha256 per
+        component, which is what makes this reproducible without installing the
+        CUDA Toolkit. The sha256 is verified BEFORE anything is copied, because
+        these DLLs are loaded into the whisper process.
+
+        The archive is downloaded and unpacked inside the ASCII scratch root
+        (New-ZoombieAsciiTempDir, the same pattern as every other component) and
+        only the named DLLs are extracted next to the exe.
+
+    .OUTPUTS
+        A hashtable: @{ Ok; Installed; Missing; Version; Note }
+    #>
+    [CmdletBinding()]
+    param([Parameter(Mandatory)][string]$DestDir)
+
+    $spec = Get-ZoombieCublasProvision
+    $result = @{ Ok = $false; Installed = @(); Missing = @(); Version = $spec.version; Note = $null }
+
+    $runtime = Get-ZoombieWhisperCudaRuntime -WhisperExe (Join-Path $DestDir 'whisper-cli.exe')
+    if ($runtime.Ready -and -not $script:Force) {
+        $result.Ok = $true
+        $result.Installed = @($runtime.Present)
+        Write-ZoombieLog -Level Info -Message "cuBLAS runtime present: $($runtime.Present -join ', ')"
+        return $result
+    }
+
+    if (-not (Test-WriteAllowed)) {
+        # -Check/-DryRun must still report the CUDA runtime truthfully, naming
+        # exactly which DLL is absent instead of only saying "not installed".
+        Write-ZoombieLog -Level Step -Message "would provision cuBLAS $($spec.version) -> $DestDir"
+        if ($runtime.Missing) {
+            Write-ZoombieLog -Level Warn -Message "     CUDA runtime missing: $($runtime.Missing -join ', ')"
+        }
+        $result.Ok = $true
+        $result.Missing = @($runtime.Missing)
+        return $result
+    }
+
+    Write-ZoombieLog -Level Step -Message "provisioning CUDA runtime cuBLAS $($spec.version) (not shipped in the whisper asset)"
+
+    $tmp = New-ZoombieAsciiTempDir -Prefix 'zoombie-cublas'
+    try {
+        $zip = Join-Path $tmp 'cublas.zip'
+        Invoke-ZoombieDownload -Url $spec.url -OutFile $zip
+
+        # Verify against NVIDIA's published hash before extracting: an unchecked
+        # native DLL copied into the toolchain is both a correctness and a code
+        # execution risk, and the manifest makes the check free.
+        $actual = (Get-FileHash -LiteralPath $zip -Algorithm SHA256).Hash
+        if ($actual -ne $spec.sha256) {
+            throw "cuBLAS archive hash mismatch: expected $($spec.sha256), got $actual"
+        }
+
+        Add-Type -AssemblyName System.IO.Compression.FileSystem -ErrorAction SilentlyContinue
+        $archive = [System.IO.Compression.ZipFile]::OpenRead($zip)
+        try {
+            foreach ($dll in $spec.dlls) {
+                $entry = @($archive.Entries |
+                    Where-Object { $_.FullName -match "(?:^|/)$([regex]::Escape($dll))$" }) | Select-Object -First 1
+                if (-not $entry) {
+                    $result.Missing += $dll
+                    continue
+                }
+                [System.IO.Compression.ZipFileExtensions]::ExtractToFile($entry, (Join-Path $DestDir $dll), $true)
+                $result.Installed += $dll
+            }
+        }
+        finally { $archive.Dispose() }
+    }
+    finally {
+        Remove-Item -Recurse -Force $tmp -ErrorAction SilentlyContinue
+    }
+
+    $after = Get-ZoombieWhisperCudaRuntime -WhisperExe (Join-Path $DestDir 'whisper-cli.exe')
+    $result.Missing = @($after.Missing)
+    $result.Ok = $after.Ready
+    if ($result.Ok) {
+        $script:Changes.Add("provisioned cuBLAS $($spec.version) runtime")
+    } else {
+        # Never leave a CUDA install that will silently run on the CPU.
+        $result.Note = "cuBLAS runtime still incomplete (missing: $($result.Missing -join ', '))"
+    }
+    return $result
+}
+
 function Install-Whisper {
     [CmdletBinding()]
     param([Parameter(Mandatory)][string]$Backend)
@@ -512,7 +611,14 @@ function Install-Whisper {
             $scan = Select-WhisperAsset -Backend $prevBackend
             if ($scan) { $prevTag = $scan.Tag; $prevAsset = $scan.Name }
         }
-        return @{ Exe = $exe; Tag = $prevTag; Asset = $prevAsset; Backend = $prevBackend }
+        # The CUDA runtime is provisioned independently of the asset, so it is
+        # repaired here even when the exe is already present: an install with the
+        # asset but no cuBLAS is exactly the broken state this guards against.
+        $cublas = $null
+        if ($prevBackend -eq 'cuda') {
+            $cublas = Install-CublasRuntime -DestDir $destDir
+        }
+        return @{ Exe = $exe; Tag = $prevTag; Asset = $prevAsset; Backend = $prevBackend; Cublas = $cublas }
     }
 
     $asset = Select-WhisperAsset -Backend $Backend
@@ -525,7 +631,9 @@ function Install-Whisper {
     Write-ZoombieLog -Level Step -Message "selected whisper.cpp $($asset.Tag) asset $($asset.Name) [$($asset.Backend)]"
     if (-not (Test-WriteAllowed)) {
         Write-ZoombieLog -Level Info -Message "     would extract to $destDir"
-        return @{ Exe = $exe; Tag = $asset.Tag; Asset = $asset.Name; Backend = $asset.Backend }
+        $cublasDry = $null
+        if ($asset.Backend -eq 'cuda') { $cublasDry = Install-CublasRuntime -DestDir $destDir }
+        return @{ Exe = $exe; Tag = $asset.Tag; Asset = $asset.Name; Backend = $asset.Backend; Cublas = $cublasDry }
     }
 
     $tmp = New-ZoombieAsciiTempDir -Prefix 'zoombie-whisper'
@@ -538,14 +646,28 @@ function Install-Whisper {
         $found = Get-ChildItem -Path $destDir -Recurse -Filter 'whisper-cli.exe' | Select-Object -First 1
         if (-not $found) { throw 'whisper-cli.exe not found in archive' }
         if ($found.Directory.FullName -ne $destDir) {
-            # Flatten one level if the archive nested the binaries.
-            Get-ChildItem -Path $found.Directory.FullName -File | ForEach-Object {
+            # Flatten the release folder INTO the destination recursively. The
+            # archive nests everything under Release\, and whisper-cli.exe is not
+            # the only file it needs: the sibling ggml-*.dll backends (including
+            # ggml-cuda.dll) must come along too. Copying only the exe's own
+            # directory silently drops any file that sits elsewhere in the tree.
+            Get-ChildItem -Path $found.Directory.FullName -File -Recurse | ForEach-Object {
                 Copy-Item -LiteralPath $_.FullName -Destination (Join-Path $destDir $_.Name) -Force
             }
             $exe = Join-Path $destDir 'whisper-cli.exe'
         }
+        # The asset ships ggml-cuda.dll but no cuBLAS runtime, so a CUDA install
+        # is only usable once the runtime is provisioned. Fail loudly rather than
+        # leave a build that silently transcribes on the CPU.
+        $cublas = $null
+        if ($asset.Backend -eq 'cuda') {
+            $cublas = Install-CublasRuntime -DestDir $destDir
+            if (-not $cublas.Ok) {
+                throw "CUDA backend selected but the cuBLAS runtime could not be provisioned: $($cublas.Note)"
+            }
+        }
         $script:Changes.Add("installed whisper.cpp $($asset.Tag) ($($asset.Backend))")
-        return @{ Exe = $exe; Tag = $asset.Tag; Asset = $asset.Name; Backend = $asset.Backend }
+        return @{ Exe = $exe; Tag = $asset.Tag; Asset = $asset.Name; Backend = $asset.Backend; Cublas = $cublas }
     }
     finally {
         Remove-Item -Recurse -Force $tmp -ErrorAction SilentlyContinue
@@ -883,6 +1005,31 @@ $ytDlpInfo = Install-YtDlp -Python $python
 Write-ZoombieLog -Level Step -Message "ensuring whisper.cpp"
 $whisperInfo = Install-Whisper -Backend $hw.backend
 
+# 5b. Prove which backend whisper-cli can ACTUALLY initialise. The manifest
+# records what was INTENDED; only a probe reports what is usable, which is how a
+# CUDA install missing its cuBLAS runtime becomes visible at install time rather
+# than as hours of unnoticed CPU transcription later. --help performs the full
+# backend init and exits, needs no model, and touches no file, so it is safe in
+# -Check and -DryRun too.
+$whisperExe      = Get-Field $whisperInfo 'Exe'
+$backendConfig   = Get-Field $whisperInfo 'Backend'
+Write-ZoombieLog -Level Step -Message "probing whisper backend (what it can actually initialise)"
+$backendProbe    = Invoke-ZoombieWhisperBackendProbe -WhisperExe $whisperExe
+$backendObserved = Get-Field $backendProbe 'Device'
+$cudaRuntime     = Get-ZoombieWhisperCudaRuntime -WhisperExe $whisperExe
+if ($backendObserved) {
+    Write-ZoombieLog -Level Info -Message "backend observed: $backendObserved (configured: $backendConfig)"
+} else {
+    Write-ZoombieLog -Level Warn -Message "backend not observed: $(Get-Field $backendProbe 'Reason')"
+}
+# The two ways this install can claim CUDA while being unable to use it.
+if ($backendConfig -eq 'cuda' -and -not $cudaRuntime.Ready) {
+    Write-ZoombieLog -Level Warn -Message "CUDA build is missing its runtime: $($cudaRuntime.Missing -join ', ')"
+}
+if ($backendConfig -eq 'cuda' -and $backendObserved -and $backendObserved -ne 'cuda') {
+    Write-ZoombieLog -Level Warn -Message "backend MISMATCH: configured cuda but whisper initialised '$backendObserved' - $(Get-Field $backendProbe 'Reason')"
+}
+
 # 6. Model.
 if (-not $Model) { $Model = Get-RecommendedModel -Hw $hw }
 Write-ZoombieLog -Level Step -Message "ensuring whisper model '$Model'"
@@ -935,6 +1082,18 @@ $manifest['whisper']        = [ordered]@{
     tag     = Get-Field $whisperInfo 'Tag'
     asset   = Get-Field $whisperInfo 'Asset'
     backend = Get-Field $whisperInfo 'Backend'
+    # Recorded separately from `backend` because they answer different
+    # questions: `backend` is what we asked for, `backendObserved` is what
+    # whisper-cli can really initialise. They diverge when the CUDA runtime is
+    # incomplete, which is precisely the state that used to go unnoticed.
+    backendObserved  = $backendObserved
+    cudaRuntimeReady = $cudaRuntime.Ready
+    cudaRuntime      = [ordered]@{
+        gpuModule = $cudaRuntime.GpuModule
+        present   = @($cudaRuntime.Present)
+        missing   = @($cudaRuntime.Missing)
+        version   = (Get-ZoombieCublasProvision).version
+    }
 }
 $manifest['model']          = [ordered]@{
     path   = Get-Field $modelInfo 'Path'
@@ -960,6 +1119,12 @@ if (-not (Test-Path (Get-ZoombieEnvPath -Child 'bin','ffmpeg.exe')))  { $missing
 if (-not (Test-Path (Get-ZoombieEnvPath -Child 'bin','ffprobe.exe'))) { $missing += 'ffprobe' }
 if (-not $ytdlpVersion) { $missing += 'yt-dlp' }
 if (-not (Test-Path (Get-ZoombieEnvPath -Child 'bin','whisper','whisper-cli.exe'))) { $missing += 'whisper-cli' }
+# A CUDA install missing its cuBLAS runtime is not usable: whisper.cpp would
+# silently transcribe on the CPU and still exit 0. Name the exact DLLs so the
+# report cannot be mistaken for a healthy GPU install.
+if ($backendConfig -eq 'cuda' -and -not $cudaRuntime.Ready) {
+    $missing += @($cudaRuntime.Missing | ForEach-Object { "whisper-cuda-runtime ($_)" })
+}
 if (-not (Test-Path (Get-ZoombieEnvPath -Child 'models')))            { $missing += 'models' }
 # PDF tooling is optional for the transcription pipeline, so it is reported as
 # missing only in CHECK mode (which is purely informational and writes nothing).

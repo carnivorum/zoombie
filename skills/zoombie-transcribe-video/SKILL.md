@@ -1,6 +1,6 @@
 ---
 name: zoombie-transcribe-video
-cvrm-zoombie-version: 3.1.0
+cvrm-zoombie-version: 3.2.0
 description: End-to-end pipeline that turns a video file or a video URL into a transcript by chaining the zoombie download, extract and transcribe skills. Use when the user says things like "transcribe this video", "transcribe this link", "give me a transcript of this recording", or "make subtitles from this video". Collects every output-path confirmation up front in one pass, then runs download (when a URL is given), audio extraction, and whisper.cpp transcription in sequence.
 ---
 

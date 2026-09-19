@@ -1,6 +1,6 @@
 ---
 name: zoombie-transcribe-audio
-cvrm-zoombie-version: 3.1.0
+cvrm-zoombie-version: 3.2.0
 description: Transcribe an audio file to text (TXT and SRT, plus optional readable Markdown and summary) using a local whisper.cpp binary with a CUDA/Vulkan/CPU backend. Use when the user wants a speech-to-text transcript, subtitles, SRT/TXT output, or a cleaned-up readable version of a recording. Always inspects the project, proposes transcript output paths, and confirms the destination before writing anything.
 ---
 
@@ -74,6 +74,10 @@ do anything special — just pass the paths the user confirmed.
 
 - Never overwrite without asking; pass `-Force` only with the user's consent.
 - If the CLI returns `ok:false`, report `error` plainly. A GPU/driver mismatch
-  is retried automatically with CPU (`-ng`) before failing.
+  is retried with CPU (`-ng`) before failing, and `data.fallbackReason` says so.
+- Read `data.deviceUsed` and `data.realtimeFactor` and report them. On a GPU
+  machine `deviceUsed` must be `cuda` and `realtimeFactor` well below `1.0`; a
+  CPU device, or `data.silentCpuFallback: true`, means the run was many times
+  slower than the hardware allows and should be reported, not glossed over.
 - Shell: PowerShell. If a command fails with *"is not recognized"*, the runner
   is `cmd.exe`; wrap it as `powershell -NoProfile -Command "<one-line>"`.
