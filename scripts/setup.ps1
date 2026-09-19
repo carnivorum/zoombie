@@ -184,6 +184,38 @@ function Test-WriteAllowed {
     return (-not $script:Check -and -not $script:DryRun)
 }
 
+function Get-Field {
+    <#
+    .SYNOPSIS
+        StrictMode-safe read of a (optionally dotted) field from an object.
+
+    .DESCRIPTION
+        Under Set-StrictMode -Version Latest, reading a MISSING member of a
+        PSCustomObject (e.g. one parsed from a legacy/partial env.json) throws
+        and aborts the caller. Reading is done through PSObject.Properties so a
+        missing field yields $Default instead. Dotted paths walk nested objects,
+        so a missing intermediate section also yields $Default, never an error.
+
+        Declared here (with the other small helpers) because Install-Whisper
+        runs before the main flow and needs it.
+    #>
+    param($Object, [Parameter(Mandatory)][string]$Path, $Default = $null)
+    $current = $Object
+    foreach ($key in $Path.Split('.')) {
+        if ($null -eq $current) { return $Default }
+        if ($current -is [System.Collections.IDictionary]) {
+            if (-not $current.Contains($key)) { return $Default }
+            $current = $current[$key]
+            continue
+        }
+        $prop = $current.PSObject.Properties[$key]
+        if (-not $prop) { return $Default }
+        $current = $prop.Value
+    }
+    if ($null -eq $current) { return $Default }
+    return $current
+}
+
 function Invoke-ZoombieDownload {
     [CmdletBinding()]
     param(
@@ -387,13 +419,12 @@ function Install-Whisper {
     if ((Test-Path $exe) -and -not $script:Force) {
         Write-ZoombieLog -Level Info -Message "whisper-cli present: $exe"
         # Preserve tag/asset recorded by a previous run so the manifest stays complete.
-        $prevTag = $null; $prevAsset = $null; $prevBackend = $Backend
+        # Read StrictMode-safely: a legacy/partial env.json may have no `whisper`
+        # section, in which case $prev.whisper.tag would throw under StrictMode.
         $prev = Get-ZoombieEnvManifest
-        if ($prev -and $prev.whisper) {
-            $prevTag = $prev.whisper.tag
-            $prevAsset = $prev.whisper.asset
-            if ($prev.whisper.backend) { $prevBackend = $prev.whisper.backend }
-        }
+        $prevTag     = Get-Field $prev 'whisper.tag'
+        $prevAsset   = Get-Field $prev 'whisper.asset'
+        $prevBackend = Get-Field $prev 'whisper.backend' $Backend
         # If a previous run never recorded which asset it used, recover it with a
         # single release scan so env.json stays a complete record.
         if (-not $prevTag -and -not $script:Check -and -not $script:DryRun) {
@@ -669,18 +700,8 @@ $ffmpegVersion  = Get-ZoombieToolVersion -Exe $ffmpegPath  -VersionArgs '-versio
 $ffprobeVersion = Get-ZoombieToolVersion -Exe $ffprobePath -VersionArgs '-version'
 $ytdlpVersion   = Get-ZoombieToolVersion -Exe $ytdlpPath   -VersionArgs '--version'
 
-# Read result fields defensively: a missing key must not abort the whole run.
-function Get-Field {
-    param($Object, [string]$Key, $Default = $null)
-    if ($null -eq $Object) { return $Default }
-    if ($Object -is [System.Collections.IDictionary]) {
-        if ($Object.Contains($Key)) { return $Object[$Key] }
-        return $Default
-    }
-    $prop = $Object.PSObject.Properties[$Key]
-    if ($prop) { return $prop.Value }
-    return $Default
-}
+# Read result fields defensively (Get-Field lives with the small helpers above),
+# so a missing key can never abort the run under StrictMode.
 
 $manifest = [ordered]@{}
 $manifest['zoombieVersion'] = Get-ZoombieSkillVersion

@@ -105,6 +105,36 @@ $script:Force  = [bool]$Force
 # Environment loading
 # ---------------------------------------------------------------------------
 
+function Get-ManifestValue {
+    <#
+    .SYNOPSIS
+        StrictMode-safe nested read from a manifest (PSCustomObject) or $null.
+
+    .DESCRIPTION
+        Under Set-StrictMode -Version Latest, reading a missing member of a
+        PSCustomObject/JSON object throws. env.json is written by setup.ps1, so a
+        manifest produced by an older/partial run can lack a section (e.g. whisper
+        or model) and would then abort EVERY command with a vague error, even ones
+        that never touch that section. This walks the dotted path defensively and
+        returns $Default for any missing link, mirroring setup.ps1's Get-Field.
+    #>
+    [CmdletBinding()]
+    param(
+        $Object,
+        [Parameter(Mandatory)][string]$Path,
+        $Default = $null
+    )
+    $current = $Object
+    foreach ($key in $Path.Split('.')) {
+        if ($null -eq $current) { return $Default }
+        $prop = $current.PSObject.Properties[$key]
+        if (-not $prop) { return $Default }
+        $current = $prop.Value
+    }
+    if ($null -eq $current) { return $Default }
+    return $current
+}
+
 function Get-Environment {
     <#
     .SYNOPSIS
@@ -118,12 +148,12 @@ function Get-Environment {
     $env = [ordered]@{
         root     = Get-ZoombieEnvRoot
         manifest = $manifest
-        ffmpeg   = Resolve-ZoombieTool -Name 'ffmpeg'  -Candidates @($(if ($manifest) { $manifest.ffmpeg.path }))
-        ffprobe  = Resolve-ZoombieTool -Name 'ffprobe' -Candidates @($(if ($manifest) { $manifest.ffprobe.path }))
-        ytDlp    = Resolve-ZoombieTool -Name 'yt-dlp'  -Candidates @($(if ($manifest) { $manifest.ytDlp.path }))
-        whisper  = Resolve-ZoombieTool -Name 'whisper-cli' -Candidates @($(if ($manifest) { $manifest.whisper.path }))
+        ffmpeg   = Resolve-ZoombieTool -Name 'ffmpeg'  -Candidates @((Get-ManifestValue $manifest 'ffmpeg.path'))
+        ffprobe  = Resolve-ZoombieTool -Name 'ffprobe' -Candidates @((Get-ManifestValue $manifest 'ffprobe.path'))
+        ytDlp    = Resolve-ZoombieTool -Name 'yt-dlp'  -Candidates @((Get-ManifestValue $manifest 'ytDlp.path'))
+        whisper  = Resolve-ZoombieTool -Name 'whisper-cli' -Candidates @((Get-ManifestValue $manifest 'whisper.path'))
         model    = $null
-        backend  = $(if ($manifest) { $manifest.whisper.backend } else { $null })
+        backend  = Get-ManifestValue $manifest 'whisper.backend'
     }
 
     if ($Model) {
@@ -134,7 +164,7 @@ function Get-Environment {
             $env.model = Join-Path (Get-ZoombieEnvPath -Child 'models') $fileName
         }
     } elseif ($manifest) {
-        $env.model = $manifest.model.path
+        $env.model = Get-ManifestValue $manifest 'model.path'
     }
     return $env
 }
@@ -295,7 +325,9 @@ function Invoke-WhisperOnSafeCopy {
         [Parameter(Mandatory)]$Env,
         [Parameter(Mandatory)][string]$AudioPath,
         [Parameter(Mandatory)][string]$OutputBase,
-        [switch]$WantSrt
+        [switch]$WantSrt,
+        [string]$WorkRoot,
+        [switch]$KeepWork
     )
     $whisper = Assert-Tool -Path $Env.whisper -Name 'whisper-cli'
     if (-not $Env.model -or -not (Test-Path -LiteralPath $Env.model)) {
@@ -308,10 +340,16 @@ function Invoke-WhisperOnSafeCopy {
     # Build the ASCII scratch dir up front, then copy the input into it under an
     # ASCII name. whisper-cli only ever sees paths inside this directory.
     $work = Join-Path $workRoot ([guid]::NewGuid().ToString('N'))
-    if (-not $script:DryRun) {
+    # In dry-run we must NOT touch the filesystem, and the work dir does not
+    # exist yet, so skip the (real) copy and just report the paths we would use.
+    $safe = if ($script:DryRun) {
+        $ext = [System.IO.Path]::GetExtension($AudioPath)
+        if (-not $ext) { $ext = '.bin' }
+        @{ WorkDir = $work; InputPath = (Join-Path $work ('input' + $ext.ToLowerInvariant())) }
+    } else {
         New-Item -ItemType Directory -Force -Path $work | Out-Null
+        Copy-ZoombieIntoSafeWork -InputPath $AudioPath -WorkDir $work
     }
-    $safe = Copy-ZoombieIntoSafeWork -InputPath $AudioPath -WorkDir $work
     $outBase = Join-Path $work 'out'
 
     $args = @('-m', $Env.model, '-f', $safe.InputPath, '-l', $Language,
@@ -400,7 +438,7 @@ function Invoke-Transcribe {
     $base = [System.IO.Path]::GetFullPath($base)
     if ([System.IO.Path]::GetExtension($base)) { $base = [System.IO.Path]::ChangeExtension($base, $null) }
 
-    Invoke-WhisperOnSafeCopy -Env $Env -AudioPath $Source -OutputBase $base -WantSrt:$Srt
+    Invoke-WhisperOnSafeCopy -Env $Env -AudioPath $Source -OutputBase $base -WantSrt:$Srt -WorkRoot $WorkRoot -KeepWork:$KeepWork
 }
 
 # ---------------------------------------------------------------------------
