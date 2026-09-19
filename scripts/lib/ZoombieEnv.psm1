@@ -578,6 +578,21 @@ function Get-ZoombieCublasDefaultMajor {
     return $script:ZoombieCublasDefaultMajor
 }
 
+function Get-ZoombieCublasSupportedMajors {
+    <#
+    .SYNOPSIS
+        The cuBLAS majors this toolchain has a pinned, hash-verified redist for.
+
+    .DESCRIPTION
+        Lets an installer explain a refusal in terms of what IS supported ("no
+        cuBLAS 12 redist is pinned; supported majors: 11") and makes adding a
+        major an obvious one-row change to the provisioning table.
+    #>
+    [CmdletBinding()]
+    param()
+    return @($script:ZoombieCublasProvisions.Keys | Sort-Object)
+}
+
 function Get-ZoombieCublasProvision {
     <#
     .SYNOPSIS
@@ -737,16 +752,52 @@ function Read-ZoombieWhisperLog {
     .DESCRIPTION
         whisper.cpp writes its backend banner and whisper_print_timings block to
         STDERR, so the caller redirects stderr to a file and reads it here.
-        Never throws: a missing or locked log yields an empty array, which the
-        parsers below treat as "no information" rather than "CPU".
+
+        The file can be UTF-16LE even though whisper emits plain text: when a
+        native process's stderr is redirected to a file by PowerShell's
+        Start-Process, the redirection is done in the CONSOLE's encoding, and on
+        Windows that is UTF-16 for this build. `Get-Content` without an encoding
+        then decodes it as ANSI, so every line arrives with interleaved NUL bytes
+        and NO pattern (device, timings, backend) ever matches - device detection
+        silently degrades and the timings block appears absent.
+
+        The bytes are therefore read directly and decoded by BOM: UTF-16LE
+        (FF FE), UTF-16BE (FE FF), UTF-8 with BOM (EF BB BF), else UTF-8. A
+        stray NUL that survives (a UTF-16 file read without its BOM) is stripped
+        as a last resort so the regexes still match. Never throws: a missing or
+        locked log yields an empty array, treated as "no information".
     #>
     [CmdletBinding()]
     # Not Mandatory for the same reason as Get-ZoombieWhisperCudaRuntime: an empty
     # path must yield an empty array, not a binding error.
     param([AllowNull()][AllowEmptyString()][string]$Path)
     if (-not $Path -or -not (Test-Path -LiteralPath $Path)) { return @() }
-    try { return @(Get-Content -LiteralPath $Path -ErrorAction Stop) }
-    catch { return @() }
+
+    try {
+        $bytes = [System.IO.File]::ReadAllBytes($Path)
+        if (-not $bytes -or $bytes.Length -eq 0) { return @() }
+
+        $text = $null
+        if ($bytes.Length -ge 2 -and $bytes[0] -eq 0xFF -and $bytes[1] -eq 0xFE) {
+            $text = [System.Text.Encoding]::Unicode.GetString($bytes, 2, $bytes.Length - 2)
+        } elseif ($bytes.Length -ge 2 -and $bytes[0] -eq 0xFE -and $bytes[1] -eq 0xFF) {
+            $text = [System.Text.Encoding]::BigEndianUnicode.GetString($bytes, 2, $bytes.Length - 2)
+        } elseif ($bytes.Length -ge 3 -and $bytes[0] -eq 0xEF -and $bytes[1] -eq 0xBB -and $bytes[2] -eq 0xBF) {
+            $text = [System.Text.Encoding]::UTF8.GetString($bytes, 3, $bytes.Length - 3)
+        } else {
+            $text = [System.Text.Encoding]::UTF8.GetString($bytes)
+        }
+
+        # Heuristic: a BOM-less UTF-16 file decodes as UTF-8 into NUL-laden text.
+        if ($text.IndexOf([char]0) -ge 0) {
+            try { $text = [System.Text.Encoding]::Unicode.GetString($bytes) } catch { $text = $text.Replace([string][char]0, '') }
+        }
+        return @($text -split "`r?`n")
+    }
+    catch {
+        try { return @(Get-Content -LiteralPath $Path -ErrorAction Stop) }
+        catch { return @() }
+    }
 }
 
 function Get-ZoombieWhisperDeviceInfo {
@@ -1030,6 +1081,59 @@ function Get-ZoombieWhisperTimings {
     return $result
 }
 
+function Remove-ZoombieWorkDir {
+    <#
+    .SYNOPSIS
+        Delete a scratch dir without ever blocking the caller on it.
+
+    .DESCRIPTION
+        `Remove-Item -Recurse -Force` on the work dir can BLOCK indefinitely when a
+        child process (whisper-cli) still holds a handle to a file inside it - and
+        that is exactly what happens after whisper is killed for an exit hang, or
+        while its redirected log handles unwind. The symptom is vicious: the
+        transcript is written, the timings line is printed, and then the CLI never
+        emits its JSON result, so the caller sees a working run that "hangs".
+
+        Cleanup is therefore best-effort and time-boxed: it runs in a background
+        job with a hard timeout, and if it cannot finish the directory is simply
+        LEFT in place (the `clean` subcommand exists for that, and every run
+        already creates a fresh GUID dir, so nothing collides). The run's result is
+        never held hostage by scratch-file deletion.
+
+    .OUTPUTS
+        $true when the directory is gone, $false when it was left behind.
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][string]$Path,
+        [int]$TimeoutSeconds = 30
+    )
+    if (-not $Path -or -not (Test-Path -LiteralPath $Path)) { return $true }
+
+    $job = $null
+    try {
+        $job = Start-Job -ScriptBlock {
+            param($p)
+            Remove-Item -LiteralPath $p -Recurse -Force -ErrorAction SilentlyContinue
+        } -ArgumentList $Path
+
+        if (Wait-Job -Job $job -Timeout $TimeoutSeconds) {
+            $gone = -not (Test-Path -LiteralPath $Path)
+            return $gone
+        }
+        return $false
+    }
+    catch {
+        return $false
+    }
+    finally {
+        if ($job) {
+            Stop-Job -Job $job -ErrorAction SilentlyContinue
+            Remove-Job -Job $job -Force -ErrorAction SilentlyContinue
+        }
+    }
+}
+
 function Test-ZoombieWhisperGpuFailure {
     <#
     .SYNOPSIS
@@ -1180,6 +1284,7 @@ Export-ModuleMember -Function @(
     'Copy-ZoombieIntoSafeWork',
     'Get-ZoombieCublasProvision',
     'Get-ZoombieCublasDefaultMajor',
+    'Get-ZoombieCublasSupportedMajors',
     'Get-ZoombieCudaMajorFromAssetName',
     'Get-ZoombieWhisperCudaRuntime',
     'Read-ZoombieWhisperLog',
@@ -1190,6 +1295,7 @@ Export-ModuleMember -Function @(
     'Get-ZoombieWhisperTimings',
     'Test-ZoombieWhisperGpuFailure',
     'Get-ZoombieCpuThreadCount',
+    'Remove-ZoombieWorkDir',
     'Write-ZoombieResult',
     'Write-ZoombieLog',
     'Set-ZoombieUtf8Console'

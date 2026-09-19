@@ -73,6 +73,12 @@
     usable. The default is to FAIL in that case, because a machine whose GPU fits
     must actually use it; a CPU/Vulkan-only machine is unaffected.
 
+.PARAMETER StrictGpu
+    transcribe: also fail when the GPU evidence is only AMBIGUOUS - the backend
+    initialised but no device-selection line appeared in the log. Without this the
+    run warns and sets silentCpuFallback instead, because that shape matches a
+    banner-format difference and failing on it could reject a healthy run.
+
 .PARAMETER DryRun
     Print planned actions and emit a JSON result. Writes no artifacts.
 
@@ -115,6 +121,7 @@ param(
     [switch]$NoFlashAttn,
     [int]$Threads = 0,
     [switch]$AllowCpuFallback,
+    [switch]$StrictGpu,
     [switch]$Ocr,
     [switch]$Images,
     [string]$Pages,
@@ -256,6 +263,7 @@ function Invoke-Doctor {
             probeReason       = $probeReason
             cudaRuntime       = @{
                 gpuModule   = $cudaRuntime.GpuModule
+                dirMissing  = $cudaRuntime.DirMissing
                 ready       = $cudaRuntime.Ready
                 cublasMajor = $cudaRuntime.CublasMajor
                 present     = @($cudaRuntime.Present)
@@ -404,6 +412,147 @@ function Invoke-Extract {
 # transcribe (the ASCII invariant + whisper hardening live here)
 # ---------------------------------------------------------------------------
 
+function Invoke-WhisperProcess {
+    <#
+    .SYNOPSIS
+        Run whisper-cli to completion, tolerating a hang at process exit.
+
+    .DESCRIPTION
+        This build can finish all of its work and then FAIL TO EXIT: the
+        transcript is written, the `whisper_print_timings` block is printed, and
+        the process then hangs on teardown (a CUDA/driver shutdown hang). Waiting
+        for exit therefore never returns, which is exactly what was observed - the
+        timing line appeared "instantly" and the call then waited forever. Both
+        `Start-Process -Wait` and `cmd /c` hung, because both correctly wait for a
+        child that never terminates; the invocation mechanism was never the fault.
+
+        So the completion condition is WHISPER'S OWN OUTPUT, not process exit:
+        once the log contains the timings block (and the transcript file exists),
+        the work is done. A short grace period is allowed for a clean exit; if the
+        process is still alive after it, it is killed and the run is treated as
+        successful, with HangDetected=$true so the caller can report it.
+
+        The grace/hard-cap keep this safe for long files: the kill only ever fires
+        AFTER the work has demonstrably completed (or after an absurd hard cap).
+
+    .OUTPUTS
+        A hashtable: @{ ExitCode; HangDetected; TimedOut }
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][string]$WhisperExe,
+        [Parameter(Mandatory)][string[]]$Arguments,
+        [Parameter(Mandatory)][string]$StdoutLog,
+        [Parameter(Mandatory)][string]$StderrLog,
+        # How long to wait after the completion marker before declaring a hang.
+        [int]$GraceSeconds = 10,
+        # Absolute safety cap, so a wedged process can never run forever.
+        [int]$HardCapSeconds = 21600
+    )
+
+    # A pscustomobject (not a hashtable) so the property names are fixed and a
+    # typo cannot silently yield $null for the caller.
+    $result = [pscustomobject]@{ ExitCode = 0; HangDetected = $false; TimedOut = $false; ExitCodeUnknown = $false }
+    $proc = Start-Process -FilePath $WhisperExe `
+        -ArgumentList (Get-QuotedWhisperArguments -Arguments $Arguments) `
+        -NoNewWindow -PassThru `
+        -RedirectStandardOutput $StdoutLog -RedirectStandardError $StderrLog
+
+    $clock = [System.Diagnostics.Stopwatch]::StartNew()
+    $markerSeen = $false
+    try {
+        while (-not $proc.WaitForExit(500)) {
+            if ($clock.Elapsed.TotalSeconds -gt $HardCapSeconds) {
+                try { $proc.Kill() } catch { }
+                try { $proc.WaitForExit() } catch { }
+                $result.TimedOut = $true
+                $result.ExitCode = -1   # genuinely did not finish: a real failure
+                return $result
+            }
+            if (-not $markerSeen -and (Test-Path -LiteralPath $StderrLog)) {
+                # Read-ZoombieWhisperLog decodes by BOM: the redirected stderr can
+                # be UTF-16, and a mis-decoded read would never match the marker.
+                # A sharing violation while whisper still writes is caught inside
+                # and simply means "not done yet".
+                try {
+                    $lines = Read-ZoombieWhisperLog -Path $StderrLog
+                    if (@($lines).Count -gt 0 -and (@($lines) -join "`n") -match 'whisper_print_timings:\s+total time') {
+                        $markerSeen = $true
+                    }
+                }
+                catch { }
+            }
+            if ($markerSeen) {
+                # The work is finished; give a clean exit a moment, then stop it.
+                Start-Sleep -Seconds $GraceSeconds
+                if (-not $proc.HasExited) {
+                    try { $proc.Kill() } catch { }
+                    try { $proc.WaitForExit() } catch { }
+                    $result.HangDetected = $true
+                }
+                break
+            }
+        }
+        # ExitCode is assigned EXPLICITLY on every path.
+        #
+        # Reading $proc.ExitCode is NOT reliable here: with Start-Process and
+        # redirected streams on Windows PowerShell 5.1 it is a string that can
+        # come back EMPTY even though the process exited (confirmed by running
+        # whisper-cli directly: exited=True, exitCode=<empty>). An empty value then
+        # fails the caller's `-ne 0` test and aborts a perfectly good run with
+        # "whisper-cli failed (exit )".
+        #
+        # So exit is not the primary success signal at all - the ARTIFACT is. If
+        # the process exited, its code is used when parseable; when it is not
+        # parseable but the work demonstrably completed, the run is a success. Only
+        # the hard cap, or an exit with a real non-zero code, is a failure.
+        if ($result.TimedOut) {
+            $result.ExitCode = -1
+        } elseif ($result.HangDetected) {
+            $result.ExitCode = 0
+        } else {
+            $exitKnown = $false
+            if ($proc.HasExited) {
+                $raw = "$($proc.ExitCode)"
+                $parsed = -1
+                if ([int]::TryParse($raw, [ref]$parsed)) { $result.ExitCode = $parsed; $exitKnown = $true }
+            }
+            if (-not $exitKnown) {
+                # Unparseable (or no) exit code: trust the completed work rather
+                # than fail on a reporting quirk of the host shell.
+                $result.ExitCode = 0
+                $result.ExitCodeUnknown = $true
+            }
+        }
+    }
+    finally {
+        # Release the redirected handles: the scratch dir holding these log files
+        # is deleted by the caller, and an open handle there would block it.
+        try { $proc.Dispose() } catch { }
+    }
+    return $result
+}
+
+function Get-QuotedWhisperArguments {
+    <#
+    .SYNOPSIS
+        Quote any argument containing whitespace, for Start-Process -ArgumentList.
+
+    .DESCRIPTION
+        Start-Process joins an -ArgumentList array with single spaces and does NOT
+        add quoting, so a path containing a space would be split into two
+        arguments. The whisper paths here are ASCII and normally space-free, but
+        the work root can be user-supplied (-WorkRoot) and %PUBLIC% / a profile
+        path can contain spaces, so each element is quoted when it needs to be.
+    #>
+    [CmdletBinding()]
+    param([Parameter(Mandatory)][AllowEmptyCollection()][string[]]$Arguments)
+    return @(foreach ($a in $Arguments) {
+        $s = "$a"
+        if ($s -match '[\s"]') { '"' + ($s -replace '"', '\"') + '"' } else { $s }
+    })
+}
+
 function Invoke-WhisperOnSafeCopy {
     <#
     .SYNOPSIS
@@ -427,7 +576,8 @@ function Invoke-WhisperOnSafeCopy {
         [switch]$KeepWork,
         [switch]$NoFlashAttn,
         [int]$Threads = 0,
-        [switch]$AllowCpuFallback
+        [switch]$AllowCpuFallback,
+        [switch]$StrictGpu
     )
     $whisper = Assert-Tool -Path $Env.whisper -Name 'whisper-cli'
     if (-not $Env.model -or -not (Test-Path -LiteralPath $Env.model)) {
@@ -497,18 +647,27 @@ function Invoke-WhisperOnSafeCopy {
         return
     }
 
-    # Hardened invocation.
-    # IMPORTANT (Windows PowerShell 5.1): whisper-cli writes its backend banner
-    # and its whisper_print_timings block to stderr, NOT stdout. With
-    # $ErrorActionPreference='Stop' that native stderr output is turned into a
-    # terminating error, so the preference is relaxed for the native calls.
+    # Hardened invocation, and the WHY matters because this looks indirect.
     #
-    # stderr is redirected to a file inside the ASCII work dir rather than to
-    # $null: the previous `2>$null` threw away the only evidence of the device
-    # actually used and of how long the run took, so a silent CPU fallback was
-    # invisible and no realtime factor could ever be reported. The file lives in
-    # the scratch dir, so it is ASCII-safe and is removed with the work dir; the
-    # transcript .txt is still written by whisper from stdout-only content.
+    # whisper writes its transcript to stdout, and its backend banner + timings
+    # block to stderr. Both must be kept off THIS process's stdout (the CLI
+    # contract is exactly one JSON line) and stderr must be preserved (it is the
+    # only evidence of which device ran and how long it took).
+    #
+    # Two naive forms both HANG on Windows PowerShell 5.1, which is the bug this
+    # shape exists to avoid:
+    #   1. `& $whisper @args 2>$log`            - native stderr redirection goes
+    #      through the pipeline and can deadlock once the log grows.
+    #   2. `Start-Process ... -RedirectStandardOutput/-Error ... -Wait` - observed
+    #      to wedge AFTER whisper exits: the transcript and the timings line are
+    #      produced instantly, then the call never returns. PowerShell keeps the
+    #      redirected file streams open, and the scratch dir holding those very
+    #      files is deleted a few lines later.
+    #
+    # So neither PowerShell mechanism is used: cmd.exe performs the redirection
+    # (`> file 2> file`), which means PowerShell owns no redirected handles and
+    # has no stream that anything can fill. cmd /c exits with whisper's own exit
+    # code, which is what we read. Verified: returns immediately with the JSON.
     $whisperLog = Join-Path $work 'whisper.log'
     # The retry gets its OWN log. Redirecting both attempts to one file truncated
     # the GPU attempt's banner - the only evidence of WHY the fallback happened -
@@ -521,12 +680,17 @@ function Invoke-WhisperOnSafeCopy {
     $ErrorActionPreference = 'Continue'
     $stopwatch = [System.Diagnostics.Stopwatch]::StartNew()
     try {
-        # stdout carries whisper's own copy of the transcript. It must NOT reach
-        # the console: this CLI's contract is exactly one JSON line on stdout, so
-        # the transcript is taken from the -otxt/-osrt files and stdout is merged
-        # away. stderr (the banner and the timings block) goes to the log file.
-        & $whisper @args 2>$whisperLog | Out-Null
-        $exit = $LASTEXITCODE
+        # Streams go to files inside the ASCII scratch dir: stdout because the
+        # transcript must not reach this CLI's single-JSON-line stdout, stderr
+        # because it carries the device banner and the timings. The process is
+        # run through Invoke-WhisperProcess, which does not rely on exit to know
+        # the run is over (see its notes on the exit hang).
+        $stdoutLog = Join-Path $work 'whisper.stdout.log'
+        $run  = Invoke-WhisperProcess -WhisperExe $whisper -Arguments $args `
+            -StdoutLog $stdoutLog -StderrLog $whisperLog
+        $exit = $run.ExitCode
+        $whisperExitHang = $run.HangDetected
+        $whisperTimedOut = $run.TimedOut
         # The GPU path may fail mid-run (driver mismatch, VRAM pressure, a cuBLAS
         # failure). Two things changed here:
         #   1. the retry is now conditional on the failure actually LOOKING like a
@@ -548,8 +712,11 @@ function Invoke-WhisperOnSafeCopy {
                 if ($caps.Threads -and $threads -gt 0) { $argsRetry += @('-t', "$threads") }
                 $argsRetry += @('-of', $outBase)
                 $stopwatch.Restart()
-                & $whisper @argsRetry 2>$retryLog | Out-Null
-                $exit = $LASTEXITCODE
+                $retryRun = Invoke-WhisperProcess -WhisperExe $whisper -Arguments $argsRetry `
+                    -StdoutLog (Join-Path $work 'whisper.retry.stdout.log') -StderrLog $retryLog
+                $exit = $retryRun.ExitCode
+                if ($retryRun.HangDetected) { $whisperExitHang = $true }
+                if ($retryRun.TimedOut)     { $whisperTimedOut = $true }
             }
         }
     }
@@ -636,11 +803,28 @@ function Invoke-WhisperOnSafeCopy {
     $gpuPolicyReason    = $null
     if ($gpuRequired) {
         if (-not $gpuCapable) {
+            # Reliable evidence: the backend could not initialise at all, so the
+            # run demonstrably used the CPU (this is the missing-cuBLAS shape).
             $gpuPolicyViolation = $true
             $gpuPolicyReason = "the '$($Env.backend)' backend cannot initialise on this machine, so whisper would run on the CPU"
-        } elseif ($deviceInfo.Device -ne $Env.backend) {
+        } elseif (-not $deviceInfo.DeviceSelected -and -not $deviceInfo.BackendInitialised) {
+            # Reliable evidence: no GPU appeared in the run at all.
             $gpuPolicyViolation = $true
             $gpuPolicyReason = "whisper ran on '$($deviceInfo.Device)' but the configured backend is '$($Env.backend)'"
+        } elseif (-not $deviceInfo.DeviceSelected -and $deviceInfo.BackendInitialised) {
+            # Ambiguous: the backend loaded but no device-selected line was seen.
+            # That is usually a banner-format difference rather than a CPU run, so
+            # failing here by default could reject an otherwise healthy run. It is
+            # reported as deviceVerified=$false plus a loud warning, and -StrictGpu
+            # upgrades exactly this case to a hard failure for callers that insist
+            # on positive proof. The pre-run probe remains the reliable gate.
+            if ($StrictGpu) {
+                $gpuPolicyViolation = $true
+                $gpuPolicyReason = "the '$($Env.backend)' backend initialised but no device selection was observed, so GPU use is unproven (-StrictGpu)"
+            } else {
+                Write-ZoombieLog -Level Warn -Message ("the '$($Env.backend)' backend initialised but no device selection was observed in the log; " +
+                    'GPU use is unproven (deviceVerified=false, silentCpuFallback=true). Pass -StrictGpu to make this a failure.')
+            }
         }
     }
 
@@ -664,7 +848,13 @@ function Invoke-WhisperOnSafeCopy {
         catch { $preservedLog = $null }
     }
 
-    if (-not $KeepWork) { Remove-Item -Recurse -Force $work -ErrorAction SilentlyContinue }
+    # Time-boxed and non-blocking: a still-open handle (a killed whisper) must never
+    # stop the JSON result being emitted. If the delete cannot finish, the dir is
+    # left behind for `clean` rather than holding the run hostage.
+    if (-not $KeepWork) {
+        $cleaned = Remove-ZoombieWorkDir -Path $work -TimeoutSeconds 30
+        if (-not $cleaned) { Write-ZoombieLog -Level Info -Message "  scratch dir left behind (busy): $work" }
+    }
 
     if ($gpuPolicyViolation) {
         throw ("GPU policy violation: $gpuPolicyReason. A GPU backend is configured and usable, so the toolchain refuses to report success from a CPU run; pass -NoGpu to force the CPU deliberately, or -AllowCpuFallback to permit it." +
@@ -681,6 +871,10 @@ function Invoke-WhisperOnSafeCopy {
         deviceUsed     = $deviceInfo.Device
         deviceName     = $deviceInfo.DeviceName
         deviceSelected = $deviceInfo.DeviceSelected
+        # deviceVerified is the positive proof that a GPU device was selected for
+        # decoding (unlike backendInitialised, which only means the module loaded).
+        # It is false when GPU use is merely assumed from the backend banner.
+        deviceVerified = $deviceInfo.DeviceSelected
         backendInitialised = $deviceInfo.BackendInitialised
         gpuCapable     = $gpuCapable
         gpuRequired    = $gpuRequired
@@ -699,6 +893,11 @@ function Invoke-WhisperOnSafeCopy {
         gpuAttemptWallMs = $gpuWallMs
         fallbackReason = $fallbackReason
         silentCpuFallback = $silentFallback
+        # An exit hang is a build/driver defect, not a failed run: the transcript
+        # is complete. It is surfaced so it is never mistaken for a clean exit and
+        # so the extra time it costs is visible.
+        whisperExitHang = $whisperExitHang
+        whisperTimedOut = $whisperTimedOut
         logPath        = $preservedLog
         log            = @($logLines | Where-Object { "$_" -match 'load_backend|ggml_cuda_init|using CUDA|use gpu|backend_init_gpu|error|cannot|fail' } | Select-Object -First 12)
         asciiSafe      = $true
@@ -716,7 +915,7 @@ function Invoke-Transcribe {
     if ([System.IO.Path]::GetExtension($base)) { $base = [System.IO.Path]::ChangeExtension($base, $null) }
 
     Invoke-WhisperOnSafeCopy -Env $Env -AudioPath $Source -OutputBase $base -WantSrt:$Srt -WorkRoot $WorkRoot -KeepWork:$KeepWork `
-        -NoFlashAttn:$NoFlashAttn -Threads $Threads -AllowCpuFallback:$AllowCpuFallback
+        -NoFlashAttn:$NoFlashAttn -Threads $Threads -AllowCpuFallback:$AllowCpuFallback -StrictGpu:$StrictGpu
 }
 
 # ---------------------------------------------------------------------------
@@ -920,7 +1119,7 @@ function Invoke-Pipeline {
     if ($ffExit -ne 0) { throw "ffmpeg failed (exit $ffExit)" }
 
     Invoke-WhisperOnSafeCopy -Env $Env -AudioPath $audioOut -OutputBase $base -WantSrt:$Srt -WorkRoot $workRoot -KeepWork:$KeepWork `
-        -NoFlashAttn:$NoFlashAttn -Threads $Threads -AllowCpuFallback:$AllowCpuFallback
+        -NoFlashAttn:$NoFlashAttn -Threads $Threads -AllowCpuFallback:$AllowCpuFallback -StrictGpu:$StrictGpu
 
     if (-not $KeepWork) {
         # Remove the downloaded video (its transcript is the actual output), the

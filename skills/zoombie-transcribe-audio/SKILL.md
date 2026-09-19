@@ -89,8 +89,10 @@ do anything special — just pass the paths the user confirmed.
   directly instead of being masked by a CPU re-run.
 - Read `data.deviceUsed` and `data.realtimeFactor` and report them. On a GPU
   machine `deviceUsed` must be `cuda` (or `vulkan`) and `realtimeFactor` well
-  below `1.0`. `deviceSelected` proves a GPU device was actually used, whereas
-  `backendInitialised` only means the backend loaded. `gpuAttemptWallMs` is the
-  time wasted by an abandoned GPU attempt before a CPU retry.
+  below `1.0`. `data.deviceVerified` is the positive proof the GPU was used;
+  `backendInitialised` only means the backend loaded. If `deviceVerified` is
+  `false`, GPU use is unproven: report that plainly, and pass `-StrictGpu` on a
+  re-run to make it a hard failure. `gpuAttemptWallMs` is the time wasted by an
+  abandoned GPU attempt before a CPU retry.
 - Shell: PowerShell. If a command fails with *"is not recognized"*, the runner
   is `cmd.exe`; wrap it as `powershell -NoProfile -Command "<one-line>"`.

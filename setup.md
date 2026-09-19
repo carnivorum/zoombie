@@ -37,8 +37,10 @@ Hard rules:
    ffmpeg, whisper.cpp and a model, and pip-installs yt-dlp plus the PDF
    dependencies), tell the user what will be fetched and roughly how large it is,
    then wait for confirmation. On a machine with an NVIDIA GPU this also fetches
-   the CUDA 11.8 cuBLAS runtime (~400 MB), because the whisper.cpp CUDA asset does
-   not ship the cuBLAS DLLs that `ggml-cuda.dll` needs.
+   the matching cuBLAS runtime (~400 MB), because the whisper.cpp CUDA asset does
+   not ship the cuBLAS DLLs that `ggml-cuda.dll` needs. The required version is
+   read from the asset name (e.g. `whisper-cublas-11.8.0-...` → cuBLAS 11), and a
+   major with no pinned, hash-verified redist is refused rather than guessed.
 4. **Never write media output without a confirmed destination.** Every skill
    inspects the project, proposes candidate paths, and asks before writing.
 5. **Never modify files that are not yours.** Do not edit the project's source,
@@ -143,7 +145,7 @@ What it does (all idempotent — anything present is skipped):
 | ffmpeg + ffprobe | `zoombie-env\bin\` | static build, downloaded directly |
 | yt-dlp | the existing Python | `pip install --user`, invoked as `python -m yt_dlp` (pure Python, so no ASCII constraint) |
 | whisper.cpp | `zoombie-env\bin\whisper\` | prebuilt CUDA/Vulkan/CPU asset, DLLs kept beside the exe |
-| cuBLAS runtime | `zoombie-env\bin\whisper\` | **on a CUDA machine only**: the asset ships `ggml-cuda.dll` but *not* the cuBLAS DLLs it loads, so the matching 11.x runtime (`cublas64_11.dll`, `cublasLt64_11.dll`) is fetched from NVIDIA's CUDA 11.8 redist manifest and its sha256 verified before it is placed beside `whisper-cli.exe` |
+| cuBLAS runtime | `zoombie-env\bin\whisper\` | **on a CUDA machine only**: the asset ships `ggml-cuda.dll` but *not* the cuBLAS DLLs it loads, so the runtime matching the asset's major (e.g. `cublas64_11.dll`, `cublasLt64_11.dll` for a `cublas-11.x` asset) is fetched from NVIDIA's redist archive and its sha256 verified before it is placed beside `whisper-cli.exe`. A major with no pinned redist is refused |
 | whisper model | `zoombie-env\models\` | size chosen from the detected hardware (~0.15–3 GB) |
 | PDF dependencies | the existing Python | `pymupdf4llm` + `pytesseract` via `pip install --user`; Python is already required |
 | pip shims | `%APPDATA%\Python\<ver>\Scripts` | any launcher this install creates is removed again; pre-existing tools are left alone |
@@ -174,7 +176,7 @@ Versioning:
 
 - Every skill is namespaced `zoombie-*`, so its name can never collide with a
   foreign skill — deployment simply overwrites.
-- Each skill carries `cvrm-zoombie-version: 3.2.0`; on a re-run the version is
+- Each skill carries `cvrm-zoombie-version: 3.3.0`; on a re-run the version is
   compared and the skill is reported as `up to date` or `updated`.
 
 If the user prefers project-local skills, they are already versioned sources in

@@ -458,10 +458,25 @@ function Select-WhisperAsset {
     <#
     .SYNOPSIS
         Scan releases newest-first and pick the first that actually ships a suitable
-        Windows x64 binary asset (tagged releases often have no binaries attached).
+        Windows x64 binary asset (tagged releases often have no binaries attached),
+        PREFERRING one whose CUDA runtime we can actually provision.
+
+    .DESCRIPTION
+        For the cuda backend the selection is provision-aware rather than merely
+        name-aware. cuBLAS is loaded by major-versioned name, and this toolchain
+        only ships a pinned, hash-verified redist for majors in its provisioning
+        table. A naive "newest cublas asset" pick would therefore break the moment
+        ggml-org publishes a CUDA-12 build: the install would select it and then
+        fail to provision, on every release, forever.
+
+        So the releases are walked newest-first and the first cuda candidate whose
+        asset name maps to a PROVISIONABLE major wins. Only if no release has one
+        is the newest cuda asset returned anyway, so the caller can refuse with an
+        exact, actionable message (asset, major) instead of an empty result that
+        looks like "no asset exists".
 
     .OUTPUTS
-        A hashtable: @{ Tag; Name; Url; Backend }
+        A hashtable: @{ Tag; Name; Url; Backend; CudaMajor; Provisionable }
     #>
     [CmdletBinding()]
     param([Parameter(Mandatory)][ValidateSet('cuda', 'vulkan', 'cpu')][string]$Backend)
@@ -474,21 +489,39 @@ function Select-WhisperAsset {
     }
 
     $releases = Get-GitHubReleases -Repo 'ggml-org/whisper.cpp'
+    $fallback = $null
     foreach ($rel in $releases) {
         if (-not $rel.assets -or $rel.assets.Count -eq 0) { continue }
         foreach ($pattern in $patterns) {
             $hit = $rel.assets | Where-Object { $_.name -match $pattern } | Select-Object -First 1
-            if ($hit) {
+            if (-not $hit) { continue }
+
+            $major = Get-ZoombieCudaMajorFromAssetName -Name $hit.Name
+            if ($Backend -ne 'cuda') {
                 return @{
-                    Tag     = $rel.tag_name
-                    Name    = $hit.name
-                    Url     = $hit.browser_download_url
-                    Backend = $Backend
+                    Tag = $rel.tag_name; Name = $hit.name; Url = $hit.browser_download_url
+                    Backend = $Backend; CudaMajor = $null; Provisionable = $null
+                }
+            }
+            # An unversioned name implies the default major, which IS provisionable.
+            $effective = if ($major) { $major } else { Get-ZoombieCublasDefaultMajor }
+            $provision = Get-ZoombieCublasProvision -CudaMajor $effective
+            if ($provision) {
+                return @{
+                    Tag = $rel.tag_name; Name = $hit.name; Url = $hit.browser_download_url
+                    Backend = $Backend; CudaMajor = $major; Provisionable = $true
+                }
+            }
+            # Remember it, keep looking for a provisionable release.
+            if (-not $fallback) {
+                $fallback = @{
+                    Tag = $rel.tag_name; Name = $hit.name; Url = $hit.browser_download_url
+                    Backend = $Backend; CudaMajor = $major; Provisionable = $false
                 }
             }
         }
     }
-    return $null
+    return $fallback
 }
 
 function Install-CublasRuntime {
@@ -671,6 +704,22 @@ function Install-Whisper {
         $asset = Select-WhisperAsset -Backend 'cpu'
     }
     if (-not $asset) { throw 'No suitable whisper.cpp Windows asset found in any release.' }
+
+    # Refuse BEFORE downloading a build whose runtime we cannot provision. Such an
+    # asset could never initialise the GPU, so installing it would hand back a
+    # build that silently runs on the CPU - the exact failure this whole path
+    # exists to prevent. The message names the asset, the major, and the one-row
+    # fix, instead of failing later with a bare "runtime incomplete".
+    $assetProvisionable = Get-Field $asset 'Provisionable' $true
+    if ($asset.Backend -eq 'cuda' -and $assetProvisionable -eq $false) {
+        $assetMajor = Get-Field $asset 'CudaMajor'
+        $supported  = (Get-ZoombieCublasSupportedMajors) -join ', '
+        $msg = ("whisper asset '$($asset.Name)' is built against CUDA $assetMajor, but no cuBLAS $assetMajor " +
+                "redist is pinned (supported majors: $supported). Add one verified redist row to " +
+                "`$script:ZoombieCublasProvisions in scripts/lib/ZoombieEnv.psm1, or install an older cublas asset.")
+        if (Test-WriteAllowed) { throw $msg }
+        Write-ZoombieLog -Level Warn -Message $msg
+    }
 
     Write-ZoombieLog -Level Step -Message "selected whisper.cpp $($asset.Tag) asset $($asset.Name) [$($asset.Backend)]"
     # The cuBLAS major is derived from the ASSET, not from a constant, so this

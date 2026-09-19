@@ -88,9 +88,11 @@ too because the audio is written to ASCII before whisper sees it.
   A machine with no GPU is unaffected and transcribes on the CPU normally.
 - Read `data.deviceUsed` and `data.realtimeFactor` and report them. On a GPU
   machine `deviceUsed` must be `cuda` (or `vulkan`) and `realtimeFactor` well
-  below `1.0`; `deviceSelected` proves the GPU was actually used, while
-  `backendInitialised` only means the backend loaded. `gpuAttemptWallMs` reports
-  time wasted by an abandoned GPU attempt before a CPU retry.
+  below `1.0`. `data.deviceVerified` is the positive proof the GPU was used;
+  `backendInitialised` only means the backend loaded. If `deviceVerified` is
+  `false`, GPU use is unproven: report that plainly, and pass `-StrictGpu` on a
+  re-run to make it a hard failure. `gpuAttemptWallMs` reports time wasted by an
+  abandoned GPU attempt before a CPU retry.
 - Never delete a user-supplied local source file. Never overwrite without
   asking.
 - Shell: PowerShell. If a command fails with *"is not recognized"*, the runner

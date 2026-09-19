@@ -1,6 +1,6 @@
 ---
 name: zoombie-pdf-to-md
-cvrm-zoombie-version: 3.2.0
+cvrm-zoombie-version: 3.3.0
 description: Convert a PDF into Markdown using PyMuPDF4LLM, with an optional Tesseract OCR fallback for scanned or image-only pages. Use when the user wants to extract text from a PDF, turn a PDF into Markdown, read a PDF document, or prepare a PDF for docs. Always inspects the project first, proposes candidate output paths, and confirms with the user before writing anything.
 ---
 

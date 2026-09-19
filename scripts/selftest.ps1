@@ -183,7 +183,28 @@ if (Test-Path -LiteralPath $modulePath) {
     if (-not (Test-ZoombieWhisperGpuFailure -ExitCode 3 -LogLines @())) {
         throw 'an unattributed crash should stay retryable'
     }
+    # Positive proof must be distinguishable from mere capability: a log with
+    # only a loaded backend has DeviceSelected=false, which is what makes
+    # deviceVerified=false (and -StrictGpu able to fail on it).
+    if ($loadedOnly.DeviceSelected) {
+        throw 'a loaded-only backend must NOT count as selected (deviceVerified would be a false positive)'
+    }
     Say 'PASS: device classification and GPU-failure detection behave correctly'
+}
+
+# --- 1e. Asset selection is provison-aware ---------------------------------
+# A CUDA asset whose major has no pinned redist must be recognised as
+# unprovisionable, so the installer can refuse before downloading instead of
+# picking a build it can never make work.
+if (Test-Path -LiteralPath $modulePath) {
+    $supported = @(Get-ZoombieCublasSupportedMajors)
+    if ($supported -notcontains 11) { throw "cuBLAS 11 should be a supported major, got: $($supported -join ', ')" }
+    if (Get-ZoombieCublasProvision -CudaMajor 12) { throw 'cuBLAS 12 must have no pinned redist' }
+    if ((Get-ZoombieCudaMajorFromAssetName -Name 'whisper-cublas-12.4.0-bin-x64.zip') -ne 12) {
+        throw 'a cublas-12 asset name must parse to major 12'
+    }
+    Info ("supported cuBLAS majors: {0}" -f ($supported -join ', '))
+    Say 'PASS: asset selection is provision-aware'
 }
 
 # --- 2. scratch folder with a CYRILLIC name (the regression test) ----------

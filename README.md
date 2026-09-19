@@ -155,7 +155,7 @@ $zoombie = "$env:USERPROFILE\zoombie-env\bin\zoombie\zoombie.ps1"
 & $zoombie doctor                                         # report tool status
 & $zoombie download -Source "<url>" -DownloadDir "<dir>" [-AudioOnly]
 & $zoombie extract  -Source "<video>" -Output "<out>" [-Format wav|mp3|m4a|flac]
-& $zoombie transcribe -Source "<audio>" -Output "<basename>" [-Language auto] [-Srt] [-NoGpu] [-NoFlashAttn] [-Threads N] [-AllowCpuFallback]
+& $zoombie transcribe -Source "<audio>" -Output "<basename>" [-Language auto] [-Srt] [-NoGpu] [-NoFlashAttn] [-Threads N] [-AllowCpuFallback] [-StrictGpu]
 & $zoombie readpdf  -Source "<pdf>" -Output "<basename>" [-Ocr] [-Images] [-Pages "1-5,8"]
 & $zoombie pipeline -Source "<url-or-file>" -Output "<basename>" [-DownloadDir "<dir>"] [-Srt]
 & $zoombie clean                                          # remove scratch dirs
@@ -173,6 +173,7 @@ slowdown is impossible to miss:
 |-------|---------|
 | `deviceUsed` | the device whisper used for THIS run (`cuda`, `vulkan` or `cpu`) |
 | `deviceSelected` | `true` only when a GPU backend was actually selected for decoding |
+| `deviceVerified` | positive proof of GPU use; `false` when GPU use is only inferred from the backend banner (`-StrictGpu` turns that into a failure) |
 | `backendInitialised` | `true` when the backend loaded — capability, not proof of use |
 | `gpuCapable` / `gpuRequired` | whether the GPU can initialise, and whether this run was obliged to use it |
 | `deviceName` | the backend whisper initialised, e.g. `CUDA0` |
@@ -209,7 +210,14 @@ Opt out explicitly when a CPU run is what you actually want:
 ```powershell
 & $zoombie transcribe -Source "<audio>" -Output "<base>" -NoGpu        # deliberate CPU run
 & $zoombie transcribe -Source "<audio>" -Output "<base>" -AllowCpuFallback  # permit a CPU fallback
+& $zoombie transcribe -Source "<audio>" -Output "<base>" -StrictGpu       # also require POSITIVE GPU proof
 ```
+
+`deviceVerified` is that positive proof. By default, when the backend initialises
+but no device-selection line appears in the log, the run warns and reports
+`deviceVerified: false` with `silentCpuFallback: true` rather than failing, because
+that shape also matches a log-format difference. `-StrictGpu` upgrades exactly
+that ambiguous case to a failure; the reliable pre-run `--help` probe is unchanged.
 
 A machine with no GPU is unaffected: its backend is neither `cuda` nor `vulkan`,
 so nothing is ever required of it.
@@ -234,6 +242,12 @@ rather than downloaded unverified. The archive's sha256 is checked before
 anything is copied next to the binary, and a CUDA install whose runtime is still
 incomplete is reported as missing (by exact DLL name) and fails loudly rather
 than being left silently CPU-only.
+
+Asset selection is provision-aware rather than merely newest-first: releases are
+walked newest-first and the first cuda asset whose major has a pinned redist is
+chosen, so a future CUDA-12-only release cannot be installed on a machine that can
+only provision CUDA 11. If only unprovisionable assets exist, the install refuses
+BEFORE downloading, naming the asset, its major and the supported majors.
 
 The install also stops trusting a sticky `env.json`: the backend recorded there
 is compared with the **current** hardware probe, and a machine that gained or
@@ -275,7 +289,7 @@ does for whisper.cpp.
   end-user path and always pulls the published worker.
 - Bump `ZoombieSkillVersion` in that module when skill content changes, so the
   deployment step can tell an installed skill is out of date. It is currently
-  `3.2.0`; every `SKILL.md` carries the same value in `cvrm-zoombie-version`.
+  `3.3.0`; every `SKILL.md` carries the same value in `cvrm-zoombie-version`.
 - The PDF dependencies are installed with `pip install --user`. pip also writes
   console launchers into `%APPDATA%\Python\<ver>\Scripts`, which this toolchain
   never calls, so the installer snapshots that folder first and removes only the
