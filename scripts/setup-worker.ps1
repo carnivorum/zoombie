@@ -131,7 +131,7 @@ if ($Refresh -or -not $repoFilesPresent) {
                 # Copy the repo's own folders next to this script so relative
                 # paths (lib\, zoombie.ps1, ..\skills) keep working. The worker
                 # refreshes itself too, so a stale local copy cannot persist.
-                foreach ($f in @('lib', 'pdf', 'zoombie.ps1', 'selftest.ps1', 'setup-worker.ps1', 'requirements-pdf.txt')) {
+                foreach ($f in @('lib', 'pdf', 'zoombie.ps1', 'selftest.ps1', 'setup-worker.ps1', 'setup.ps1', 'requirements-pdf.txt')) {
                     $from = Join-Path $rootInZip.FullName (Join-Path 'scripts' $f)
                     if (Test-Path -LiteralPath $from) {
                         Copy-Item -LiteralPath $from -Destination $PSScriptRoot -Recurse -Force
@@ -164,6 +164,7 @@ if ($Refresh -or -not $repoFilesPresent) {
             @{ Repo = 'scripts/requirements-pdf.txt'; Dest = 'requirements-pdf.txt' },
             @{ Repo = 'scripts/zoombie.ps1';          Dest = 'zoombie.ps1' },
             @{ Repo = 'scripts/selftest.ps1';         Dest = 'selftest.ps1' },
+            @{ Repo = 'scripts/setup.ps1';            Dest = 'setup.ps1' },
             @{ Repo = 'scripts/setup-worker.ps1';     Dest = 'setup-worker.ps1' }
         )
         foreach ($m in $fileMap) {
@@ -841,6 +842,62 @@ function Install-ZoombieCli {
     return $destCli
 }
 
+function Install-ZoombieBootstrap {
+    <#
+    .SYNOPSIS
+        Stage the re-runnable entry scripts (setup.ps1 + selftest.ps1) in <root>\src.
+
+    .DESCRIPTION
+        setup.md and README.md tell the user (and any agent following setup.md)
+        that the durable, machine-local entry points are
+
+            <root>\src\setup.ps1      install / update / -Check / -DryRun
+            <root>\src\selftest.ps1   end-to-end verification
+
+        but nothing created that folder. setup.ps1 is the THIN BOOTSTRAP and runs
+        from a single-use temp dir it deletes on exit, so its checkout at
+        zoombie-env\src never existed; selftest.ps1 only ever lived in the
+        throwaway worker checkout. The documented commands therefore failed with
+        "the file ... does not exist".
+
+        Staging the copies here makes the documented commands work and keeps them
+        updateable: on the next run setup.ps1 re-fetches the latest worker, and
+        the worker re-stages these files, so <root>\src is refreshed rather than
+        left stale. selftest.ps1 is self-locating (it probes the toolchain roots
+        and falls back to $PSScriptRoot), and setup.ps1 is self-contained (it
+        fetches the worker itself), so both work correctly from src\.
+
+        Returns @{ Dir; Setup; Selftest } for the result payload.
+    #>
+    [CmdletBinding()]
+    param()
+    $srcDir = Get-ZoombieEnvPath -Child 'src'
+
+    if (-not (Test-WriteAllowed)) {
+        Write-ZoombieLog -Level Step -Message "would stage the bootstrap (setup.ps1, selftest.ps1) -> $srcDir"
+        return [pscustomobject]@{ Dir = $srcDir; Setup = $null; Selftest = $null }
+    }
+
+    New-Item -ItemType Directory -Force -Path $srcDir | Out-Null
+    foreach ($name in @('setup.ps1', 'selftest.ps1')) {
+        $from = Join-Path $PSScriptRoot $name
+        if (Test-Path -LiteralPath $from) {
+            Copy-Item -LiteralPath $from -Destination (Join-Path $srcDir $name) -Force
+        }
+    }
+    $setupDest    = Join-Path $srcDir 'setup.ps1'
+    $selftestDest = Join-Path $srcDir 'selftest.ps1'
+    Write-ZoombieLog -Level Info -Message "bootstrap staged: $srcDir (setup.ps1, selftest.ps1)"
+    if (-not (Test-Path -LiteralPath $setupDest)) {
+        Write-ZoombieLog -Level Warn -Message "setup.ps1 was not present in the checkout; $srcDir has only selftest.ps1"
+    }
+    return [pscustomobject]@{
+        Dir      = $srcDir
+        Setup    = $setupDest
+        Selftest = if (Test-Path -LiteralPath $selftestDest) { $selftestDest } else { $null }
+    }
+}
+
 function Install-PdfToolchain {
     <#
     .SYNOPSIS
@@ -1058,6 +1115,7 @@ $modelInfo    = $null
 $hw           = $null
 $cliPath      = $null
 $skillResults = @()
+$bootstrapInfo = $null
 $pdfInfo      = $null
 
 Write-ZoombieLog -Level Step -Message "PowerShell $($PSVersionTable.PSVersion) on $([System.Environment]::OSVersion.VersionString)"
@@ -1146,9 +1204,11 @@ if (-not $Model) { $Model = Get-RecommendedModel -Hw $hw }
 Write-ZoombieLog -Level Step -Message "ensuring whisper model '$Model'"
 $modelInfo = Install-WhisperModel -ModelName $Model
 
-# 6b. CLI + skills.
+# 6b. CLI + skills + the re-runnable bootstrap (src\setup.ps1, src\selftest.ps1).
 Write-ZoombieLog -Level Step -Message "installing CLI to zoombie-env\bin\zoombie"
 $cliPath = Install-ZoombieCli
+Write-ZoombieLog -Level Step -Message "staging the bootstrap (setup.ps1, selftest.ps1) to zoombie-env\src"
+$bootstrapInfo = Install-ZoombieBootstrap
 Write-ZoombieLog -Level Step -Message "deploying skills to the global root"
 $skillResults = Install-ZoombieSkills
 
@@ -1272,6 +1332,7 @@ $resultData = [ordered]@{
     mode       = $mode
     root       = $root
     cli        = $cliPath
+    bootstrap  = $bootstrapInfo
     skills     = @($skillResults)
     missing    = $missing
     changes    = @($script:Changes)
