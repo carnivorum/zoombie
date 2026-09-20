@@ -13,8 +13,9 @@ Steps:
  6. ``extract`` and ``transcribe`` through the CLI
  7. assert the transcript contains the key words and the right device ran
  8. re-run with ``-NoGpu`` and assert a deliberate CPU run succeeds
- 9. ``readpdf`` when the PDF toolchain is installed
-10. clean up
+ 9. ``readpdf`` when the PDF toolchain is installed, including its image sidecar
+10. ``postprocess -Apply`` twice, asserting byte-level idempotency
+11. clean up
 """
 
 from __future__ import annotations
@@ -26,7 +27,7 @@ import re
 import subprocess
 import sys
 
-from .lib import cublas, env as env_mod, paths, process, whisper
+from .lib import cublas, env as env_mod, paths, pdf, process, whisper
 
 CYRILLIC_DIR = "\u0442\u0435\u0441\u0442"  # "тест"
 PANGRAM = "The quick brown fox jumps over the lazy dog."
@@ -83,6 +84,74 @@ def run_cli(launcher: str, args: list[str]) -> dict | None:
 # ---------------------------------------------------------------------------
 # Pure checks (no launcher, no TTS, no GPU)
 # ---------------------------------------------------------------------------
+
+def check_postprocess_idempotent(scratch: str) -> None:
+    """``postprocess -Apply`` twice must leave the file byte-identical.
+
+    This is the guarantee the whole summarize workflow rests on: a skill may
+    re-run ``postprocess`` over a document it has already processed, so the
+    second pass must be a no-op rather than a source of drift. The document is a
+    small block-6-shaped fixture with hand-written links, which exercises the
+    anchor, index and link passes together.
+
+    It runs through ``process_document`` (the same call ``zoombie postprocess``
+    makes) rather than the launcher, so the assertion is available on a machine
+    where the installed launcher is absent or out of date.
+    """
+    say("postprocess idempotency")
+
+    from .commands.postprocess import process_document
+
+    fixture = os.path.join(scratch, "postprocess-fixture")
+    paths.ensure_dir(fixture)
+    md_path = os.path.join(fixture, "summary.md")
+    original = (
+        "# Test summary\n"
+        "\n"
+        "## 4. Содержание\n"
+        "\n"
+        "## 6. Notes\n"
+        "\n"
+        "### First heading\n"
+        "\n"
+        "The quick brown fox jumps over the lazy dog.\n"
+        "\n"
+        "### Second heading\n"
+        "\n"
+        "A [link with space](some file.md) and a [bracketed [label]](notes.md).\n"
+    )
+
+    with open(paths.to_extended(md_path), "w", encoding="utf-8", newline="\n") as handle:
+        handle.write(original)
+
+    image_dir = os.path.join(fixture, "img")
+    first, _stats = process_document(original, None, image_dir)
+
+    # A second pass over the OUTPUT of the first must return it verbatim. If the
+    # passes appended instead of rebuilding a range, this is where it shows.
+    second, _stats2 = process_document(first, None, image_dir)
+    if second != first:
+        raise AssertionError(
+            "postprocess is not idempotent: the second pass changed the document"
+        )
+
+    # And the same property must hold once the bytes have been through a file,
+    # which is what an -Apply run actually does.
+    with open(paths.to_extended(md_path), "w", encoding="utf-8", newline="\n") as handle:
+        handle.write(first)
+    with open(paths.to_extended(md_path), "rb") as handle:
+        before = handle.read()
+    third, _stats3 = process_document(before.decode("utf-8"), None, image_dir)
+    with open(paths.to_extended(md_path), "w", encoding="utf-8", newline="\n") as handle:
+        handle.write(third)
+    with open(paths.to_extended(md_path), "rb") as handle:
+        after = handle.read()
+    if before != after:
+        raise AssertionError(
+            "postprocess is not byte-idempotent: a second -Apply changed the file"
+        )
+
+    say("PASS: postprocess -Apply is idempotent (byte-identical on the second run)")
 
 def check_cuda_runtime_readiness() -> None:
     """A CUDA build's readiness is major-version aware.
@@ -353,6 +422,9 @@ def run(argv: list[str] | None = None) -> int:
         if pdf_result is False:
             return 1
 
+        # --- 10. postprocess idempotency ----------------------------------
+        check_postprocess_idempotent(scratch)
+
         say("PASS: Cyrillic destination path worked end to end")
     finally:
         if not args.keep_artifacts:
@@ -400,7 +472,12 @@ def check_readpdf(launcher: str, scratch: str) -> bool | None:
         return None
 
     md_base = os.path.join(scratch, "doc-md")
-    result = run_cli(launcher, ["readpdf", "-Source", pdf_path, "-Output", md_base])
+    # -Images also exercises the sidecar: manifest.json + README.md must land in
+    # the image directory, because postprocess reads the manifest to re-insert
+    # figures and verify flags an img/ folder missing either file.
+    result = run_cli(
+        launcher, ["readpdf", "-Source", pdf_path, "-Output", md_base, "-Images"]
+    )
     if not result or not result.get("ok"):
         say(f"readpdf failed: {result.get('error') if result else 'no result'}")
         return False
@@ -415,7 +492,20 @@ def check_readpdf(launcher: str, scratch: str) -> bool | None:
         say(f"Markdown missing expected text: {md_path}")
         return False
 
+    # The image sidecar must exist whenever images were requested.
+    artifacts = result["data"].get("artifacts", {})
+    image_dir = (artifacts.get("images") or {}).get("path")
+    if not image_dir:
+        say("readpdf -Images reported no image directory")
+        return False
+    for sidecar in (pdf.SIDECAR_MANIFEST, pdf.SIDECAR_README):
+        sidecar_path = os.path.join(image_dir, sidecar)
+        if not paths.is_file(sidecar_path):
+            say(f"readpdf image sidecar missing: {sidecar_path}")
+            return False
+
     info(f"markdown: {md_path} (pages={result['data']['pages']} ocr={result['data']['ocrUsed']})")
+    info(f"image sidecar: {image_dir} (manifest.json + README.md present)")
     say("PASS: PDF -> Markdown worked end to end")
     return True
 

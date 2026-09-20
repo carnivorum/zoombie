@@ -1,4 +1,4 @@
-# Installed toolchain should live outside the repo (%USERPROFILE%\zoombie-env),
+/kb/# Installed toolchain should live outside the repo (%USERPROFILE%\zoombie-env),
 # but ignore it here too in case -Root points inside the workspace.
 zoombie-env/
 

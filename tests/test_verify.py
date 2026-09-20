@@ -1,0 +1,295 @@
+"""Tests for the ``verify`` command.
+
+Two properties are load-bearing and get a test each:
+
+* a clean tree exits 0 (so the command is usable as a gate), and
+* a percent-encoded relative link is NOT false-flagged -- a verifier that flags
+  its own valid output is worse than no verifier at all.
+
+Everything is synthesized into ``tmp_path``; no PDF and no whisper is involved.
+"""
+
+from __future__ import annotations
+
+import json
+
+from zoombie import cli
+from zoombie.commands import verify as vf
+
+EM = "\u2014"
+
+# A clean article: block 2 points at an existing transcript, block 4 links to
+# anchors that exist in block 6, block 5 points at an existing summary, and the
+# single image link resolves.
+CLEAN = """# Статья
+
+## 2. Источник
+- [Транскрипт](transcript.srt)
+
+## 3. Краткое содержание
+Кратко.
+
+## 4. Содержание
+- [00:00:02 {em} Вступление](#s-1)
+- [Финал](#s-2)
+
+## 5. Связанные статьи
+- [Другая статья](./other-summary.md)
+
+## 6. Полное содержание транскрипта
+### <a id="s-1"></a>00:00:02 {em} Вступление
+Первый абзац.
+
+![001 - p01.png](img/001%20-%20p01.png)
+
+### <a id="s-2"></a>Финал
+Второй абзац.
+""".replace("{em}", EM)
+
+
+def build_tree(tmp_path, summary: str = CLEAN, *, img: bool = True, siblings: bool = True):
+    """Write a complete, clean article tree and return the root path."""
+    if siblings:
+        (tmp_path / "transcript.srt").write_text("1\n00:00:02,000 --> 00:00:04,000\nx\n", encoding="utf-8")
+        (tmp_path / "other-summary.md").write_text("# Другая\n", encoding="utf-8")
+        (tmp_path / "summary.md").write_text(summary, encoding="utf-8", newline="\n")
+        (tmp_path / "img").mkdir()
+        (tmp_path / "img" / "001 - p01.png").write_bytes(b"\x89PNG")
+        (tmp_path / "img" / "manifest.json").write_text(
+            json.dumps({"source": "x.pdf", "count": 1, "images": []}), encoding="utf-8"
+        )
+        (tmp_path / "img" / "README.md").write_text("# Extracted images\n", encoding="utf-8")
+    return tmp_path
+
+
+def kinds(report: dict) -> set[str]:
+    return {problem["kind"] for problem in report["problems"]}
+
+
+class TestCleanTree:
+    def test_a_clean_fixture_passes(self, tmp_path):
+        root = build_tree(tmp_path)
+        report = vf.verify_tree(str(root))
+        assert report["ok"] is True
+        assert report["problems"] == []
+        # summary.md + other-summary.md; img/README.md is a sidecar, not a
+        # document, and lives in a subfolder the non-recursive walk skips.
+        assert report["filesChecked"] == 2
+
+    def test_cli_exits_zero_on_a_clean_tree(self, tmp_path):
+        root = build_tree(tmp_path)
+        assert cli.main(["verify", "-Dir", str(root)]) == 0
+
+    def test_the_report_has_the_documented_shape(self, tmp_path):
+        root = build_tree(tmp_path)
+        report = vf.verify_tree(str(root))
+        assert set(report) == {"root", "filesChecked", "problems", "ok"}
+        assert report["root"] == str(root)
+
+    def test_json_flag_still_exits_zero_and_keeps_the_shape(self, tmp_path):
+        root = build_tree(tmp_path)
+        assert cli.main(["verify", "-Dir", str(root), "-Json"]) == 0
+
+    def test_a_missing_directory_is_a_clean_failure(self, tmp_path):
+        assert cli.main(["verify", "-Dir", str(tmp_path / "nope")]) == 1
+
+
+class TestMissingImage:
+    def test_a_dangling_image_link_is_reported(self, tmp_path):
+        root = build_tree(tmp_path)
+        (root / "img" / "001 - p01.png").unlink()
+        report = vf.verify_tree(str(root))
+        assert report["ok"] is False
+        assert vf.KIND_MISSING_IMAGE in kinds(report)
+        problem = next(p for p in report["problems"] if p["kind"] == vf.KIND_MISSING_IMAGE)
+        assert problem["line"] > 0
+        assert problem["file"].endswith("summary.md")
+
+    def test_cli_exits_one(self, tmp_path):
+        root = build_tree(tmp_path)
+        (root / "img" / "001 - p01.png").unlink()
+        assert cli.main(["verify", "-Dir", str(root)]) == 1
+
+
+class TestImageFolderSidecars:
+    def test_a_missing_manifest_is_reported(self, tmp_path):
+        root = build_tree(tmp_path)
+        (root / "img" / "manifest.json").unlink()
+        report = vf.verify_tree(str(root))
+        assert vf.KIND_MISSING_MANIFEST in kinds(report)
+
+    def test_a_missing_readme_is_reported(self, tmp_path):
+        root = build_tree(tmp_path)
+        (root / "img" / "README.md").unlink()
+        report = vf.verify_tree(str(root))
+        assert vf.KIND_MISSING_README in kinds(report)
+
+    def test_an_image_dir_not_referenced_by_any_link_is_still_checked(self, tmp_path):
+        """A link-only walk is blind to an img/ no Markdown happens to point at."""
+        root = build_tree(tmp_path)
+        summary = (root / "summary.md").read_text(encoding="utf-8")
+        (root / "summary.md").write_text(
+            summary.replace("![001 - p01.png](img/001%20-%20p01.png)", ""), encoding="utf-8"
+        )
+        (root / "img" / "manifest.json").unlink()
+        report = vf.verify_tree(str(root))
+        assert vf.KIND_MISSING_MANIFEST in kinds(report)
+
+
+class TestDeadAnchor:
+    def test_an_index_link_with_no_matching_anchor_is_reported(self, tmp_path):
+        root = build_tree(tmp_path)
+        summary = (root / "summary.md").read_text(encoding="utf-8")
+        (root / "summary.md").write_text(
+            summary.replace("[Финал](#s-2)", "[Финал](#s-99)"), encoding="utf-8"
+        )
+        report = vf.verify_tree(str(root))
+        assert report["ok"] is False
+        assert vf.KIND_DEAD_ANCHOR in kinds(report)
+        problem = next(p for p in report["problems"] if p["kind"] == vf.KIND_DEAD_ANCHOR)
+        assert "s-99" in problem["detail"]
+
+    def test_an_anchor_that_exists_passes(self, tmp_path):
+        root = build_tree(tmp_path)
+        assert vf.verify_tree(str(root))["ok"] is True
+
+    def test_a_foreign_fragment_is_not_our_problem(self, tmp_path):
+        """Only ``#s-N`` ids are ours; any other fragment is a viewer concern."""
+        root = build_tree(tmp_path)
+        summary = (root / "summary.md").read_text(encoding="utf-8")
+        (root / "summary.md").write_text(
+            summary + "\n[см.](#footnote-3)\n", encoding="utf-8"
+        )
+        assert vf.verify_tree(str(root))["ok"] is True
+
+
+class TestDeadLink:
+    def test_a_dead_related_link_is_reported(self, tmp_path):
+        root = build_tree(tmp_path)
+        (root / "other-summary.md").unlink()
+        report = vf.verify_tree(str(root))
+        assert report["ok"] is False
+        assert vf.KIND_DEAD_LINK in kinds(report)
+
+    def test_a_percent_encoded_link_is_not_false_flagged(self, tmp_path):
+        """A space encoded as %20 must resolve, not be reported as dead."""
+        root = build_tree(tmp_path)
+        summary = (root / "summary.md").read_text(encoding="utf-8")
+        (root / "other - summary.md").write_text("# Ещё\n", encoding="utf-8")
+        (root / "summary.md").write_text(
+            summary.replace("./other-summary.md", "./other%20-%20summary.md"),
+            encoding="utf-8",
+        )
+        report = vf.verify_tree(str(root))
+        assert report["ok"] is True, report["problems"]
+
+    def test_a_percent_encoded_cyrillic_link_is_not_false_flagged(self, tmp_path):
+        root = build_tree(tmp_path)
+        (root / "статья - обзор.md").write_text("# Обзор\n", encoding="utf-8")
+        summary = (root / "summary.md").read_text(encoding="utf-8")
+        (root / "summary.md").write_text(
+            summary.replace("./other-summary.md", "статья%20-%20обзор.md"),
+            encoding="utf-8",
+        )
+        assert vf.verify_tree(str(root))["ok"] is True
+
+    def test_a_paren_in_the_destination_is_read_whole(self, tmp_path):
+        """A destination containing parens must resolve, not be truncated."""
+        root = build_tree(tmp_path)
+        (root / "отчёт (итог).md").write_text("# Итог\n", encoding="utf-8")
+        summary = (root / "summary.md").read_text(encoding="utf-8")
+        (root / "summary.md").write_text(
+            summary.replace("./other-summary.md", "отчёт%20%28итог%29.md"),
+            encoding="utf-8",
+        )
+        assert vf.verify_tree(str(root))["ok"] is True
+
+    def test_an_absolute_url_is_never_checked(self, tmp_path):
+        root = build_tree(tmp_path)
+        summary = (root / "summary.md").read_text(encoding="utf-8")
+        (root / "summary.md").write_text(
+            summary + "\n[пример](https://example.com/missing)\n", encoding="utf-8"
+        )
+        assert vf.verify_tree(str(root))["ok"] is True
+
+
+class TestMissingSource:
+    def test_a_missing_source_document_is_reported(self, tmp_path):
+        root = build_tree(tmp_path)
+        summary = (root / "summary.md").read_text(encoding="utf-8")
+        # Block 2 is the source/provenance block; its ``<base>.md`` is the
+        # document this summary was derived from.
+        (root / "summary.md").write_text(
+            summary.replace("(transcript.srt)", "(source-article.md)"),
+            encoding="utf-8",
+        )
+        report = vf.verify_tree(str(root))
+        assert report["ok"] is False
+        assert vf.KIND_MISSING_SOURCE in kinds(report)
+
+    def test_the_source_block_is_distinguished_from_block_5(self, tmp_path):
+        """A missing .md in block 2 is a ``missing-source``; elsewhere a ``dead-link``."""
+        root = build_tree(tmp_path)
+        summary = (root / "summary.md").read_text(encoding="utf-8")
+        (root / "summary.md").write_text(
+            summary.replace("(transcript.srt)", "(gone.md)"), encoding="utf-8"
+        )
+        report = vf.verify_tree(str(root))
+        assert vf.KIND_MISSING_SOURCE in kinds(report)
+        assert vf.KIND_DEAD_LINK not in kinds(report)
+
+    def test_block_5_is_reported_as_a_dead_link_not_a_source(self, tmp_path):
+        root = build_tree(tmp_path)
+        (root / "other-summary.md").unlink()
+        report = vf.verify_tree(str(root))
+        assert vf.KIND_DEAD_LINK in kinds(report)
+        assert vf.KIND_MISSING_SOURCE not in kinds(report)
+
+
+class TestRecursion:
+    def test_a_subfolder_is_checked_with_recurse(self, tmp_path):
+        root = build_tree(tmp_path)
+        nested = root / "sub"
+        nested.mkdir()
+        (nested / "summary.md").write_text(
+            CLEAN.replace("(transcript.srt)", "(gone.md)"), encoding="utf-8"
+        )
+        (nested / "img").mkdir()
+        (nested / "img" / "001 - p01.png").write_bytes(b"\x89PNG")
+        (nested / "img" / "manifest.json").write_text("{}", encoding="utf-8")
+        (nested / "img" / "README.md").write_text("# x\n", encoding="utf-8")
+
+        assert vf.verify_tree(str(root), recurse=False)["ok"] is True
+        report = vf.verify_tree(str(root), recurse=True)
+        assert report["ok"] is False
+        assert vf.KIND_MISSING_SOURCE in kinds(report)
+        assert any(p["file"].startswith(str(nested)) for p in report["problems"])
+
+    def test_cli_recursive_flag(self, tmp_path):
+        root = build_tree(tmp_path)
+        nested = root / "sub"
+        nested.mkdir()
+        (nested / "broken.md").write_text("[x](missing.md)\n", encoding="utf-8")
+        assert cli.main(["verify", "-Dir", str(root)]) == 0
+        assert cli.main(["verify", "-Dir", str(root), "-Recurse"]) == 1
+
+
+class TestReportOrdering:
+    def test_the_report_is_sorted_and_deduplicated(self, tmp_path):
+        root = build_tree(tmp_path)
+        summary = (root / "summary.md").read_text(encoding="utf-8")
+        (root / "summary.md").write_text(
+            summary.replace("[x](#s-1)", "").replace("[Финал](#s-2)", "[Финал](#s-2) [тоже](#s-2)"),
+            encoding="utf-8",
+        )
+        report = vf.verify_tree(str(root))
+        keys = [(p["file"], p["line"], p["kind"]) for p in report["problems"]]
+        assert keys == sorted(keys)
+        # The same dead anchor referenced twice on one line is reported once.
+        assert len(keys) == len(set(keys))
+
+    def test_two_runs_agree(self, tmp_path):
+        root = build_tree(tmp_path)
+        first = vf.verify_tree(str(root))
+        second = vf.verify_tree(str(root))
+        assert first == second

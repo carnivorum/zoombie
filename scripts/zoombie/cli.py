@@ -8,7 +8,7 @@ Contract (unchanged from the PowerShell CLI, so no caller has to change):
 
 Option names keep their PowerShell spelling (``-Source``, ``-Output``, ...),
 including ``-Source`` rather than ``-Input`` even though the reason for that
-choice no longer applies. Renaming would churn five skills and two docs for no
+choice no longer applies. Renaming would churn every skill and both docs for no
 benefit; lowercase aliases are accepted too, so both ``-Source`` and ``--source``
 work.
 """
@@ -20,7 +20,7 @@ import sys
 from dataclasses import dataclass, field
 
 from . import SKILL_VERSION
-from .lib import process
+from .lib import pdf, process
 from .lib.errors import ZoombieError
 
 
@@ -99,7 +99,14 @@ def build_parser() -> argparse.ArgumentParser:
     _add_work(transcribe)
     _add_gpu_policy(transcribe)
     transcribe.add_argument("-Language", "--language", dest="language", default="auto")
-    transcribe.add_argument("-Srt", "--srt", action="store_true", help="also emit .srt subtitles")
+    transcribe.add_argument(
+        "-Srt", "--srt", action="store_true",
+        help="accepted no-op: .srt subtitles are emitted by default",
+    )
+    transcribe.add_argument(
+        "-NoSrt", "--no-srt", dest="no_srt", action="store_true",
+        help="suppress the .srt subtitles (the timings are then lost)",
+    )
     _add_common(transcribe)
 
     # --- pipeline ---------------------------------------------------------
@@ -110,9 +117,18 @@ def build_parser() -> argparse.ArgumentParser:
     _add_gpu_policy(pipeline)
     pipeline.add_argument("-DownloadDir", "--download-dir", dest="download_dir", default=None)
     pipeline.add_argument("-Language", "--language", dest="language", default="auto")
-    pipeline.add_argument("-Srt", "--srt", action="store_true")
-    pipeline.add_argument("-Format", "--format", dest="format", default="wav",
-                          choices=["wav", "mp3", "m4a", "flac"])
+    pipeline.add_argument(
+        "-Srt", "--srt", action="store_true",
+        help="accepted no-op: .srt subtitles are emitted by default",
+    )
+    pipeline.add_argument(
+        "-NoSrt", "--no-srt", dest="no_srt", action="store_true",
+        help="suppress the .srt subtitles (the timings are then lost)",
+    )
+    # NOTE: the pipeline deliberately exposes no -Format. Its audio is a 16 kHz
+    # mono WAV because that is the only thing whisper.cpp consumes; the flag used
+    # to be registered here and never read. -Format lives on download/extract,
+    # where it is honoured.
     _add_common(pipeline)
 
     # --- readpdf ----------------------------------------------------------
@@ -121,9 +137,83 @@ def build_parser() -> argparse.ArgumentParser:
     _add_work(readpdf)
     readpdf.add_argument("-Ocr", "--ocr", action="store_true", help="OCR scanned pages with Tesseract")
     readpdf.add_argument("-Images", "--images", action="store_true", help="also extract embedded images")
+    readpdf.add_argument(
+        "-ImagesOnly", "--images-only", dest="images_only", action="store_true",
+        help="extract images and the sidecar only; render no Markdown (no .md guard)",
+    )
+    readpdf.add_argument(
+        "-ImageDir", "--image-dir", dest="image_dir", default=None,
+        help="explicit image directory (default: <base>.images)",
+    )
+    readpdf.add_argument(
+        "-MinPx", "--min-px", dest="min_px", type=int, default=pdf.DEFAULT_MIN_PX,
+        help=f"drop images below this pixel size (default: {pdf.DEFAULT_MIN_PX})",
+    )
+    readpdf.add_argument(
+        "-MinPt", "--min-pt", dest="min_pt", type=int, default=pdf.DEFAULT_MIN_PT,
+        help=f"drop images below this on-page size in points (default: {pdf.DEFAULT_MIN_PT})",
+    )
     readpdf.add_argument("-Pages", "--pages", dest="pages", default=None, help="page range, e.g. 1-5,8")
     readpdf.add_argument("-Lang", "--lang", dest="lang", default="eng", help="Tesseract language code")
     _add_common(readpdf)
+
+    # --- postprocess ------------------------------------------------------
+    # The mechanical half of the summarize skill. Dry run by default: it writes
+    # ONLY with -Apply, because a skill calls it and must not be able to corrupt
+    # a document by accident.
+    postprocess = subparsers.add_parser(
+        "postprocess", help="assign anchors, timestamps, index and images in a summary.md"
+    )
+    postprocess.add_argument("-Md", "--md", dest="md", default=None, help="a single .md file")
+    postprocess.add_argument("-Dir", "--dir", dest="dir", default=None, help="a folder of .md files")
+    postprocess.add_argument(
+        "-Recurse", "--recurse", action="store_true", help="recurse into subfolders (with -Dir)"
+    )
+    postprocess.add_argument(
+        "-Srt", "--srt", dest="srt", default=None,
+        help="SRT for the heading timestamps (default: sibling <base>.srt or transcript.srt)",
+    )
+    postprocess.add_argument(
+        "-ImageDir", "--image-dir", dest="image_dir", default=None,
+        help="image directory to read manifest.json from (default: sibling img/)",
+    )
+    postprocess.add_argument(
+        "-Apply", "--apply", action="store_true", help="write the changes (default: dry run)"
+    )
+    postprocess.add_argument(
+        "-Report", "--report", dest="report", default=None, help="write the report JSON to this path"
+    )
+
+    # --- verify -----------------------------------------------------------
+    verify = subparsers.add_parser("verify", help="check a produced summary tree (exit 1 on problems)")
+    verify.add_argument("-Dir", "--dir", dest="dir", default=None, help="root folder to check")
+    verify.add_argument(
+        "-Recurse", "--recurse", action="store_true", help="recurse into subfolders"
+    )
+    verify.add_argument(
+        "-Json", "--json", action="store_true", help="report shape only; details stay in data"
+    )
+
+    # --- index ------------------------------------------------------------
+    # Regenerates the library README.md from the item folders. Dry run by
+    # default for the same reason as postprocess: a skill calls it and must not
+    # be able to overwrite the index by accident.
+    index = subparsers.add_parser("index", help="regenerate the README.md index of a library")
+    index.add_argument(
+        "-Dir", "--dir", dest="dir", required=True, help="the library root folder"
+    )
+    index.add_argument(
+        "-Output", "--output", dest="output", default=None,
+        help="index path (default: <Dir>/README.md)",
+    )
+    index.add_argument("-Json", "--json", action="store_true", help="quiet; the scan stays in data")
+    index.add_argument(
+        "-DryRun", "--dry-run", action="store_true",
+        help="accepted no-op: writing already requires -Apply",
+    )
+    index.add_argument(
+        "-Apply", "--apply", action="store_true", help="write the index (default: dry run)"
+    )
 
     return parser
 
@@ -151,6 +241,15 @@ def _dispatch(args: argparse.Namespace) -> Outcome:
     if args.command == "readpdf":
         from .commands import readpdf
         return readpdf.run(args)
+    if args.command == "postprocess":
+        from .commands import postprocess
+        return postprocess.run(args)
+    if args.command == "verify":
+        from .commands import verify
+        return verify.run(args)
+    if args.command == "index":
+        from .commands import library
+        return library.run(args)
     raise ZoombieError(f"unknown command: {args.command}")
 
 

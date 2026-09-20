@@ -1,6 +1,6 @@
 ---
 name: zoombie-download-video
-cvrm-zoombie-version: 4.0.0
+cvrm-zoombie-version: 4.1.0
 description: Download a video (or its audio only) from a URL using yt-dlp, supporting YouTube and other yt-dlp-compatible sites such as RuTube, Vimeo, Twitter/X, Twitch and TikTok. Use when the user provides a link and asks to download, save, grab, or fetch a video, or when a later step needs a local copy of a remote video. Always inspects the project first, proposes candidate destinations, and confirms where to save before downloading anything.
 ---
 
@@ -56,7 +56,10 @@ for the saved path. Do **not** hand-assemble a `yt-dlp` command.
    agreed to overwrite existing files.
 
 5. **Report** `data.file` and its size. If the user also wants a transcript,
-   hand off to the `zoombie-transcribe-video` skill instead of re-downloading.
+   hand off to `zoombie-transcribe-video` (it runs the whole chain in one call
+   and produces the `.txt`, `.srt` and `.source.json` source material) instead of
+   re-downloading. It produces no summary; document work belongs to
+   `zoombie-summarize`.
 
 ## Notes
 

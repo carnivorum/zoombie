@@ -8,10 +8,19 @@ that misbehave on non-ASCII paths, so the source PDF is copied into the ASCII
 work dir first, the converter runs entirely there, and the produced Markdown
 (and any images) are copied back to the confirmed, possibly Cyrillic,
 destination.
+
+Image extraction is no longer delegated to pymupdf4llm. ``-Images``/
+``-ImagesOnly``/``-ImageDir`` run :func:`zoombie.lib.pdf.collect_images` over the
+drawn images and write a sidecar with placement metadata (``manifest.json`` +
+``README.md``) next to the PNGs, named ``001 - p01.png`` in reading order.
+``-ImagesOnly`` skips Markdown entirely and therefore does NOT apply the
+``<base>.md`` exists guard, so the flag is usable from a library workflow where
+the Markdown was already generated (that guard is what blocked its reuse).
 """
 
 from __future__ import annotations
 
+import json
 import os
 
 from ..cli import Outcome
@@ -28,6 +37,75 @@ def destination_base(source: str, output: str | None) -> str:
     return base
 
 
+def _owned_files(manifest_path: str) -> list[str] | None:
+    """Image file names recorded by a previous run's sidecar manifest.
+
+    Returns ``None`` when the manifest is missing or unreadable, which the caller
+    reads as "this directory is not ours" -- an unreadable manifest cannot be
+    trusted as an ownership list.
+    """
+    if not paths.is_file(manifest_path):
+        return None
+    try:
+        with open(paths.to_extended(manifest_path), "r", encoding="utf-8") as handle:
+            payload = json.load(handle)
+    except (OSError, ValueError):
+        return None
+    images = payload.get("images")
+    if not isinstance(images, list):
+        return None
+    names: list[str] = []
+    for entry in images:
+        if isinstance(entry, dict) and entry.get("file"):
+            names.append(str(entry["file"]))
+    return names
+
+
+def _prepare_images_dir(images_dir: str, force: bool) -> int:
+    """Make ``images_dir`` ready for this run WITHOUT ever deleting it wholesale.
+
+    Chosen rule (replacing the old ``paths.remove(images_dir, recursive=True)``
+    that destroyed an existing image directory without asking):
+
+    * **missing** -> created, nothing pruned.
+    * **contains our ``manifest.json``** -> the directory is our own previous
+      output, and only the files that manifest lists are pruned. Stale files must
+      not survive, because dropping a non-extractable image renumbers everything
+      after it; but pruning per file means anything a user put there by hand
+      survives. No prompt is needed: over our own output, re-running is the
+      expected idempotent behaviour.
+    * **no (readable) manifest** -> treated as foreign and REFUSED unless
+      ``-Force`` is given, so a hand-curated directory is never wiped by accident.
+      With ``-Force`` the run proceeds but still does not delete anything that is
+      not ours: our own names are simply (re)written over.
+
+    Returns the number of files pruned.
+    """
+    if not paths.is_dir(images_dir):
+        return 0
+    owned = _owned_files(os.path.join(images_dir, pdf.SIDECAR_MANIFEST))
+    if owned is None:
+        if not force:
+            raise ZoombieError(
+                f"Image directory exists and was not written by readpdf (no "
+                f"{pdf.SIDECAR_MANIFEST}): {images_dir}. Pass -Force to write into it, "
+                f"or pick a different -ImageDir. Nothing was deleted."
+            )
+        process.log(
+            f"  {images_dir} is not readpdf's; -Force given, our files will be added "
+            f"alongside what is already there (nothing deleted)"
+        )
+        return 0
+
+    existing = {entry.name.lower() for entry in paths.list_dir(images_dir, files=True)}
+    pruned = 0
+    for name in owned:
+        if name.lower() in existing:
+            paths.remove_quietly(os.path.join(images_dir, name))
+            pruned += 1
+    return pruned
+
+
 def run(args) -> Outcome:
     environment = env_mod.resolve()
 
@@ -42,30 +120,39 @@ def run(args) -> Outcome:
 
     base = destination_base(args.source, args.output)
     output_md = f"{base}.md"
-    # '.images' is appended to the same base by the -Images branch.
+    # '.images' is appended to the same base by the default image branch.
     paths.assert_fits(output_md, "The readpdf output path", slack=7)
 
-    if paths.is_file(output_md) and not args.force:
-        raise ZoombieError(f"Output exists (use -Force to overwrite): {output_md}")
+    # -ImageDir is an explicit directory; -ImagesOnly implies extraction too, so
+    # that `readpdf -Source x.pdf -ImagesOnly` works with no second flag.
+    want_images = bool(args.images or args.images_only or args.image_dir)
+    images_dir = None
+    if want_images:
+        images_dir = paths.absolute(args.image_dir) if args.image_dir else f"{base}.images"
+        # Slack covers the longest thing appended inside it: '<NNN> - pNN.png'.
+        paths.assert_fits(images_dir, "The readpdf image directory", slack=16)
 
-    images_dir = f"{base}.images" if args.images else None
+    # -ImagesOnly renders no Markdown, so an existing <base>.md is not in the way.
+    if not args.images_only and paths.is_file(output_md) and not args.force:
+        raise ZoombieError(f"Output exists (use -Force to overwrite): {output_md}")
 
     work_root = args.work_root or paths.env_path(paths.WORK_FOLDER)
     if not paths.is_ascii(work_root):
         raise ZoombieError(f"Work root must be ASCII: {work_root}")
     work = paths.new_ascii_dir(work_root)
 
+    safe_markdown = os.path.join(work, "out.md")
+    work_images = os.path.join(work, "images")
     if args.dry_run:
         safe_input = os.path.join(work, "input.pdf")
-        safe_markdown = os.path.join(work, "out.md")
-        work_images = os.path.join(work, "images")
     else:
         copied = paths.copy_into_safe_work(args.source, work)
         safe_input = copied["input_path"]
-        safe_markdown = os.path.join(work, "out.md")
-        work_images = os.path.join(work, "images")
 
-    process.log(f"readpdf -> {output_md}", "step")
+    if args.images_only:
+        process.log(f"readpdf (images only) -> {images_dir}", "step")
+    else:
+        process.log(f"readpdf -> {output_md}", "step")
     process.log(
         f"  work={work}  ocr={bool(args.ocr)}  pages={args.pages or 'all'}"
     )
@@ -74,17 +161,30 @@ def run(args) -> Outcome:
         input=safe_input,
         output=safe_markdown,
         ocr=args.ocr,
-        images=work_images if args.images else None,
+        images=work_images if want_images else None,
         pages=args.pages,
         lang=args.lang,
+        images_only=bool(args.images_only),
+        images_dir=work_images if want_images else None,
+        min_px=args.min_px,
+        min_pt=args.min_pt,
     )
 
     if args.dry_run:
         return Outcome(
             ok=True,
-            data={"dryRun": True, "work": work, "output": output_md, "options": {
-                "ocr": options.ocr, "pages": options.pages, "images": options.images,
-            }},
+            data={
+                "dryRun": True,
+                "work": work,
+                "output": output_md,
+                "imagesOnly": bool(args.images_only),
+                "images": images_dir,
+                "options": {
+                    "ocr": options.ocr, "pages": options.pages,
+                    "images": options.images_dir, "minPx": options.min_px,
+                    "minPt": options.min_pt,
+                },
+            },
         )
 
     try:
@@ -92,22 +192,32 @@ def run(args) -> Outcome:
     except (RuntimeError, ValueError, OSError) as exc:
         raise ZoombieError(f"readpdf failed: {exc}") from exc
 
+    artifacts: dict[str, dict] = {}
+
     # Copy the Markdown back to the real (possibly non-ASCII) destination.
-    output_dir = os.path.dirname(output_md)
-    if output_dir:
-        paths.ensure_dir(output_dir)
-    paths.copy_file(result.output, output_md)
+    if not args.images_only:
+        output_dir = os.path.dirname(output_md)
+        if output_dir:
+            paths.ensure_dir(output_dir)
+        paths.copy_file(result.output, output_md)
+        artifacts["md"] = {"path": output_md, "size": paths.file_size(output_md)}
 
-    artifacts: dict[str, dict] = {
-        "md": {"path": output_md, "size": paths.file_size(output_md)}
-    }
-
-    if images_dir and paths.is_dir(work_images):
-        if paths.exists(images_dir):
-            paths.remove(images_dir, recursive=True)
-        paths.move(work_images, images_dir)
-        count = len(paths.list_dir(images_dir, files=True))
-        artifacts["images"] = {"path": images_dir, "count": count}
+    if images_dir:
+        # Prune only our own previous output (see _prepare_images_dir), then merge
+        # the work dir in: copy_tree, not move, because shutil.move into an
+        # EXISTING directory would nest the whole folder one level deeper.
+        pruned = _prepare_images_dir(images_dir, args.force)
+        if pruned:
+            process.log(f"  pruned {pruned} image file(s) from a previous run")
+        if paths.is_dir(work_images):
+            paths.copy_tree(work_images, images_dir)
+        artifacts["images"] = {
+            "path": images_dir,
+            "count": result.image_count,
+            "manifest": result.images_manifest
+            and os.path.join(images_dir, os.path.basename(result.images_manifest)),
+            "skipped": len(result.images_skipped),
+        }
 
     if not args.keep_work:
         paths.remove_quietly(work, recursive=True)
@@ -115,7 +225,8 @@ def run(args) -> Outcome:
     return Outcome(
         ok=True,
         data={
-            "output": output_md,
+            "output": None if args.images_only else output_md,
+            "imagesOnly": bool(args.images_only),
             "artifacts": artifacts,
             "pages": result.pages,
             "ocrUsed": result.ocr_used,

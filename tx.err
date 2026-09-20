@@ -1,3 +1,0 @@
-==> whisper-cli (ascii-safe) -> C:\Users\maxim\zoombie-env\tmp\rtf\cli_gpu2
-       work=C:\Users\maxim\zoombie-env\work\049f784fb2254daaa163a207ec0280eb  backend=cuda  model=ggml-large-v3-turbo.bin
-       device=cuda totalMs=2424.96 realtimeFactor=0.0343

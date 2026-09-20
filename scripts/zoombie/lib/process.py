@@ -31,6 +31,19 @@ _LEVEL_PREFIX = {
 }
 
 
+def utc_now_iso() -> str:
+    """The current UTC time as an ISO-8601 string ending in ``Z``.
+
+    The same shape the result line carries, exposed for anything else that has to
+    stamp a produced file (the ``<base>.source.json`` sidecar).
+    """
+    return (
+        datetime.now(timezone.utc)
+        .isoformat(timespec="milliseconds")
+        .replace("+00:00", "Z")
+    )
+
+
 def log(message: str, level: str = "info") -> None:
     """Write one human-readable progress line to stderr."""
     prefix = _LEVEL_PREFIX.get(level, "    ")
@@ -54,9 +67,7 @@ def write_result(
         "action": action,
         "error": error,
         "data": data if data is not None else {},
-        "timestamp": datetime.now(timezone.utc)
-        .isoformat(timespec="milliseconds")
-        .replace("+00:00", "Z"),
+        "timestamp": utc_now_iso(),
     }
     sys.stdout.write(json.dumps(payload, ensure_ascii=False, separators=(",", ":")) + "\n")
     sys.stdout.flush()

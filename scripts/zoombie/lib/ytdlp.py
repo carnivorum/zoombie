@@ -9,10 +9,19 @@ lookup and the console-launcher shim entirely.
 from __future__ import annotations
 
 import os
+from dataclasses import dataclass
 
 from . import paths
 
 OUTPUT_TEMPLATE = "%(title)s [%(id)s].%(ext)s"
+
+# The extensions that can legitimately be the downloaded MEDIA. A download
+# directory may also hold sidecar files (a .srt, .vtt, .info.json, .description,
+# .part) and those are NOT the video: handing one to ffmpeg as "the video" fails
+# the run with a confusing codec error, so the candidate set is restricted here.
+MEDIA_EXTENSIONS = frozenset(
+    {".mp4", ".mkv", ".webm", ".mov", ".m4a", ".mp3", ".wav", ".flac", ".opus"}
+)
 
 
 def name_args(directory: str) -> list[str]:
@@ -70,12 +79,85 @@ def download_args(
 
 
 def newest_download(directory: str) -> dict | None:
-    """The most recently written file in ``directory``, with its size."""
-    path = paths.newest_file(directory)
-    if not path:
+    """The most recently written MEDIA file in ``directory``, with its size.
+
+    Restricted to :data:`MEDIA_EXTENSIONS` on purpose. The previous version
+    returned the newest file of ANY type, so a stray ``.srt``/``.vtt``/
+    ``.info.json`` written after the media would be selected as "the video" and
+    handed to ffmpeg. Naming is not trusted either: the filter is on the
+    extension, and yt-dlp's own ``.part``/``.ytdl`` scratch names are excluded
+    because they are not in the set.
+    """
+    best: str | None = None
+    best_time = -1.0
+    for entry in paths.list_dir(directory, files=True):
+        if paths.extension_of(entry.name).lower() not in MEDIA_EXTENSIONS:
+            continue
+        if entry.mtime > best_time:
+            best_time = entry.mtime
+            best = entry.path
+    if not best:
         return None
     try:
-        size = paths.file_size(path)
+        size = paths.file_size(best)
     except OSError:
         size = 0
-    return {"file": path, "size": size}
+    return {"file": best, "size": size}
+
+
+# The metadata is printed as ONE tab-separated line by yt-dlp's ``--print``, which
+# is why the field order below and in :func:`parse_metadata` must stay in step.
+_METADATA_TEMPLATE = "%(id)s\t%(title)s\t%(webpage_url)s\t%(duration)s"
+
+
+def metadata_args() -> list[str]:
+    """Flags that make yt-dlp PRINT the origin metadata instead of writing a file.
+
+    ``--print`` (with the default ``video`` prefix) is used rather than
+    ``--write-info-json`` because it needs no extra file, no extra cleanup and no
+    extra path-budget headroom, and it cannot leave an unreadable ``.info.json``
+    behind if the process dies. ``after_move`` is the right template prefix: it
+    fires AFTER a merge, so the values are post-processed and the line is printed
+    even when the download only had to be renamed.
+    """
+    return ["--no-simulate", "--print", f"after_move:{_METADATA_TEMPLATE}"]
+
+
+@dataclass(frozen=True)
+class Origin:
+    """The source video's identity, as reported by yt-dlp."""
+
+    id: str | None = None
+    title: str | None = None
+    url: str | None = None
+    duration_sec: float | None = None
+
+
+def parse_metadata(text: str) -> Origin | None:
+    """Parse the ``--print after_move:`` line out of captured yt-dlp output.
+
+    Best-effort by contract: an unparsable payload returns ``None`` and the caller
+    keeps whatever it already knew (at worst the original ``-Source`` URL), because
+    losing the origin metadata must never fail a run whose media downloaded fine.
+    yt-dlp may interleave progress lines, so the LAST line with three tabs is
+    taken: the payload is printed at the end of the post-processing step.
+    """
+    for line in reversed((text or "").splitlines()):
+        fields = line.split("\t")
+        if len(fields) != 4:
+            continue
+        identifier, title, url, duration = (field.strip() for field in fields)
+        if not identifier or not url:
+            continue
+        seconds: float | None = None
+        try:
+            seconds = float(duration)
+        except (TypeError, ValueError):
+            seconds = None
+        return Origin(
+            id=identifier,
+            title=title or None,
+            url=url or None,
+            duration_sec=seconds if seconds and seconds > 0 else None,
+        )
+    return None

@@ -224,18 +224,20 @@ Versioning:
 
 - Every skill is namespaced `zoombie-*`, so its name can never collide with a
   foreign skill — deployment simply overwrites.
-- Each skill carries `cvrm-zoombie-version: 4.0.0`; on a re-run the version is
-  compared and the skill is reported as `up to date` or `updated`.
+- Each skill carries `cvrm-zoombie-version: 4.1.0`; on a re-run the version is
+  compared and the skill is reported as `up to date` or `updated`. The marker must
+  stay inside the first 12 lines of `SKILL.md`: the comparison reads only the
+  front matter, so a marker pushed below it reads as unowned.
 
 If the user prefers project-local skills, they are already versioned sources in
 [`skills/`](skills/); copy that folder into `<project>\.roo\skills\` by hand.
 Project skills shadow global ones with the same name.
 
-Verify Zoo sees the five skills: `zoombie-download-video`,
+Verify Zoo sees the six skills: `zoombie-download-video`,
 `zoombie-extract-audio`, `zoombie-transcribe-audio`, `zoombie-transcribe-video`,
-`zoombie-pdf-to-md`, each sourced as `global`. If one does not appear, confirm
-the path is exactly `<skills-root>\<name>\SKILL.md` and that the front matter
-parses.
+`zoombie-pdf-to-md`, `zoombie-summarize`, each sourced as `global`. If one does
+not appear, confirm the path is exactly `<skills-root>\<name>\SKILL.md` and that
+the front matter parses.
 
 ---
 
@@ -276,9 +278,13 @@ The self-test:
    classifies as `cpu` (capability, not use), and a `-ng` run is never `cuda`,
 10. reports the measured `realtimeFactor` for the run,
 11. when the PDF toolchain is installed, generates a small PDF and runs `readpdf`
-    into the same Cyrillic destination, asserting the Markdown is correct
-    (otherwise this step is skipped),
-12. cleans up.
+    into the same Cyrillic destination, asserting the Markdown is correct and that
+    the image sidecar (`manifest.json` + `README.md` in the image directory) was
+    written (otherwise this step is skipped),
+12. runs `postprocess -Apply` twice on a small fixture Markdown and asserts the
+    file is **byte-identical** after the second run — the idempotency guarantee
+    that lets a skill re-run the summarizer safely,
+13. cleans up.
 
 A pass ends with `PASS: Cyrillic destination path worked end to end` and exit
 code 0. If it fails, report the failing line; do not claim success.
@@ -349,7 +355,7 @@ cause and the fix rather than overstating the result.
 [ ] Installed backend matches the CURRENT hardware (`backendDetected`), not a sticky value from an earlier run
 [ ] Model downloaded and recorded in env.json
 [ ] CLI deployed to zoombie-env\bin\zoombie\zoombie.cmd, and the launcher works from ANY working directory
-[ ] Five zoombie-* skills deployed to %USERPROFILE%\.roo\skills\ with cvrm-zoombie-version 4.0.0
+[ ] Six zoombie-* skills deployed to %USERPROFILE%\.roo\skills\ with cvrm-zoombie-version 4.1.0
 [ ] No stray .roo\skills directory outside %USERPROFILE%
 [ ] A skill invocation routes through zoombie.cmd (not raw ffmpeg/whisper/python commands)
 [ ] PDF dependencies installed into the existing Python; Tesseract detection noted (optional)
@@ -359,6 +365,7 @@ cause and the fix rather than overstating the result.
 [ ] Non-ASCII (Cyrillic) paths handled: inputs isolated in ASCII work dirs
 [ ] Path lengths sane: `doctor` reports `data.report.paths.whisperExeFits` and `modelPathFits` true, and the installer did not refuse the root as too deep
 [ ] `python -m zoombie.selftest` passed (7/7 key words, Cyrillic destination, GPU assertion, deliberate `-NoGpu` run), or reported the TTS step SKIPPED with the pure regression guards still passing
-[ ] `readpdf` (PDF -> Markdown) verified or reported as skipped
+[ ] `readpdf` (PDF -> Markdown + manifest.json/README.md image sidecar) verified or reported as skipped
+[ ] `postprocess -Apply` idempotent: a second run leaves the file byte-identical
 [ ] No pre-existing project file was modified
 ```

@@ -18,13 +18,18 @@ The invariants this module owns, all of which encode hard-won fixes:
    log so the GPU error survives.
 5. **Diagnostics outlive the scratch dir.** A fallback or policy violation keeps a
    copy of the whisper log beside the transcript.
+6. **A pure source producer.** The stage emits the ``.txt`` AND the ``.srt`` on
+   every run (``-NoSrt`` opts out), plus a ``<base>.source.json`` origin sidecar.
+   Nothing downstream has to re-run whisper to recover timings or the origin URL.
 """
 
 from __future__ import annotations
 
+import json
 import os
 from dataclasses import dataclass, field
 
+from .. import SKILL_VERSION
 from . import cublas, env as env_mod, paths, process, whisper
 from .errors import StepFailedError, ZoombieError
 
@@ -36,7 +41,11 @@ class Request:
     audio_path: str
     output_base: str
     language: str = "auto"
+    # Accepted no-op alias for the old -Srt flag: the SRT is written by default
+    # now, so the only thing that can remove it is no_srt.
     want_srt: bool = False
+    no_srt: bool = False
+    force: bool = False
     no_gpu: bool = False
     no_flash_attn: bool = False
     threads: int = 0
@@ -45,6 +54,15 @@ class Request:
     work_root: str | None = None
     keep_work: bool = False
     dry_run: bool = False
+    # Origin metadata for the ``<base>.source.json`` sidecar. Filled by the
+    # download stage in ``pipeline``; the defaults describe a local input file.
+    source_url: str | None = None
+    source_title: str | None = None
+    source_id: str | None = None
+    source_kind: str = "video"
+    # False when the caller deletes the media after transcribing (pipeline's
+    # default), which is exactly the case the sidecar exists for.
+    source_kept: bool = False
 
 
 @dataclass
@@ -54,6 +72,7 @@ class Report:
     output_base: str
     artifacts: dict = field(default_factory=dict)
     backend: str | None = None
+    model: str | None = None
     device_used: str = "cpu"
     device_name: str | None = None
     device_selected: bool = False
@@ -148,6 +167,7 @@ def build_args(
     no_gpu: bool,
     no_flash_attn: bool,
     threads: int | None,
+    no_srt: bool = False,
 ) -> tuple[list[str], bool]:
     """Assemble the whisper-cli arguments, returning ``(argv, flash_attn_used)``.
 
@@ -155,9 +175,19 @@ def build_args(
     the run, so they are added only when ``--help`` listed them. That is the
     "probe the binary, never assume" rule: a false negative merely omits a flag,
     a false positive fails the run.
+
+    ``-osrt`` is NOT optional: it is emitted on every run unless ``no_srt`` is set.
+    ``want_srt`` is kept as an accepted no-op alias of the old ``-Srt`` flag, both
+    so existing callers keep working and because the flag can only ever ADD what
+    the default already produces.
     """
+    # -nt strips the timestamps from the .txt, which is exactly WHY the .srt is the
+    # ONLY timing source in the output set: with no [00:00:00.000 --> ...] lines in
+    # the .txt, a downstream indexing pass has nowhere else to read the timings
+    # from. Removing -nt without giving the .txt its own timestamps would silently
+    # break that pass, so the two decisions must be changed together.
     argv = ["-m", model, "-f", input_path, "-l", language, "-otxt", "-nt"]
-    if want_srt:
+    if not no_srt:
         argv.append("-osrt")
     if no_gpu:
         argv.append("-ng")
@@ -195,9 +225,16 @@ def transcribe(environment: env_mod.Env, request: Request) -> Report:
     paths.assert_fits(work_root, "The work root (-WorkRoot)", slack=80)
 
     output_base = request.output_base
-    paths.assert_fits(output_base, "The transcribe output path", slack=12)
+    # The longest suffix appended to the base is ``.source.json`` (12 characters) +
+    # the dot, so the budget is checked with room for the sidecar.
+    paths.assert_fits(output_base, "The transcribe output path", slack=13)
 
-    report = Report(output_base=output_base, backend=environment.backend)
+    # Refuse BEFORE any scratch dir is created: overwriting an existing transcript
+    # used to happen silently, unlike ``extract``/``readpdf``, which guard.
+    guard_overwrite(output_base, request.force)
+
+    report = Report(output_base=output_base, backend=environment.backend,
+                    model=environment.model)
 
     # Probe the binary ONCE for the flags it advertises and for whether a GPU
     # backend can initialise at all.
@@ -229,6 +266,7 @@ def transcribe(environment: env_mod.Env, request: Request) -> Report:
         request.language,
         caps,
         want_srt=request.want_srt,
+        no_srt=request.no_srt,
         no_gpu=request.no_gpu,
         no_flash_attn=request.no_flash_attn,
         threads=threads,
@@ -281,6 +319,7 @@ def transcribe(environment: env_mod.Env, request: Request) -> Report:
                 request.language,
                 caps,
                 want_srt=request.want_srt,
+                no_srt=request.no_srt,
                 no_gpu=True,
                 no_flash_attn=request.no_flash_attn,
                 threads=threads,
@@ -305,9 +344,9 @@ def transcribe(environment: env_mod.Env, request: Request) -> Report:
     output_dir = os.path.dirname(output_base)
     if output_dir:
         paths.ensure_dir(output_dir)
-    extensions = ["txt"]
-    if request.want_srt:
-        extensions.append("srt")
+    # TXT and SRT are BOTH produced on every run; only -NoSrt removes the SRT from
+    # the whisper arguments, so the list no longer depends on a per-run flag.
+    extensions = ["txt"] if request.no_srt else ["txt", "srt"]
     artifacts: dict[str, dict] = {}
     for extension in extensions:
         source = f"{out_base}.{extension}"
@@ -319,6 +358,17 @@ def transcribe(environment: env_mod.Env, request: Request) -> Report:
             paths.copy_file(source, destination)
             artifacts[extension] = {"path": destination, "size": paths.file_size(destination)}
     report.artifacts = artifacts
+    # Report the SRT slot explicitly even when -NoSrt suppressed it, so a caller
+    # can tell "timings were not requested" from "the run failed to produce them".
+    if "srt" not in artifacts:
+        report.artifacts["srt"] = None
+
+    # Capture the ORIGIN before anything can delete the media: ``pipeline`` removes
+    # the downloaded file (and its directory) at the end of the run, so this
+    # sidecar is the only surviving link back to the source URL.
+    report.artifacts["sidecar"] = write_source_sidecar(
+        output_base, request, report, extension_count=len(extensions)
+    )
 
     # Read the captured log for the device ACTUALLY used and the timings. whisper
     # emits both on stderr, so this must read the log file and not stdout.
@@ -427,6 +477,80 @@ def transcribe(environment: env_mod.Env, request: Request) -> Report:
 
     report.gpu_attempt_wall_ms = gpu_attempt_wall_ms
     return report
+
+
+def guard_overwrite(output_base: str, force: bool) -> None:
+    """Refuse to overwrite an existing transcript unless ``-Force`` was given.
+
+    The same guard ``extract`` and ``readpdf`` already apply to their own output.
+    Without it a re-run replaced ``<base>.txt`` -- the artifact a caller is most
+    likely to have post-processed -- and reported success anyway.
+    """
+    existing = f"{output_base}.txt"
+    if paths.is_file(existing) and not force:
+        raise ZoombieError(f"Output exists (use -Force to overwrite): {existing}")
+
+
+def source_metadata(request: Request, report: Report) -> dict:
+    """The origin payload written to ``<base>.source.json``.
+
+    This is what lets the summarize pass fill its "source" block (the origin link)
+    for a video whose local file was DELETED after download, which is pipeline's
+    default behaviour. Every field is either captured by the download stage,
+    measured by this run, or ``null``; nothing here is guessed.
+    """
+    return {
+        "kind": request.source_kind,
+        # Falling back to the local path keeps the sidecar useful (and honest) for
+        # a plain transcribe of an audio file, where there is no URL at all.
+        "url": request.source_url or request.audio_path,
+        "title": request.source_title,
+        "id": request.source_id,
+        "durationSec": report.audio_duration_sec,
+        "language": request.language,
+        "model": report.model,
+        "backend": report.backend,
+        "deviceUsed": report.device_used,
+        "deviceVerified": report.device_selected,
+        "realtimeFactor": report.realtime_factor,
+        "toolchainVersion": SKILL_VERSION,
+        "createdAt": process.utc_now_iso(),
+        # The explicit record of whether the media this came from still exists.
+        "sourceKept": request.source_kept,
+    }
+
+
+def write_source_sidecar(
+    output_base: str,
+    request: Request,
+    report: Report,
+    *,
+    extension_count: int,
+) -> dict | None:
+    """Write ``<base>.source.json`` beside the artifacts. Best-effort, never fatal.
+
+    Same error discipline as :func:`preserve_logs`: a sidecar that cannot be
+    written is a warning, and the transcript stays the deliverable. ``-NoSrt``
+    removes ``.srt`` from ``output_base``'s suffixes, so the length check is
+    computed from the suffixes actually produced rather than a fixed worst case.
+    """
+    output_dir = os.path.dirname(output_base)
+    if output_dir:
+        paths.ensure_dir(output_dir)
+    destination = f"{output_base}.source.json"
+    try:
+        # "..source.json" = 13 characters for the shortest case (TXT + sidecar);
+        # add 4 more for the ".srt" suffix when it is produced.
+        slack = 13 + (0 if extension_count <= 1 else 4)
+        paths.assert_fits(destination, "The origin-metadata sidecar path", slack=slack)
+        with open(paths.to_extended(destination), "w", encoding="utf-8") as handle:
+            json.dump(source_metadata(request, report), handle, ensure_ascii=False, indent=2)
+            handle.write("\n")
+        size = paths.file_size(destination)
+    except (OSError, ValueError, paths.PathTooDeepError) as exc:
+        process.log(f"could not write the origin-metadata sidecar: {exc}", "warn")
+        return None
+    return {"path": destination, "size": size}
 
 
 def preserve_logs(output_base: str, whisper_log: str, retry_log: str) -> str | None:

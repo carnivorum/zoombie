@@ -1,7 +1,7 @@
 ---
 name: zoombie-transcribe-audio
-cvrm-zoombie-version: 4.0.0
-description: Transcribe an audio file to text (TXT and SRT, plus optional readable Markdown and summary) using a local whisper.cpp binary with a CUDA/Vulkan/CPU backend. Use when the user wants a speech-to-text transcript, subtitles, SRT/TXT output, or a cleaned-up readable version of a recording. Always inspects the project, proposes transcript output paths, and confirms the destination before writing anything.
+cvrm-zoombie-version: 4.1.0
+description: Transcribe an audio file into SOURCE material - a TXT transcript, an SRT subtitle track and a .source.json origin sidecar - using a local whisper.cpp binary with a CUDA/Vulkan/CPU backend. Use when the user wants a speech-to-text transcript, subtitles, or SRT/TXT output for a recording. It deliberately writes no summary and no readable document; zoombie-summarize produces those. Always inspects the project, proposes transcript output paths, and confirms the destination before writing anything.
 ---
 
 # Skill: zoombie-transcribe-audio
@@ -9,6 +9,38 @@ description: Transcribe an audio file to text (TXT and SRT, plus optional readab
 Thin wrapper. The whisper.cpp invocation — including the ASCII-path isolation
 that works around the whisper Cyrillic-path bug — lives in the deterministic
 CLI. This skill only decides *where* to write and asks the user to confirm.
+
+**Your deliverable is source material, not a document. Do not create or edit any
+`.md` file, and do not summarise — the `zoombie-summarize` skill owns that.**
+
+## Producer contract
+
+In the confirmed output folder, one `transcribe` call writes:
+
+| Artifact | Authoritative for |
+|----------|-------------------|
+| `<base>.txt` | the transcript WORDING |
+| `<base>.srt` | the TIMING, and for spotting machine noise |
+| `<base>.source.json` | the ORIGIN of the audio |
+
+- `.txt` and `.srt` come from ONE whisper decode. The SRT is never a separate
+  pass and is never a yt-dlp subtitle download: yt-dlp is never asked for
+  subtitles.
+- whisper always runs with `-nt` (no timestamps in the `.txt`). That is exactly
+  why the `.srt` is the ONLY timing source in the output set: with no cue lines
+  in the `.txt`, a downstream indexing pass has nowhere else to read the timings
+  from. Do not drop the SRT "to keep things tidy".
+- The `.srt` is emitted **by default**. `-NoSrt` is the opt-out and it destroys
+  the timings.
+- `<base>.source.json` records the origin. Keys: `kind`, `url`, `title`, `id`,
+  `durationSec`, `language`, `model`, `backend`, `deviceUsed`, `deviceVerified`,
+  `realtimeFactor`, `toolchainVersion`, `createdAt`, `sourceKept`. Every value is
+  captured by the download stage, measured by this run, or `null` — nothing is
+  guessed. For a plain audio file `url` is the input path and `title`/`id` are
+  `null`; `kind` is the recorded source category (a `pipeline` run writes `video`
+  for a URL and `audio` for a local file, while a plain `transcribe` leaves the
+  default `video`); `sourceKept` is `true` only when `pipeline` was told to keep
+  the downloaded media (`-KeepWork`).
 
 ## Run this, nothing else
 
@@ -27,7 +59,7 @@ if (-not $cli) { throw "zoombie CLI not found. Run scripts\bootstrap.cmd first."
 Then call it — this is the only command this skill needs:
 
 ```powershell
-& $cli transcribe -Source "<audio>" -Output "<confirmed-basename>" [-Language auto] [-Srt] [-Force] [-NoGpu] [-NoFlashAttn] [-Threads N] [-AllowCpuFallback]
+& $cli transcribe -Source "<audio>" -Output "<confirmed-basename>" [-Language auto] [-NoSrt] [-Model "<name>"] [-Force] [-NoGpu] [-NoFlashAttn] [-Threads N] [-AllowCpuFallback] [-StrictGpu]
 ```
 
 `-NoGpu` forces a deliberate CPU run; `-AllowCpuFallback` permits a CPU run on a
@@ -42,7 +74,9 @@ python -m zoombie transcribe -Source "<audio>" -Output "<confirmed-basename>"
 ```
 
 The CLI prints one JSON line: `{ ok, action, data, error }`. Read
-`data.artifacts.txt.path` (and `.srt` when `-Srt` was used). Do **not**
+`data.artifacts.txt.path`, `data.artifacts.srt.path` and
+`data.artifacts.sidecar.path` (each with its own `size`), plus `data.outputBase`.
+`data.artifacts.srt` is `null` when `-NoSrt` suppressed it. Do **not**
 hand-assemble a `whisper-cli` command.
 
 ## How the Cyrillic-path bug is handled
@@ -61,23 +95,29 @@ do anything special — just pass the paths the user confirmed.
 2. **Locate the audio input.** Use the user's path, or the project's recent
    `.wav`/`.mp3`/`.m4a`/`.flac`. If ambiguous, ask.
 
-3. **Propose transcript output paths** and **ask the user to confirm** the
-   folder and basename before writing anything. Wait for an explicit answer.
+3. **Propose 2–4 concrete transcript output paths** and **ask the user to
+   confirm** the folder and basename before writing anything. Wait for an
+   explicit answer.
 
-4. **Run the CLI** with the confirmed basename. Add `-Srt` if the user wants
-   subtitles. Add `-Language <code>` only to force a language (auto by default).
+4. **Run the CLI** with the confirmed basename. Add `-Language <code>` only to
+   force a language (auto by default). Do **not** pass `-Srt`: it still parses
+   but is a legacy no-op alias, because the `.srt` is already produced. Pass
+   `-NoSrt` only if the user explicitly accepts losing the only timing source.
 
-5. **Ask two explicit follow-ups after the raw transcript exists:**
-   - "Do you also want a readable Markdown version?" — if yes, write a `.md`
-     file (at a confirmed path) with timestamps removed, text reflowed into
-     paragraphs, and filler cleaned up.
-   - "Should I also create a summary?" — if yes, ask how long and write it.
+5. **Report every artifact produced** with its path and size — `.txt`, `.srt`
+   (say so plainly if it is `null`), and `.source.json` — plus `data.deviceUsed`,
+   `data.deviceVerified` and `data.realtimeFactor`.
 
-6. **Report every file produced** with its path and size.
+6. **Hand off to `zoombie-summarize`**, naming the exact artifacts it will
+   consume: `<base>.txt` (the wording), `<base>.srt` (the timing) and
+   `<base>.source.json` (the origin). Write no `.md` file yourself.
 
 ## Notes
 
-- Never overwrite without asking; pass `-Force` only with the user's consent.
+- **Never overwrite without asking.** `transcribe` refuses to overwrite an
+  existing `<base>.txt` unless `-Force` is given, and it refuses *before* any
+  scratch directory is created, so an accidental re-run costs nothing. Pass
+  `-Force` only with the user's consent.
 - If the CLI returns `ok:false`, report `error` plainly.
 - **A CPU run on a GPU machine is a failure, not a warning.** When a usable GPU
   backend is configured, the CLI refuses to return a CPU transcript: it returns

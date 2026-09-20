@@ -66,6 +66,7 @@ scripts/
     commands/
       doctor.py  download.py  extract.py  readpdf.py
       transcribe.py  pipeline.py  clean.py
+      postprocess.py  verify.py  library.py (zoombie index)
     lib/
       paths.py      env root, ASCII guard, path budget, extended prefix, safe-work copy
       manifest.py   env.json read/write
@@ -76,6 +77,9 @@ scripts/
       cublas.py     pinned cuBLAS redist records + runtime readiness
       stt.py        shared transcribe orchestration (transcribe + pipeline)
       pdf.py        PDF -> Markdown (PyMuPDF4LLM + optional Tesseract OCR)
+      textnorm.py   text normalization: norm/normalize_with_map, hhmmss, link encoding
+      srt.py        SRT parsing + the word-window timing lookup for headings
+      markdown.py   range-based, idempotent edits of a generated summary.md
       ytdlp.py      yt-dlp argument assembly
       download.py   HTTP download with resume
       archive.py    zip extraction, long-path aware
@@ -94,6 +98,7 @@ skills/
   zoombie-transcribe-audio/SKILL.md   thin wrapper -> zoombie transcribe
   zoombie-transcribe-video/SKILL.md   thin wrapper -> zoombie pipeline
   zoombie-pdf-to-md/SKILL.md          thin wrapper -> zoombie readpdf
+  zoombie-summarize/SKILL.md          writes summary.md -> zoombie postprocess / index
 ```
 
 The installed toolchain lives outside the repo, at an ASCII path:
@@ -186,7 +191,7 @@ What travels in the repo vs. what each machine rebuilds:
 
 On a machine that is **already configured**, nothing further is needed: the
 deployed launcher at `%USERPROFILE%\zoombie-env\bin\zoombie\zoombie.cmd` is
-self-contained (it carries its own package and `pdf\`), and the five `zoombie-*`
+self-contained (it carries its own package and `pdf\`), and the six `zoombie-*`
 skills live in the global root, so "transcribe this video" and "convert this PDF"
 work from any workspace.
 
@@ -209,15 +214,54 @@ $zoombie = "$env:USERPROFILE\zoombie-env\bin\zoombie\zoombie.cmd"
 & $zoombie doctor                                         # report tool status
 & $zoombie download -Source "<url>" -DownloadDir "<dir>" [-AudioOnly] [-Format wav]
 & $zoombie extract  -Source "<video>" -Output "<out>" [-Format wav|mp3|m4a|flac]
-& $zoombie transcribe -Source "<audio>" -Output "<basename>" [-Language auto] [-Srt] [-NoGpu] [-NoFlashAttn] [-Threads N] [-AllowCpuFallback] [-StrictGpu]
-& $zoombie readpdf  -Source "<pdf>" -Output "<basename>" [-Ocr] [-Images] [-Pages "1-5,8"]
-& $zoombie pipeline -Source "<url-or-file>" -Output "<basename>" [-DownloadDir "<dir>"] [-Srt]
+& $zoombie transcribe -Source "<audio>" -Output "<basename>" [-Language auto] [-NoSrt] [-NoGpu] [-NoFlashAttn] [-Threads N] [-AllowCpuFallback] [-StrictGpu]
+& $zoombie readpdf  -Source "<pdf>" -Output "<basename>" [-Ocr] [-Images] [-ImagesOnly] [-ImageDir "<dir>"] [-MinPx N] [-MinPt N] [-Pages "1-5,8"]
+& $zoombie pipeline -Source "<url-or-file>" -Output "<basename>" [-DownloadDir "<dir>"] [-NoSrt]
+& $zoombie postprocess -Md "<summary.md>" [-Srt "<file>"] [-ImageDir "<dir>"] [-Apply]   # anchors, timestamps, index, images
+& $zoombie verify   -Dir "<library-root>" [-Recurse] [-Json]                               # exit 1 on problems
+& $zoombie index    -Dir "<library-root>" [-Output "<path>"] [-Json] [-Apply]             # regenerate README.md
 & $zoombie clean                                          # remove scratch dirs
 ```
 
 Every subcommand accepts `-DryRun` (plan only) and most accept `-Force`.
 Long options also work in their conventional spelling (`--source`, `--output`),
 so the CLI is comfortable from a non-Windows-style invocation too.
+
+Two commands are **dry run by default** and write ONLY with `-Apply`, because a
+skill calls them and must never be able to corrupt a document by accident:
+`postprocess` and `index`.
+
+### Transcription output: SRT by default
+
+`transcribe` and `pipeline` emit subtitles **by default**:
+
+| Flag | Effect |
+|------|--------|
+| *(none)* | a `<base>.srt` is written beside the transcript |
+| `-NoSrt` | suppress the `.srt` (the timings are then lost) |
+| `-Srt` | **legacy no-op alias**, kept so existing callers keep working — it can never remove the default |
+
+Every run also writes a `<base>.source.json` origin sidecar recording where the
+input came from. `pipeline` exposes no `-Format`: its audio is always a 16 kHz
+mono WAV, which is the only thing whisper.cpp consumes. `-Format` lives on
+`download` and `extract`, where it is honoured.
+
+### `readpdf`: images and their sidecar
+
+`readpdf` can also extract the embedded images:
+
+| Flag | Effect |
+|------|--------|
+| `-Images` | extract images (and render the Markdown) |
+| `-ImagesOnly` | extract images and the sidecar only; render no Markdown (and skip the `.md` guard) |
+| `-ImageDir <dir>` | explicit image directory (default `<base>.images`); implies extraction |
+| `-MinPx N` | drop images below this pixel size |
+| `-MinPt N` | drop images below this on-page size in points |
+
+When images are extracted, `manifest.json` and `README.md` are written **into the
+image directory** (`img\` when the summarize workflow relocates it). The manifest
+records placement metadata; `postprocess` reads it to re-insert the images, and
+`verify` reports `missing-manifest` / `missing-readme` when either file is absent.
 
 ## Performance: proving the GPU is really used
 
@@ -320,11 +364,20 @@ REM backendConfigured vs backendObserved, with a warning on mismatch
 
 ## Skills
 
-The five skills in [`skills/`](skills/) are the canonical sources. They only
+The six skills in [`skills/`](skills/) are the canonical sources. They only
 inspect the project, propose paths, collect the user's confirmation, and then
 call the CLI. They are namespaced `zoombie-*` so their names cannot collide with a
-foreign skill, and they carry `cvrm-zoombie-version: 4.0.0`, which the installer
+foreign skill, and they carry `cvrm-zoombie-version: 4.1.0`, which the installer
 compares to decide `up to date` vs `updated`.
+
+| Skill | Produces |
+|-------|----------|
+| `zoombie-download-video` | a video (or its audio) via `zoombie download` |
+| `zoombie-extract-audio` | a whisper-ready WAV via `zoombie extract` |
+| `zoombie-transcribe-audio` | a transcript (+ SRT) via `zoombie transcribe` |
+| `zoombie-transcribe-video` | the whole chain via `zoombie pipeline` |
+| `zoombie-pdf-to-md` | Markdown (+ images) via `zoombie readpdf` |
+| `zoombie-summarize` | a 6-block `summary.md` in a named library folder |
 
 `zoombie-pdf-to-md` converts a PDF to Markdown. Text PDFs need nothing extra;
 scanned PDFs use an opt-in Tesseract OCR fallback (`-Ocr`). It reuses the Python
@@ -332,6 +385,15 @@ this repo already requires (the `pymupdf4llm`/`pytesseract` dependencies are
 installed into it with `pip --user`), and the source PDF is copied into an ASCII
 scratch dir first, so the Cyrillic-path invariant holds for PyMuPDF exactly as it
 does for whisper.cpp.
+
+`zoombie-summarize` turns a transcript, a PDF-derived Markdown, or arbitrary text
+into a 6-block `summary.md` inside a named library folder
+(`<number> - <DD.MM.YYYY> - <title>`). It writes the prose itself; everything
+mechanical -- anchors, heading timestamps from the SRT, the regenerated block-4
+index, link repair and inline-image re-insertion -- is done by `zoombie
+postprocess`, so a re-run cannot drift. It offers to reindex the whole library
+with `zoombie index`, which rebuilds the library `README.md` from a deterministic
+scan of the item folders.
 
 ## Hacking
 
@@ -356,8 +418,9 @@ does for whisper.cpp.
   path and always pulls the published repo.
 - Bump `SKILL_VERSION` in [`__init__.py`](scripts/zoombie/__init__.py) when skill
   content changes, so deployment can tell an installed skill is out of date. It is
-  currently `4.0.0`; every `SKILL.md` carries the same value in
-  `cvrm-zoombie-version`.
+  currently `4.1.0`; every `SKILL.md` carries the same value in
+  `cvrm-zoombie-version`, inside the first 12 lines — `read_marker` reads only the
+  front matter, so a marker that drifts below it reads as unowned.
 - The PDF dependencies are installed with `pip install --user`, matching the
   comment in [`requirements-pdf.txt`](scripts/requirements-pdf.txt). pip also
   writes console launchers into `%APPDATA%\Python\<ver>\Scripts`, which this
