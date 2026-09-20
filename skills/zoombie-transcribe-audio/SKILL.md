@@ -1,6 +1,6 @@
 ---
 name: zoombie-transcribe-audio
-cvrm-zoombie-version: 3.3.0
+cvrm-zoombie-version: 4.0.0
 description: Transcribe an audio file to text (TXT and SRT, plus optional readable Markdown and summary) using a local whisper.cpp binary with a CUDA/Vulkan/CPU backend. Use when the user wants a speech-to-text transcript, subtitles, SRT/TXT output, or a cleaned-up readable version of a recording. Always inspects the project, proposes transcript output paths, and confirms the destination before writing anything.
 ---
 
@@ -18,10 +18,10 @@ machine whose user name is not ASCII the toolchain is installed under
 
 ```powershell
 $cli = @(
-    "$env:USERPROFILE\zoombie-env\bin\zoombie\zoombie.ps1",
-    "$env:PUBLIC\zoombie-env\bin\zoombie\zoombie.ps1"
+    "$env:USERPROFILE\zoombie-env\bin\zoombie\zoombie.cmd",
+    "$env:PUBLIC\zoombie-env\bin\zoombie\zoombie.cmd"
 ) | Where-Object { Test-Path $_ } | Select-Object -First 1
-if (-not $cli) { throw "zoombie CLI not found. Run scripts/setup.ps1 first." }
+if (-not $cli) { throw "zoombie CLI not found. Run scripts\bootstrap.cmd first." }
 ```
 
 Then call it — this is the only command this skill needs:
@@ -37,7 +37,8 @@ see the GPU policy below.
 If the installed CLI is missing entirely, fall back to the repo copy:
 
 ```powershell
-& "<repo>\scripts\zoombie.ps1" transcribe -Source "<audio>" -Output "<confirmed-basename>"
+cd "<repo>\scripts"
+python -m zoombie transcribe -Source "<audio>" -Output "<confirmed-basename>"
 ```
 
 The CLI prints one JSON line: `{ ok, action, data, error }`. Read
@@ -94,5 +95,5 @@ do anything special — just pass the paths the user confirmed.
   `false`, GPU use is unproven: report that plainly, and pass `-StrictGpu` on a
   re-run to make it a hard failure. `gpuAttemptWallMs` is the time wasted by an
   abandoned GPU attempt before a CPU retry.
-- Shell: PowerShell. If a command fails with *"is not recognized"*, the runner
-  is `cmd.exe`; wrap it as `powershell -NoProfile -Command "<one-line>"`.
+- Shell: any. The launcher is a `.cmd` shim, so it works from `cmd.exe`,
+  PowerShell or a plain process spawn without a wrapper.

@@ -1,0 +1,14 @@
+# Extra dependency for the self-test only.
+#
+# tests/test_pdf.py and the pipeline tests need nothing beyond the runtime
+# dependencies. This file exists because the self-test synthesizes speech with
+# the Windows SAPI voices, and pyttsx3 is the standard Python binding for them.
+#
+#   pyttsx3  SAPI5 text-to-speech (replaces PowerShell's System.Speech)
+#
+# It is deliberately NOT part of the runtime requirements: transcription and PDF
+# conversion do not need to speak. If it cannot be installed or finds no English
+# voice, the self-test reports the step as SKIPPED instead of failing, exactly as
+# it already does when the PDF toolchain is absent.
+
+pyttsx3>=2.90

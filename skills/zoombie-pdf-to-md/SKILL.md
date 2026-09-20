@@ -1,14 +1,14 @@
 ---
 name: zoombie-pdf-to-md
-cvrm-zoombie-version: 3.3.0
+cvrm-zoombie-version: 4.0.0
 description: Convert a PDF into Markdown using PyMuPDF4LLM, with an optional Tesseract OCR fallback for scanned or image-only pages. Use when the user wants to extract text from a PDF, turn a PDF into Markdown, read a PDF document, or prepare a PDF for docs. Always inspects the project first, proposes candidate output paths, and confirms with the user before writing anything.
 ---
 
 # Skill: zoombie-pdf-to-md
 
-Thin wrapper. The Python invocation — PyMuPDF4LLM, the page-type detection, the
-OCR fallback, and the ASCII-path isolation — lives in the deterministic CLI.
-This skill only decides *where* to write and asks the user to confirm.
+Thin wrapper. The conversion — PyMuPDF4LLM, the page-type detection, the OCR
+fallback, and the ASCII-path isolation — lives in the deterministic CLI. This
+skill only decides *where* to write and asks the user to confirm.
 
 ## Run this, nothing else
 
@@ -19,10 +19,10 @@ both:
 
 ```powershell
 $cli = @(
-    "$env:USERPROFILE\zoombie-env\bin\zoombie\zoombie.ps1",
-    "$env:PUBLIC\zoombie-env\bin\zoombie\zoombie.ps1"
+    "$env:USERPROFILE\zoombie-env\bin\zoombie\zoombie.cmd",
+    "$env:PUBLIC\zoombie-env\bin\zoombie\zoombie.cmd"
 ) | Where-Object { Test-Path $_ } | Select-Object -First 1
-if (-not $cli) { throw "zoombie CLI not found. Run scripts/setup.ps1 first." }
+if (-not $cli) { throw "zoombie CLI not found. Run scripts\bootstrap.cmd first." }
 ```
 
 Then call it — this is the only command this skill needs:
@@ -34,7 +34,8 @@ Then call it — this is the only command this skill needs:
 If the installed CLI is missing entirely, fall back to the repo copy:
 
 ```powershell
-& "<repo>\scripts\zoombie.ps1" readpdf -Source "<pdf>" -Output "<confirmed-basename>"
+cd "<repo>\scripts"
+python -m zoombie readpdf -Source "<pdf>" -Output "<confirmed-basename>"
 ```
 
 The CLI prints one JSON line: `{ ok, action, data, error }`. Read `data.output`
@@ -79,8 +80,9 @@ what happened. Do **not** hand-assemble a Python command.
   message. Install it with `winget install UB-Mannheim.TesseractOCR`, or run
   without `-Ocr`.
 - **If the CLI reports the PDF toolchain is missing**, tell the user to run
-  `scripts/setup.ps1` (it installs the `pymupdf4llm`/`pytesseract` dependencies
-  into the Python this repo already uses). Do not install Python packages by hand.
+  `scripts\bootstrap.cmd` (it installs the `pymupdf4llm`/`pytesseract`
+  dependencies into the Python this repo already uses). Do not install Python
+  packages by hand.
 - **Never overwrite without asking**; pass `-Force` only with consent.
-- Shell: PowerShell. If a command fails with *"is not recognized"*, the runner
-  is `cmd.exe`; wrap it as `powershell -NoProfile -Command "<one-line>"`.
+- Shell: any. The launcher is a `.cmd` shim, so it works from `cmd.exe`,
+  PowerShell or a plain process spawn without a wrapper.

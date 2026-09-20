@@ -1,6 +1,6 @@
 ---
 name: zoombie-extract-audio
-cvrm-zoombie-version: 3.3.0
+cvrm-zoombie-version: 4.0.0
 description: Extract the audio track from a video file into a whisper-ready WAV (or mp3/m4a/flac) using ffmpeg. Use when the user wants to pull audio out of a video or recording, prepare media for transcription, or convert to 16 kHz mono PCM. Always inspects the project first, proposes candidate output destinations, and confirms with the user before running ffmpeg or writing any file.
 ---
 
@@ -17,10 +17,10 @@ machine whose user name is not ASCII the toolchain is installed under
 
 ```powershell
 $cli = @(
-    "$env:USERPROFILE\zoombie-env\bin\zoombie\zoombie.ps1",
-    "$env:PUBLIC\zoombie-env\bin\zoombie\zoombie.ps1"
+    "$env:USERPROFILE\zoombie-env\bin\zoombie\zoombie.cmd",
+    "$env:PUBLIC\zoombie-env\bin\zoombie\zoombie.cmd"
 ) | Where-Object { Test-Path $_ } | Select-Object -First 1
-if (-not $cli) { throw "zoombie CLI not found. Run scripts/setup.ps1 first." }
+if (-not $cli) { throw "zoombie CLI not found. Run scripts\bootstrap.cmd first." }
 ```
 
 Then call it — this is the only command this skill needs:
@@ -32,7 +32,8 @@ Then call it — this is the only command this skill needs:
 If the installed CLI is missing entirely, fall back to the repo copy:
 
 ```powershell
-& "<repo>\scripts\zoombie.ps1" extract -Source "<video>" -Output "<confirmed-output>"
+cd "<repo>\scripts"
+python -m zoombie extract -Source "<video>" -Output "<confirmed-output>"
 ```
 
 The CLI prints one JSON line: `{ ok, action, data, error }`. Read
@@ -63,5 +64,5 @@ The CLI prints one JSON line: `{ ok, action, data, error }`. Read
 - Supported formats: `wav` (default), `mp3`, `m4a`, `flac`. Warn the user that
   whisper.cpp performs best with 16 kHz mono WAV.
 - Never overwrite without asking; pass `-Force` only with the user's consent.
-- Shell: PowerShell. If a command fails with *"is not recognized"*, the runner
-  is `cmd.exe`; wrap it as `powershell -NoProfile -Command "<one-line>"`.
+- Shell: any. The launcher is a `.cmd` shim, so it works from `cmd.exe`,
+  PowerShell or a plain process spawn without a wrapper.

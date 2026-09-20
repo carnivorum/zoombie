@@ -1,7 +1,9 @@
 # Python dependencies for the zoombie PDF -> Markdown toolchain.
 #
-# Installed by scripts/setup-worker.ps1 into an isolated venv at
-# <zoombie-env>\bin\pdf\venv (an ASCII path), never into the system Python.
+# Installed by the zoombie installer with `pip install --user` into the SAME
+# interpreter the toolchain already uses for yt-dlp, so there is one Python to
+# maintain, no elevation is needed, and nothing is written into a system
+# location.
 #
 #   pymupdf4llm  Markdown-aware extraction (headings, lists, tables) on top of PyMuPDF
 #   pymupdf      PyMuPDF itself: PDF parsing, and page rasterization for OCR

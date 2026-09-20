@@ -1,6 +1,6 @@
 ---
 name: zoombie-transcribe-video
-cvrm-zoombie-version: 3.3.0
+cvrm-zoombie-version: 4.0.0
 description: End-to-end pipeline that turns a video file or a video URL into a transcript by chaining the zoombie download, extract and transcribe skills. Use when the user says things like "transcribe this video", "transcribe this link", "give me a transcript of this recording", or "make subtitles from this video". Collects every output-path confirmation up front in one pass, then runs download (when a URL is given), audio extraction, and whisper.cpp transcription in sequence.
 ---
 
@@ -18,10 +18,10 @@ machine whose user name is not ASCII the toolchain is installed under
 
 ```powershell
 $cli = @(
-    "$env:USERPROFILE\zoombie-env\bin\zoombie\zoombie.ps1",
-    "$env:PUBLIC\zoombie-env\bin\zoombie\zoombie.ps1"
+    "$env:USERPROFILE\zoombie-env\bin\zoombie\zoombie.cmd",
+    "$env:PUBLIC\zoombie-env\bin\zoombie\zoombie.cmd"
 ) | Where-Object { Test-Path $_ } | Select-Object -First 1
-if (-not $cli) { throw "zoombie CLI not found. Run scripts/setup.ps1 first." }
+if (-not $cli) { throw "zoombie CLI not found. Run scripts\bootstrap.cmd first." }
 ```
 
 Then call it — this is the only command this skill needs:
@@ -33,7 +33,8 @@ Then call it — this is the only command this skill needs:
 If the installed CLI is missing entirely, fall back to the repo copy:
 
 ```powershell
-& "<repo>\scripts\zoombie.ps1" pipeline -Source "<url-or-file>" -Output "<confirmed-basename>"
+cd "<repo>\scripts"
+python -m zoombie pipeline -Source "<url-or-file>" -Output "<confirmed-basename>"
 ```
 
 The CLI prints one JSON line: `{ ok, action, data, error }`. Read
@@ -95,5 +96,5 @@ too because the audio is written to ASCII before whisper sees it.
   abandoned GPU attempt before a CPU retry.
 - Never delete a user-supplied local source file. Never overwrite without
   asking.
-- Shell: PowerShell. If a command fails with *"is not recognized"*, the runner
-  is `cmd.exe`; wrap it as `powershell -NoProfile -Command "<one-line>"`.
+- Shell: any. The launcher is a `.cmd` shim, so it works from `cmd.exe`,
+  PowerShell or a plain process spawn without a wrapper.

@@ -1,6 +1,6 @@
 ---
 name: zoombie-download-video
-cvrm-zoombie-version: 3.3.0
+cvrm-zoombie-version: 4.0.0
 description: Download a video (or its audio only) from a URL using yt-dlp, supporting YouTube and other yt-dlp-compatible sites such as RuTube, Vimeo, Twitter/X, Twitch and TikTok. Use when the user provides a link and asks to download, save, grab, or fetch a video, or when a later step needs a local copy of a remote video. Always inspects the project first, proposes candidate destinations, and confirms where to save before downloading anything.
 ---
 
@@ -17,22 +17,23 @@ machine whose user name is not ASCII the toolchain is installed under
 
 ```powershell
 $cli = @(
-    "$env:USERPROFILE\zoombie-env\bin\zoombie\zoombie.ps1",
-    "$env:PUBLIC\zoombie-env\bin\zoombie\zoombie.ps1"
+    "$env:USERPROFILE\zoombie-env\bin\zoombie\zoombie.cmd",
+    "$env:PUBLIC\zoombie-env\bin\zoombie\zoombie.cmd"
 ) | Where-Object { Test-Path $_ } | Select-Object -First 1
-if (-not $cli) { throw "zoombie CLI not found. Run scripts/setup.ps1 first." }
+if (-not $cli) { throw "zoombie CLI not found. Run scripts\bootstrap.cmd first." }
 ```
 
 Then call it — this is the only command this skill needs:
 
 ```powershell
-& $cli download -Source "<url>" -DownloadDir "<confirmed-dir>" [-AudioOnly] [-Force]
+& $cli download -Source "<url>" -DownloadDir "<confirmed-dir>" [-AudioOnly] [-Format wav] [-Force]
 ```
 
 If the installed CLI is missing entirely, fall back to the repo copy:
 
 ```powershell
-& "<repo>\scripts\zoombie.ps1" download -Source "<url>" -DownloadDir "<confirmed-dir>"
+cd "<repo>\scripts"
+python -m zoombie download -Source "<url>" -DownloadDir "<confirmed-dir>"
 ```
 
 The CLI prints one JSON line: `{ ok, action, data, error }`. Read `data.file`
@@ -63,5 +64,7 @@ for the saved path. Do **not** hand-assemble a `yt-dlp` command.
   and respect each site's terms of service.
 - If the CLI returns `ok:false`, report `error` plainly. Common causes: the site
   is unsupported, the video is region-locked, or it needs cookies/auth.
-- Shell: PowerShell. If a command fails with *"is not recognized"*, the runner
-  is `cmd.exe`; wrap it as `powershell -NoProfile -Command "<one-line>"`.
+- `-AudioOnly` can convert straight to a whisper-ready 16 kHz mono WAV
+  (`-Format wav`, the default), which is what the transcription stage wants.
+- Shell: any. The launcher is a `.cmd` shim, so it works from `cmd.exe`,
+  PowerShell or a plain process spawn without a wrapper.
