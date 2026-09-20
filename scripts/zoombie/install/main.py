@@ -177,6 +177,9 @@ def _install(modes: components.Modes, args, root: str, result: dict) -> tuple[bo
     process.log("deploying skills to the global root", "step")
     skill_results = components.deploy_skills(modes)
 
+    process.log("deploying the Zoombie role to the global custom modes", "step")
+    mode_results = components.deploy_modes(modes)
+
     process.log("ensuring the PDF -> Markdown toolchain", "step")
     requirements = os.path.join(env_mod.cli_dir(), "requirements-pdf.txt")
     pdf_info = components.install_pdf_dependencies(modes, python, requirements)
@@ -192,7 +195,8 @@ def _install(modes: components.Modes, args, root: str, result: dict) -> tuple[bo
     built = _build_manifest(
         root=root, python=python, python_version=tools.tool_version(python, ["--version"]),
         ytdlp_info=ytdlp_info, whisper_info=whisper_info, backend_probe=backend_probe,
-        cuda_runtime=cuda_runtime, model_info=model_info, pdf_info=pdf_info, hw=hw,
+        cuda_runtime=cuda_runtime, model_info=model_info, pdf_info=pdf_info,
+        mode_results=mode_results, hw=hw,
     )
     if modes.may_write:
         manifest.save(built)
@@ -246,6 +250,7 @@ def _install(modes: components.Modes, args, root: str, result: dict) -> tuple[bo
     result.update({
         "cli": cli_path,
         "skills": skill_results,
+        "modes": mode_results,
         "missing": missing,
         "changes": modes.changes,
         "gpuPolicy": {
@@ -272,7 +277,7 @@ def _install(modes: components.Modes, args, root: str, result: dict) -> tuple[bo
 
 def _build_manifest(
     *, root, python, python_version, ytdlp_info, whisper_info, backend_probe,
-    cuda_runtime, model_info, pdf_info, hw,
+    cuda_runtime, model_info, pdf_info, mode_results, hw,
 ) -> dict:
     """Assemble env.json.
 
@@ -330,6 +335,13 @@ def _build_manifest(
             "tesseract": pdf_info.get("tesseract"),
             "tesseractVersion": pdf_info.get("tesseractVersion"),
             "note": pdf_info.get("note"),
+        },
+        # The deployed Zoo Code role. The target path is taken from the records
+        # rather than recomputed, so the manifest names the file that was actually
+        # written (which ZOOMBIE_MODES_PATH can redirect).
+        "modes": {
+            "path": mode_results[0]["path"] if mode_results else None,
+            "entries": mode_results,
         },
         "hardware": hw.to_dict(),
     }

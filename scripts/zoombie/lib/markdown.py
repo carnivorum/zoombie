@@ -149,19 +149,35 @@ def heading_list(text: str) -> list[dict]:
     return headings
 
 
-def assign_anchors(text: str) -> tuple[str, list[dict]]:
-    """Number every ``###`` (and deeper) heading and attach its anchor tag.
+def assign_anchors(
+    text: str,
+    start: int = 0,
+    end: int | None = None,
+) -> tuple[str, list[dict]]:
+    """Number the ``###`` (and deeper) headings in ``[start, end)``.
 
-    Each heading becomes ``### <a id="s-N"></a>Title`` with ``N`` assigned in
-    reading order. The pass is **idempotent**: an existing tag is replaced
-    rather than stacked, so running it twice yields byte-identical output. It
-    also normalizes the tag form and position, which means a document written by
-    hand (or by the reference project) converges to the same bytes after one
-    run.
+    Each numbered heading becomes ``### <a id="s-N"></a>Title`` with ``N``
+    assigned in reading order **within the region**, so the first heading of the
+    region is always ``s-1``. The pass is **idempotent**: an existing tag is
+    replaced rather than stacked, so running it twice yields byte-identical
+    output. It also normalizes the tag form and position, which means a document
+    written by hand (or by the reference project) converges to the same bytes
+    after one run.
+
+    ``start``/``end`` exist because only block 6 is a numbered region. A
+    ``###`` sub-heading in block 3 (a criticism sub-head, say) must NOT consume
+    an ``s-N`` id: the block-4 index is narrowed to block 6 by offset, so such
+    an id would have nothing linking to it and the ``verify`` pass would reject
+    the document on a dangling anchor. Headings outside the region are still
+    normalized, and any anchor *we* own is stripped from them, so a document
+    mangled by the older whole-file numbering self-heals on the next run.
 
     Returns the rewritten text and the heading list describing the *new*
     numbering, ready to hand to :func:`render_index`.
     """
+    if end is None:
+        end = len(text)
+
     out: list[str] = []
     headings: list[dict] = []
     cursor = 0
@@ -170,10 +186,18 @@ def assign_anchors(text: str) -> tuple[str, list[dict]]:
         if level < 3:
             continue
         title = _strip_anchor(match.group(2)).strip()
-        anchor = anchor_id(len(headings) + 1)
+        hashes = "#" * level
 
         out.append(text[cursor : match.start()])
-        out.append(f"{'#' * level} <a id=\"{anchor}\"></a>{title}")
+        if not (start <= match.start() < end):
+            # Outside the numbered region: emit it without an anchor, but strip
+            # one of ours if it is there so the output converges.
+            out.append(f"{hashes} {title}")
+            cursor = match.end()
+            continue
+
+        anchor = anchor_id(len(headings) + 1)
+        out.append(f'{hashes} <a id="{anchor}"></a>{title}')
         cursor = match.end()
         headings.append(
             {"level": level, "title": title, "start": match.start(), "anchor": anchor}

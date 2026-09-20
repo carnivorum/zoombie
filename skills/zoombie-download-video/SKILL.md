@@ -1,6 +1,6 @@
 ---
 name: zoombie-download-video
-cvrm-zoombie-version: 4.1.0
+cvrm-zoombie-version: 4.3.0
 description: Download a video (or its audio only) from a URL using yt-dlp, supporting YouTube and other yt-dlp-compatible sites such as RuTube, Vimeo, Twitter/X, Twitch and TikTok. Use when the user provides a link and asks to download, save, grab, or fetch a video, or when a later step needs a local copy of a remote video. Always inspects the project first, proposes candidate destinations, and confirms where to save before downloading anything.
 ---
 
@@ -20,7 +20,7 @@ $cli = @(
     "$env:USERPROFILE\zoombie-env\bin\zoombie\zoombie.cmd",
     "$env:PUBLIC\zoombie-env\bin\zoombie\zoombie.cmd"
 ) | Where-Object { Test-Path $_ } | Select-Object -First 1
-if (-not $cli) { throw "zoombie CLI not found. Run scripts\bootstrap.cmd first." }
+if (-not $cli) { throw "zoombie CLI not found. Run the zoombie bootstrap first: irm https://raw.githubusercontent.com/carnivorum/zoombie/main/scripts/bootstrap.ps1 | iex  (or scripts\bootstrap.cmd from a checkout)." }
 ```
 
 Then call it — this is the only command this skill needs:

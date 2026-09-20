@@ -1,6 +1,6 @@
 ---
 name: zoombie-extract-audio
-cvrm-zoombie-version: 4.0.0
+cvrm-zoombie-version: 4.3.0
 description: Extract the audio track from a video file into a whisper-ready WAV (or mp3/m4a/flac) using ffmpeg. Use when the user wants to pull audio out of a video or recording, prepare media for transcription, or convert to 16 kHz mono PCM. Always inspects the project first, proposes candidate output destinations, and confirms with the user before running ffmpeg or writing any file.
 ---
 
@@ -20,7 +20,7 @@ $cli = @(
     "$env:USERPROFILE\zoombie-env\bin\zoombie\zoombie.cmd",
     "$env:PUBLIC\zoombie-env\bin\zoombie\zoombie.cmd"
 ) | Where-Object { Test-Path $_ } | Select-Object -First 1
-if (-not $cli) { throw "zoombie CLI not found. Run scripts\bootstrap.cmd first." }
+if (-not $cli) { throw "zoombie CLI not found. Run the zoombie bootstrap first: irm https://raw.githubusercontent.com/carnivorum/zoombie/main/scripts/bootstrap.ps1 | iex  (or scripts\bootstrap.cmd from a checkout)." }
 ```
 
 Then call it — this is the only command this skill needs:

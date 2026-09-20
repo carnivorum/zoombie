@@ -215,6 +215,29 @@ def build_parser() -> argparse.ArgumentParser:
         "-Apply", "--apply", action="store_true", help="write the index (default: dry run)"
     )
 
+    # --- modes ------------------------------------------------------------
+    # Redeploys the Zoombie role into the global custom_modes.yaml without a full
+    # setup, so a prompt edit can ship on its own. Dry run by default for the same
+    # reason as postprocess/index: this edits a file the USER owns.
+    modes = subparsers.add_parser(
+        "modes", help="deploy the Zoombie role into the global Zoo Code custom modes"
+    )
+    modes.add_argument(
+        "-Target", "--target", dest="target", default=None,
+        help="explicit custom_modes.yaml (default: the global one)",
+    )
+    modes.add_argument(
+        "-Check", "--check", action="store_true",
+        help="report the planned action without writing",
+    )
+    modes.add_argument(
+        "-Apply", "--apply", action="store_true", help="write the change (default: dry run)"
+    )
+    modes.add_argument(
+        "-Force", "--force", action="store_true",
+        help="rewrite even when the content already matches",
+    )
+
     return parser
 
 
@@ -250,6 +273,9 @@ def _dispatch(args: argparse.Namespace) -> Outcome:
     if args.command == "index":
         from .commands import library
         return library.run(args)
+    if args.command == "modes":
+        from .commands import modes
+        return modes.run(args)
     raise ZoombieError(f"unknown command: {args.command}")
 
 

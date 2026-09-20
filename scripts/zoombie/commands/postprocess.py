@@ -379,15 +379,49 @@ def title_tag(anchor: str) -> str:
     return f'<a id="{anchor}"></a>'
 
 
-def heading_start(text: str) -> int | None:
-    """Offset of the first block-6 heading line, or ``None``.
+# A top-level ``##`` section heading. Block 6 is the LAST of these.
+_TOP_SECTION_RE = re.compile(r"^##[ \t]", re.MULTILINE)
 
-    Deliberately based on the first ``###`` heading rather than on the ``## 6.``
-    line: a document is block-6-shaped as soon as it has sub-headings, and an
-    agent renaming the section must not disable the timestamp pass.
+
+def subheading_region(text: str) -> tuple[int, int] | None:
+    """The body span of the LAST top-level ``##`` section, or ``None``.
+
+    This is the region that gets numbered, timestamped and indexed. It is
+    derived from the ``##`` structure rather than from "the first ``###``"
+    because a ``###`` sub-heading is legitimate in an earlier block -- a
+    criticism sub-head in block 3, say -- and keying off the first ``###`` would
+    then adopt that block as the region: its sub-headers would consume ``s-N``
+    ids with nothing linking to them, and its prose would be searched for
+    timestamps it never had.
+
+    Position, not the heading *text*, is what identifies the region, so renaming
+    a section (any language, any wording) cannot disable the pass. That was the
+    original intent; only the anchor for it was wrong.
+
+    Note this is the LAST ``##`` section, not the first: ``block_range`` searches
+    from the start, which would return block 2 and silently number nothing.
     """
-    headings = md.heading_list(text)
-    return headings[0]["start"] if headings else None
+    matches = list(_TOP_SECTION_RE.finditer(text))
+    if not matches:
+        return None
+    last = matches[-1]
+    line_end = text.find("\n", last.end())
+    start = len(text) if line_end < 0 else line_end + 1
+    return start, len(text)
+
+
+def heading_start(text: str) -> int | None:
+    """Offset where the numbered region begins, or ``None``.
+
+    Kept as the single entry point the orchestration calls, now region-based.
+    """
+    region = subheading_region(text)
+    if region is None:
+        # No ``##`` structure at all: fall back to the first sub-heading, which
+        # keeps a bare fragment usable.
+        headings = md.heading_list(text)
+        return headings[0]["start"] if headings else None
+    return region[0]
 
 
 # --------------------------------------------------------------------------- #
@@ -651,11 +685,25 @@ def process_document(text: str, srt_path: str | None, image_dir: str) -> tuple[s
         "imagesSkipped": 0,
     }
 
-    # 1. anchors (also normalizes any hand-written ones into our form)
-    text, headings = md.assign_anchors(text)
+    # The region that is numbered, timestamped and indexed: block 6, resolved by
+    # POSITION (the last ``##`` section) rather than by title, so a renamed
+    # section still works and a ``###`` sub-heading in an earlier block cannot
+    # hijack it.
+    region = subheading_region(text)
+    start = region[0] if region is not None else None
 
-    # 2./3. timestamps + index, both scoped to the sub-heading region.
-    start = heading_start(text)
+    # 1. anchors, scoped to the region. A heading outside it is left unnumbered,
+    # and any id of ours on it is stripped, so a document numbered by the older
+    # whole-file pass self-heals here.
+    #
+    # Only ``start`` is taken from the pre-edit text: anchors are inserted AT or
+    # after it, so offsets before it are stable, but the insertion LENGTHENS the
+    # document. The end bound must therefore be the CURRENT length, not the
+    # original one -- reusing the stale length silently drops the last headings,
+    # which reads as "3 headings" on a first run and "4" on every run after.
+    text, headings = md.assign_anchors(text, start if start is not None else 0, len(text))
+
+    # 2./3. timestamps + index, both scoped to the same region.
     if start is not None:
         end = len(text)
         cues = parse(srt_path) if srt_path else []

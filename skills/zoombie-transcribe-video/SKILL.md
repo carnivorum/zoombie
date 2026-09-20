@@ -1,6 +1,6 @@
 ---
 name: zoombie-transcribe-video
-cvrm-zoombie-version: 4.1.0
+cvrm-zoombie-version: 4.3.0
 description: End-to-end pipeline that turns a video file or a video URL into SOURCE material - a TXT transcript, an SRT subtitle track and a .source.json origin sidecar - by chaining the zoombie download, extract and transcribe stages in one CLI call. Use when the user says things like transcribe this video, transcribe this link, or give me a transcript of this recording. It deliberately writes no summary and no readable document; zoombie-summarize produces those. Collects every output-path confirmation up front in one pass.
 ---
 
@@ -56,7 +56,7 @@ $cli = @(
     "$env:USERPROFILE\zoombie-env\bin\zoombie\zoombie.cmd",
     "$env:PUBLIC\zoombie-env\bin\zoombie\zoombie.cmd"
 ) | Where-Object { Test-Path $_ } | Select-Object -First 1
-if (-not $cli) { throw "zoombie CLI not found. Run scripts\bootstrap.cmd first." }
+if (-not $cli) { throw "zoombie CLI not found. Run the zoombie bootstrap first: irm https://raw.githubusercontent.com/carnivorum/zoombie/main/scripts/bootstrap.ps1 | iex  (or scripts\bootstrap.cmd from a checkout)." }
 ```
 
 Then call it — this is the only command this skill needs:

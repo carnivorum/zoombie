@@ -17,13 +17,14 @@ import os
 import re
 from dataclasses import dataclass, field
 
-from .. import SKILL_VERSION
+from .. import ROLE_VERSION, SKILL_VERSION
 from ..lib import (
     archive,
     cublas,
     download,
     env as env_mod,
     manifest,
+    modes as modes_mod,
     paths,
     process,
     skills,
@@ -613,3 +614,34 @@ def deploy_skills(modes: Modes) -> list[dict]:
         return []
 
     return skills.deploy(source_root, SKILL_VERSION)
+
+
+def deploy_modes(modes: Modes) -> list[dict]:
+    """Deploy ``modes/<name>.yaml`` into the global Zoo Code ``custom_modes.yaml``.
+
+    Unlike a skill, the target is a document the user also owns, so this is a
+    merge rather than an overwrite: only our slug is replaced and every foreign
+    mode is preserved. In ``-Check``/``-DryRun`` the merge is still computed --
+    so the reported action is truthful -- but nothing is written.
+    """
+    source_root = modes_mod.source_dir(env_mod.cli_dir())
+    if not paths.is_dir(source_root):
+        process.log("no modes folder in the repo; skipping mode deployment", "warn")
+        return []
+
+    target = modes_mod.global_modes_path()
+
+    if not modes.may_write:
+        planned = modes_mod.deploy_all(source_root, target, dry_run=True, force=modes.force)
+        for record in planned:
+            process.log(f"mode '{record['slug']}' would be {record['action']} -> {target}", "step")
+        return planned
+
+    results = modes_mod.deploy_all(source_root, target, force=modes.force)
+    for record in results:
+        modes.note(f"mode {record['slug']}: {record['action']}")
+    # Recorded so a deployed role can be identified after the fact. The action
+    # itself is content-based, so this can never go stale the way a marker would.
+    for record in results:
+        record["roleVersion"] = ROLE_VERSION
+    return results

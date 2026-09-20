@@ -55,6 +55,24 @@ Convert **everything** to Python: installer, runtime CLI, self-test. Keep **one*
 minimal bootstrap script whose only job is to ensure a Python interpreter exists
 and then hand off to the Python installer.
 
+### Follow-up: the PowerShell entry point is a shim, not a second bootstrap
+
+The "one bootstrap" rule was later relaxed by exactly one file, and only for
+distribution ergonomics. [`scripts/bootstrap.ps1`](scripts/bootstrap.ps1:1) exists
+so a fresh machine needs a single PowerShell line
+(`irm <raw>/scripts/bootstrap.ps1 | iex`) instead of saving a `.cmd` by hand. It
+holds **no install logic**: it downloads [`bootstrap.cmd`](scripts/bootstrap.cmd:1)
+to a temp dir and runs it, so the rule above still holds in the sense that matters
+— there is one implementation of "ensure Python, fetch the repo, hand off", and
+nothing about it can drift into a second dialect. `tests/test_bootstrap.py` pins
+the agreement (same repo slug and ref, same options) and the restraint (no
+execution-policy change, no `setx`, no `$PROFILE` edit, no location dependency).
+
+The `install/update.py` module that this plan proposed as the `setup.ps1`
+replacement was never called by anything and has been deleted; the fetch step
+lives in `bootstrap.cmd`, which always pulls the current archive and runs the
+installer from that fresh checkout.
+
 ## Feasibility: the shared library is not just feasible, it is the point
 
 Almost every function in [`ZoombieEnv.psm1`](scripts/lib/ZoombieEnv.psm1:1) has a

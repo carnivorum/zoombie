@@ -1,6 +1,6 @@
 ---
 name: zoombie-pdf-to-md
-cvrm-zoombie-version: 4.1.0
+cvrm-zoombie-version: 4.3.0
 description: Convert a PDF into SOURCE material - a faithful Markdown rendering plus extracted images with placement metadata - using PyMuPDF4LLM, with an optional Tesseract OCR fallback for scanned pages. Use when the user wants to extract text from a PDF, turn a PDF into Markdown, read a PDF document, or prepare a PDF for docs. It deliberately does not summarise or restructure the document; zoombie-summarize does that. Always inspects the project first, proposes candidate output paths, and confirms with the user before writing anything.
 ---
 
@@ -49,7 +49,7 @@ $cli = @(
     "$env:USERPROFILE\zoombie-env\bin\zoombie\zoombie.cmd",
     "$env:PUBLIC\zoombie-env\bin\zoombie\zoombie.cmd"
 ) | Where-Object { Test-Path $_ } | Select-Object -First 1
-if (-not $cli) { throw "zoombie CLI not found. Run scripts\bootstrap.cmd first." }
+if (-not $cli) { throw "zoombie CLI not found. Run the zoombie bootstrap first: irm https://raw.githubusercontent.com/carnivorum/zoombie/main/scripts/bootstrap.ps1 | iex  (or scripts\bootstrap.cmd from a checkout)." }
 ```
 
 Then call it — this is the only command this skill needs:
@@ -154,10 +154,11 @@ document it is writing.
 - **OCR is optional.** If Tesseract is not installed, `-Ocr` fails with a clear
   message. Install it with `winget install UB-Mannheim.TesseractOCR`, or run
   without `-Ocr`.
-- **If the CLI reports the PDF toolchain is missing**, tell the user to run
-  `scripts\bootstrap.cmd` (it installs the `pymupdf4llm`/`pytesseract`
-  dependencies into the Python this repo already uses). Do not install Python
-  packages by hand.
+- **If the CLI reports the PDF toolchain is missing**, tell the user to re-run the
+  bootstrap — `irm https://raw.githubusercontent.com/carnivorum/zoombie/main/scripts/bootstrap.ps1 | iex`
+  from PowerShell, or `scripts\bootstrap.cmd` from a checkout. It installs the
+  `pymupdf4llm`/`pytesseract` dependencies into the Python this repo already uses.
+  Do not install Python packages by hand.
 - **Never overwrite without asking**; pass `-Force` only with consent. Image
   drops are never silent: the run logs how many images were kept and how many
   were skipped, and `data.artifacts.images.skipped` carries the skipped count

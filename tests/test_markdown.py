@@ -147,6 +147,39 @@ class TestAssignAnchors:
     def test_text_without_headings_is_unchanged(self):
         assert md.assign_anchors("just prose\n") == ("just prose\n", [])
 
+    def test_a_region_scopes_the_numbering(self):
+        """Only the region is numbered, and its first heading is always s-1.
+
+        This is what keeps a `###`-shaped sub-heading in an earlier block from
+        consuming an id that nothing links to.
+        """
+        text = "## 3. Early\n### not numbered\n## 6. Late\n### first\n### second\n"
+        start = text.index("## 6.")
+        numbered, headings = md.assign_anchors(text, start, len(text))
+        assert [h["anchor"] for h in headings] == ["s-1", "s-2"]
+        # The earlier sub-heading is emitted WITHOUT an anchor.
+        assert "### not numbered" in numbered
+        assert 'id="s-1""></a>not numbered' not in numbered
+        assert '### <a id="s-1"></a>first' in numbered
+
+    def test_a_stale_anchor_outside_the_region_is_stripped(self):
+        """A document numbered by the old whole-file pass must self-heal."""
+        text = '## 3. Early\n### <a id="s-1"></a>stale\n## 6. Late\n### real\n'
+        start = text.index("## 6.")
+        numbered, headings = md.assign_anchors(text, start, len(text))
+        assert [h["anchor"] for h in headings] == ["s-1"]
+        # The stale tag is gone, not merely ignored.
+        assert numbered.count('id="s-1"') == 1
+        assert "### stale" in numbered
+
+    def test_bold_italic_is_not_a_heading(self):
+        """The criticism sub-block must be invisible to the numbering pass."""
+        text = "## 3. Summary\n***Criticism***\nIt overstates the case.\n## 6. Late\n### A\n"
+        _, headings = md.assign_anchors(text, 0, len(text))
+        # Only the `###` heading is collected; `##` sections never are.
+        assert [h["title"] for h in headings] == ["A"]
+        assert not any("Criticism" in h["title"] for h in headings)
+
 
 class TestRenderIndex:
     def test_mixed_timestamped_and_untimestamped(self):

@@ -2,15 +2,18 @@
 
 > **How to use this file**
 > Paste everything below the horizontal rule into a fresh Zoo task on a
-> Windows 10/11 machine. No prior setup is needed: the first step downloads
-> `bootstrap.cmd` from GitHub raw, and that script then ensures a Python
-> interpreter, fetches the rest of the repo, and runs the install.
+> Windows 10/11 machine. No prior setup is needed: the first step fetches a
+> bootstrap script, which then ensures a Python interpreter, fetches the rest of
+> the repo, and runs the install.
 >
-> Target OS: **Windows 10/11**. Shell: **cmd.exe, PowerShell, or any process
-> spawn** — a batch file needs no wrapper.
+> Target OS: **Windows 10/11**. Shell: **PowerShell, cmd.exe, or any process
+> spawn** — PowerShell users get a single line, and the batch file beneath it
+> needs no wrapper.
 > The install logic is not prose — it is [`scripts/bootstrap.cmd`](scripts/bootstrap.cmd),
 > pulled from `https://raw.githubusercontent.com/carnivorum/zoombie/main/scripts/bootstrap.cmd`,
 > which hands off to the Python installer in [`scripts/zoombie/install/`](scripts/zoombie/install/).
+> [`scripts/bootstrap.ps1`](scripts/bootstrap.ps1) is a thin shim that downloads and
+> runs that batch file, so a PowerShell user never has to save a `.cmd` by hand.
 > This prompt's job is to run it, deploy the skills, verify, and report.
 
 ---
@@ -21,17 +24,19 @@ You are setting up a Windows PC so the user can extract audio from video and
 transcribe audio/video to text. **Do not improvise install or media commands.**
 The repo already contains a tested, idempotent implementation:
 
-- [`scripts/bootstrap.cmd`](scripts/bootstrap.cmd) — the one entry point, and the
-  only non-Python file. Its entire job is to ensure a Python interpreter exists,
-  fetch the latest repo archive, and hand off to the Python installer. So **any
-  start of setup means install or update to the latest**; there is no cached copy
-  to go stale and no gate that can skip the update.
+- [`scripts/bootstrap.cmd`](scripts/bootstrap.cmd) — the implementation entry
+  point, and the only non-Python file. Its entire job is to ensure a Python
+  interpreter exists, fetch the latest repo archive, and hand off to the Python
+  installer. So **any start of setup means install or update to the latest**;
+  there is no cached copy to go stale and no gate that can skip the update.
+- [`scripts/bootstrap.ps1`](scripts/bootstrap.ps1) — the PowerShell entry point:
+  a thin shim that downloads `bootstrap.cmd` to a temp directory and runs it, so
+  a fresh machine needs one line. It holds no install logic, so it cannot drift
+  from the batch file. It never prompts — **this prompt is responsible for
+  asking the user before the real run.**
 - [`scripts/zoombie/install/main.py`](scripts/zoombie/install/main.py) — the
   installer/updater that actually does the work (the `setup-worker` replacement,
   also used directly for local development).
-- [`scripts/zoombie/install/update.py`](scripts/zoombie/install/update.py) — fetches
-  the latest repo and runs the installer from that fresh checkout (the `setup.ps1`
-  replacement). It falls back to the local installer when the fetch fails.
 - [`scripts/zoombie/cli.py`](scripts/zoombie/cli.py) — the runtime CLI. All skills
   call it through the deployed `zoombie.cmd` launcher.
 - [`scripts/zoombie/selftest.py`](scripts/zoombie/selftest.py) — end-to-end verification.
@@ -40,9 +45,12 @@ The repo already contains a tested, idempotent implementation:
 Hard rules:
 
 1. **Work step by step**, keeping a todo checklist updated.
-2. **Detect before you install.** `bootstrap.cmd -Check` reports what is present.
-   Never install something the check says is already there.
-3. **Ask before installing.** Before the real `bootstrap.cmd` run (which downloads
+2. **Detect before you install.** `bootstrap.cmd -Check` (or
+   `bootstrap.ps1 -Check`) reports what is present. Never install something the
+   check says is already there.
+3. **Ask before installing. You are the only thing that asks.** `bootstrap.ps1`
+   and `bootstrap.cmd` both run unattended by design, so the real run must not be
+   started until the user has agreed. Before it (it downloads
    ffmpeg, whisper.cpp and a model, and pip-installs yt-dlp plus the PDF
    dependencies), tell the user what will be fetched and roughly how large it is,
    then wait for confirmation. On a machine with an NVIDIA GPU this also fetches
@@ -116,32 +124,37 @@ Practical consequences for the agent:
 
 ---
 
-## STEP 0 — FETCH AND DETECT (writes only a local checkout)
+## STEP 0 — FETCH AND DETECT (writes only a temp checkout)
 
-### 0.1 Download the entry script
+### 0.1 Run the one-liner
 
-The whole toolchain is driven by one file. Download it from GitHub raw into a
-local checkout folder. This single file then ensures Python and fetches the rest
-of the repo (runtime CLI, installer, self-test, skills) on first run.
-
-```powershell
-$src = "$env:USERPROFILE\zoombie-env\src"
-New-Item -ItemType Directory -Force -Path $src | Out-Null
-curl.exe -L -o "$src\bootstrap.cmd" `
-    https://raw.githubusercontent.com/carnivorum/zoombie/main/scripts/bootstrap.cmd
-```
-
-If `curl.exe` is unavailable, the same download with the .NET client:
+Nothing needs to be saved or checked out first. This single line downloads the
+bootstrap, which then ensures Python, fetches the rest of the repo (runtime CLI,
+installer, self-test, skills), and runs the install. It works from any shell and
+any working directory, and it writes nothing outside a temp directory until the
+installer decides to.
 
 ```powershell
-Invoke-WebRequest -Uri "https://raw.githubusercontent.com/carnivorum/zoombie/main/scripts/bootstrap.cmd" `
-    -OutFile "$src\bootstrap.cmd"
+irm https://raw.githubusercontent.com/carnivorum/zoombie/main/scripts/bootstrap.ps1 | iex
 ```
 
-> If `zoombie-env` already exists with a checkout, this step just refreshes
-> `bootstrap.cmd`. On the next run `bootstrap.cmd` re-fetches the latest repo
-> archive from GitHub, so a re-run always updates to the latest rather than
-> installing a stale copy. The install itself is idempotent.
+On a machine where `Invoke-WebRequest` cannot parse the response (it uses the IE
+engine on Windows PowerShell 5.1), use the .NET client instead:
+
+```powershell
+iex (New-Object Net.WebClient).DownloadString('https://raw.githubusercontent.com/carnivorum/zoombie/main/scripts/bootstrap.ps1')
+```
+
+From `cmd.exe`, without PowerShell at all:
+
+```bat
+curl.exe -L -o "%TEMP%\bootstrap.cmd" https://raw.githubusercontent.com/carnivorum/zoombie/main/scripts/bootstrap.cmd
+"%TEMP%\bootstrap.cmd"
+```
+
+> **Re-running is the update.** The bootstrap always re-fetches the latest repo
+> archive from GitHub, so a re-run updates in place rather than installing a
+> stale copy. The install itself is idempotent, so only what changed does work.
 
 ### 0.2 Shell note
 
@@ -150,19 +163,35 @@ interpreter, and attempts `winget install Python.Python.3.12` when none is
 present (it re-probes PATH afterwards and prints explicit manual instructions if
 that also fails). Nothing else needs to be installed by hand.
 
-Because `bootstrap.cmd` is a batch file, it runs from **cmd.exe, PowerShell, or any
-process spawn** with no wrapper and no execution-policy concern — there is no
-`powershell -NoProfile -ExecutionPolicy Bypass -File ...` step, and no `.ps1` to
-unblock. The commands below work as written from cmd.exe; from PowerShell, prefix
-a quoted path with `&` (e.g. `& ".\bootstrap.cmd" -Check`).
+`bootstrap.ps1` is only a shim: it downloads `bootstrap.cmd` to a temp directory
+and runs it, so no `.ps1` is saved and nothing needs `Unblock-File` or an
+execution-policy change. The batch file it runs takes cmd.exe, PowerShell or any
+process spawn with no wrapper. If you have saved `bootstrap.ps1` as a file
+instead, parameters bind normally and the script returns the installer's exit
+code; run inline (as above) it **throws** on failure rather than exiting, so it
+never closes your shell.
+
+Options work in both forms. As a file: `-Check`, `-DryRun`, `-Model <name>`,
+`-Root <path>`, `-Force`. For the unattended one-liner, the same choices come from
+the environment: `ZOOMBIE_CHECK`, `ZOOMBIE_DRYRUN`, `ZOOMBIE_MODEL`,
+`ZOOMBIE_ROOT`, `ZOOMBIE_FORCE` (plus `ZOOMBIE_REPO_SLUG` / `ZOOMBIE_REPO_REF`
+for a fork or branch). A switch wins over its variable.
+
+> **`bootstrap.ps1` never prompts.** It runs unattended by design. Asking the
+> user before the real run is *this prompt's* job — see hard rule 3.
 
 ---
 
-## STEP 1 — DETECT (writes nothing outside the checkout)
+## STEP 1 — DETECT (writes nothing persistent)
 
-```bat
-.\bootstrap.cmd -Check
+```powershell
+# inline form: set the mode through the environment, then run the one-liner
+$env:ZOOMBIE_CHECK = '1'
+irm https://raw.githubusercontent.com/carnivorum/zoombie/main/scripts/bootstrap.ps1 | iex
 ```
+
+Saved as a file, the same thing is `.\bootstrap.ps1 -Check`; from cmd.exe it is
+`bootstrap.cmd -Check`.
 
 This prints a human-readable trace to stderr and one JSON result line to stdout.
 Read `data.missing` to see what is absent. Report the hardware summary it
@@ -172,18 +201,22 @@ detects (CPU, RAM, GPU, VRAM) and the backend it selects
 If the user only wants to see the plan, run the dry-run instead — it also writes
 nothing:
 
-```bat
-.\bootstrap.cmd -DryRun
+```powershell
+$env:ZOOMBIE_DRYRUN = '1'
+irm https://raw.githubusercontent.com/carnivorum/zoombie/main/scripts/bootstrap.ps1 | iex
 ```
 
 ---
 
 ## STEP 2 — CONFIRM, THEN APPLY
 
-Tell the user exactly what the real run will fetch, then wait for confirmation:
+Tell the user exactly what the real run will fetch, then wait for confirmation.
+**This prompt asks; the script never does.** When the user agrees:
 
-```bat
-.\bootstrap.cmd
+```powershell
+# drop the mode variable set above, then run the one-liner unprompted
+Remove-Item Env:\ZOOMBIE_CHECK, Env:\ZOOMBIE_DRYRUN -ErrorAction SilentlyContinue
+irm https://raw.githubusercontent.com/carnivorum/zoombie/main/scripts/bootstrap.ps1 | iex
 ```
 
 What it does (all idempotent — anything present is skipped):
@@ -200,13 +233,17 @@ What it does (all idempotent — anything present is skipped):
 | Tesseract | system-wide | *optional*; detection only, needed for `readpdf -Ocr` |
 | the CLI | `zoombie-env\bin\zoombie\` | `zoombie.cmd` + the packaged `zoombie\` package and `pdf\` helper, at a stable ASCII path |
 | skills | `%USERPROFILE%\.roo\skills\` | deployed from [`skills/`](skills/) |
+| the Zoombie role | `%APPDATA%\Code\User\globalStorage\zoocodeorganization.zoo-code\settings\custom_modes.yaml` | **merged**, not overwritten, from [`modes/`](modes/): only our entry is replaced, so a hand-written mode in that file survives |
 | manifest | `zoombie-env\env.json` | resolved absolute paths + versions + hardware |
 
-Useful options (passed straight through `bootstrap.cmd` to the installer):
+Useful options (passed straight through `bootstrap.cmd` to the installer). Each
+has a switch form and an environment form for the unattended one-liner:
 
-- `-Model <name>` — force a model (e.g. `-Model small`, `-Model large-v3-turbo`).
-- `-Root <path>` — use a different (still ASCII) toolchain root.
-- `-Force` — re-download even when a component is present.
+| File form | One-liner form | Effect |
+|-----------|----------------|--------|
+| `-Model <name>` | `$env:ZOOMBIE_MODEL = '<name>'` | force a model (e.g. `small`, `large-v3-turbo`) |
+| `-Root <path>` | `$env:ZOOMBIE_ROOT = '<path>'` | use a different (still ASCII) toolchain root |
+| `-Force` | `$env:ZOOMBIE_FORCE = '1'` | re-download even when a component is present |
 
 Already downloaded that 1.5 GB model and do not want to wait? Confirm with the
 user first; `-Model large-v3-turbo` avoids re-fetching a smaller default.
@@ -224,7 +261,7 @@ Versioning:
 
 - Every skill is namespaced `zoombie-*`, so its name can never collide with a
   foreign skill — deployment simply overwrites.
-- Each skill carries `cvrm-zoombie-version: 4.1.0`; on a re-run the version is
+- Each skill carries `cvrm-zoombie-version: 4.3.0`; on a re-run the version is
   compared and the skill is reported as `up to date` or `updated`. The marker must
   stay inside the first 12 lines of `SKILL.md`: the comparison reads only the
   front matter, so a marker pushed below it reads as unowned.
@@ -238,6 +275,36 @@ Verify Zoo sees the six skills: `zoombie-download-video`,
 `zoombie-pdf-to-md`, `zoombie-summarize`, each sourced as `global`. If one does
 not appear, confirm the path is exactly `<skills-root>\<name>\SKILL.md` and that
 the front matter parses.
+
+### The Zoombie role
+
+The same step deploys the **Zoombie role** — a universal analyst, not a coder —
+into the global custom modes file, so it appears in the Zoo Code mode picker in
+every workspace. Unlike a skill, the target is a document the user also owns, so
+deployment is a **merge**: only the entry whose slug is `zoombie` is replaced, and
+every other mode in that file is preserved byte-for-byte.
+
+Its permissions are the point of the design:
+
+| Group | Why |
+|-------|-----|
+| `read` | read sources and existing artifacts |
+| `command` | the ingest skills shell out to `zoombie.cmd`, so the role can consume a video or a PDF itself |
+| `modes` | `new_task`/`switch_mode` live here; this lets the role brief Code mode as an *Analyst Intern* |
+| `edit` (restricted) | writable extensions are `md`, `markdown`, `txt`, `csv`, `tsv`, `html`, `htm` only — source code, scripts, configuration and notebooks are unreachable |
+
+Re-run just this step after editing the role, without a full setup:
+
+```bat
+cd scripts
+python -m zoombie modes -Check     REM report the planned action only
+python -m zoombie modes            REM dry run (the default)
+python -m zoombie modes -Apply     REM write it
+```
+
+The target can be redirected with `ZOOMBIE_MODES_PATH`. If the file is not where
+the extension keeps it, or a workspace has its own `.roomodes`, that override is
+how to point the deploy at the right file.
 
 ---
 
@@ -355,7 +422,9 @@ cause and the fix rather than overstating the result.
 [ ] Installed backend matches the CURRENT hardware (`backendDetected`), not a sticky value from an earlier run
 [ ] Model downloaded and recorded in env.json
 [ ] CLI deployed to zoombie-env\bin\zoombie\zoombie.cmd, and the launcher works from ANY working directory
-[ ] Six zoombie-* skills deployed to %USERPROFILE%\.roo\skills\ with cvrm-zoombie-version 4.1.0
+[ ] Six zoombie-* skills deployed to %USERPROFILE%\.roo\skills\ with cvrm-zoombie-version 4.3.0
+[ ] The Zoombie role merged into the global custom_modes.yaml, only our entry replaced, and any hand-written mode in that file still intact
+[ ] A `.md` artifact can be written in the Zoombie role and a `.py` file is refused by its edit restriction
 [ ] No stray .roo\skills directory outside %USERPROFILE%
 [ ] A skill invocation routes through zoombie.cmd (not raw ffmpeg/whisper/python commands)
 [ ] PDF dependencies installed into the existing Python; Tesseract detection noted (optional)

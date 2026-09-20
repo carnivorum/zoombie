@@ -1,6 +1,6 @@
 ---
 name: zoombie-transcribe-audio
-cvrm-zoombie-version: 4.1.0
+cvrm-zoombie-version: 4.3.0
 description: Transcribe an audio file into SOURCE material - a TXT transcript, an SRT subtitle track and a .source.json origin sidecar - using a local whisper.cpp binary with a CUDA/Vulkan/CPU backend. Use when the user wants a speech-to-text transcript, subtitles, or SRT/TXT output for a recording. It deliberately writes no summary and no readable document; zoombie-summarize produces those. Always inspects the project, proposes transcript output paths, and confirms the destination before writing anything.
 ---
 
@@ -53,7 +53,7 @@ $cli = @(
     "$env:USERPROFILE\zoombie-env\bin\zoombie\zoombie.cmd",
     "$env:PUBLIC\zoombie-env\bin\zoombie\zoombie.cmd"
 ) | Where-Object { Test-Path $_ } | Select-Object -First 1
-if (-not $cli) { throw "zoombie CLI not found. Run scripts\bootstrap.cmd first." }
+if (-not $cli) { throw "zoombie CLI not found. Run the zoombie bootstrap first: irm https://raw.githubusercontent.com/carnivorum/zoombie/main/scripts/bootstrap.ps1 | iex  (or scripts\bootstrap.cmd from a checkout)." }
 ```
 
 Then call it — this is the only command this skill needs:

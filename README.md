@@ -15,7 +15,9 @@ The skills are thin wrappers that call one CLI.
   `bootstrap.cmd` whose only job is to ensure an interpreter exists. There is no
   PowerShell in the pipeline, so there is no second dialect to keep in sync and
   no shell-specific quirk (argv quoting, exit codes, native-stderr handling) to
-  work around.
+  work around. `bootstrap.ps1` exists only as a one-line convenience entry point
+  that downloads and runs `bootstrap.cmd`; it contains no install logic of its
+  own, so the two cannot drift.
 - **One shared library, split by concern.** `zoombie/lib/` holds the shared
   helpers and `zoombie/commands/` holds one module per subcommand, so a skill's
   path is short and legible: `cli → commands/<name>.py → lib/<concern>.py`.
@@ -54,7 +56,8 @@ The skills are thin wrappers that call one CLI.
 ```
 setup.md                        thin setup prompt that drives the bootstrap
 scripts/
-  bootstrap.cmd                 the ONLY non-Python file: ensure Python, fetch the repo, hand off
+  bootstrap.cmd                 the implementation: ensure Python, fetch the repo, hand off
+  bootstrap.ps1                 thin shim over bootstrap.cmd: the one-line PowerShell entry point
   requirements-pdf.txt          Python dependencies for the PDF extractor
   requirements-selftest.txt     extra self-test dependency (pyttsx3, for the TTS step)
   pdf/extract_pdf.py            standalone wrapper over zoombie.lib.pdf
@@ -88,7 +91,6 @@ scripts/
     install/
       __main__.py   python -m zoombie.install
       main.py       the installer flow (the setup-worker replacement)
-      update.py     fetch the latest repo and run the installer (the setup.ps1 replacement)
       hardware.py   hardware probe + model recommendation
       components.py ffmpeg, yt-dlp, whisper, cuBLAS, model, PDF deps, CLI, skills
 tests/                          unit tests (python -m pytest tests)
@@ -136,6 +138,16 @@ construction; this only bites when the root is overridden deep in the tree.
 
 Skills are deployed to the global root `%USERPROFILE%\.roo\skills\`.
 
+The **Zoombie role** is deployed as a Zoo Code custom mode, into the global
+`custom_modes.yaml` under the extension's settings folder. It is a universal
+analyst — a reasoning partner for finance, medicine, law, politics, science and
+anything else — not a coding mode. Its edit permission is deliberately restricted
+to human-readable documents and data (`md`, `markdown`, `txt`, `csv`, `tsv`,
+`html`, `htm`), so it can author a report but can never touch source code,
+configuration or a notebook. When a task needs tooling built or run, it briefs
+Code mode as an *Analyst Intern* (facts, method and provenance in; judgement
+out). See [`plans/zoombie-role.md`](plans/zoombie-role.md) for the reasoning.
+
 ## Quick start
 
 ```bat
@@ -170,7 +182,21 @@ repository archive from GitHub, and hands off to the Python installer. So any
 start of setup means *install or update to the latest* — there is no cached copy
 to go stale and no gate that can skip the update.
 
-That makes the distribution unit a single URL:
+That makes the distribution unit a single line. From any shell, in any working
+directory, on a machine with nothing installed:
+
+```powershell
+irm https://raw.githubusercontent.com/carnivorum/zoombie/main/scripts/bootstrap.ps1 | iex
+```
+
+`bootstrap.ps1` is a shim: it downloads `bootstrap.cmd` to a temp directory and
+runs it. Every option (`-Check`, `-DryRun`, `-Model`, `-Root`, `-Force`) has an
+environment-variable form (`ZOOMBIE_CHECK`, `ZOOMBIE_DRYRUN`, `ZOOMBIE_MODEL`,
+`ZOOMBIE_ROOT`, `ZOOMBIE_FORCE`) so the unattended one-liner can still select
+them. Run as a file it returns the installer's exit code; run inline it throws
+rather than exiting, so it never closes the caller's shell.
+
+The `cmd.exe` equivalent needs no PowerShell at all:
 
 ```bat
 curl.exe -L -o "%TEMP%\bootstrap.cmd" https://raw.githubusercontent.com/carnivorum/zoombie/main/scripts/bootstrap.cmd
@@ -185,9 +211,10 @@ What travels in the repo vs. what each machine rebuilds:
 
 | Thing | Travels? | Why |
 |-------|----------|-----|
-| `scripts/`, `skills/`, `setup.md` | yes | the implementation and the sources; the bootstrap fetches these itself |
+| `scripts/`, `skills/`, `modes/`, `setup.md` | yes | the implementation and the sources; the bootstrap fetches these itself |
 | `%USERPROFILE%\zoombie-env\` | no | machine-local and large (the model alone can be ~1.5 GB); re-fetched so it matches each machine's GPU backend |
 | `%USERPROFILE%\.roo\skills\` | no | deployed copies, written from `skills/` by the installer |
+| `%APPDATA%\Code\User\globalStorage\zoocodeorganization.zoo-code\settings\custom_modes.yaml` | no | the Zoombie role is **merged** into it (only our entry is replaced; foreign modes are preserved), so a hand-written mode there is never lost |
 
 On a machine that is **already configured**, nothing further is needed: the
 deployed launcher at `%USERPROFILE%\zoombie-env\bin\zoombie\zoombie.cmd` is
@@ -367,7 +394,7 @@ REM backendConfigured vs backendObserved, with a warning on mismatch
 The six skills in [`skills/`](skills/) are the canonical sources. They only
 inspect the project, propose paths, collect the user's confirmation, and then
 call the CLI. They are namespaced `zoombie-*` so their names cannot collide with a
-foreign skill, and they carry `cvrm-zoombie-version: 4.1.0`, which the installer
+foreign skill, and they carry `cvrm-zoombie-version: 4.3.0`, which the installer
 compares to decide `up to date` vs `updated`.
 
 | Skill | Produces |
@@ -410,15 +437,19 @@ scan of the item folders.
   with `paths.assert_fits(p, what, slack=n)`. Always pass `slack` for a name that
   gets a suffix appended (`.txt`, `.images`, `.whisper.log`), because the suffix
   is what usually crosses the limit.
-- Install/update logic belongs in `zoombie/install/`. Keep
-  [`update.py`](scripts/zoombie/install/update.py) thin: it fetches the repo and
-  runs the installer from the fresh checkout, so there is nothing in it to update.
+- Install/update logic belongs in `zoombie/install/`. The two entry points are
+  [`bootstrap.cmd`](scripts/bootstrap.cmd) (ensure Python, fetch the repo, hand
+  off) and [`bootstrap.ps1`](scripts/bootstrap.ps1) (a shim that downloads and
+  runs the batch one, so a PowerShell user needs a single line). There is no
+  separate "fetch the latest worker" module: the batch entry point always pulls
+  the current archive and runs the installer from that fresh checkout, which is
+  what keeps a re-run an update rather than a re-install of a stale tree.
 - When iterating locally, run `python -m zoombie.install` — it installs the
   working tree as-is and never hits the network. `bootstrap.cmd` is the end-user
   path and always pulls the published repo.
 - Bump `SKILL_VERSION` in [`__init__.py`](scripts/zoombie/__init__.py) when skill
   content changes, so deployment can tell an installed skill is out of date. It is
-  currently `4.1.0`; every `SKILL.md` carries the same value in
+  currently `4.3.0`; every `SKILL.md` carries the same value in
   `cvrm-zoombie-version`, inside the first 12 lines — `read_marker` reads only the
   front matter, so a marker that drifts below it reads as unowned.
 - The PDF dependencies are installed with `pip install --user`, matching the

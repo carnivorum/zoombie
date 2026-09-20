@@ -12,6 +12,7 @@ no PDF, no whisper, no third-party dependency is involved.
 from __future__ import annotations
 
 import json
+import re
 
 from zoombie import cli
 from zoombie.commands import postprocess as pp
@@ -79,6 +80,14 @@ MANIFEST = {
         }
     ],
 }
+
+
+# Block 3 carrying a criticism sub-block. This is the shape the zoombie-summarize
+# skill documents, and it must not disturb block 6's numbering.
+SUMMARY_WITH_CRITICISM = SUMMARY.replace(
+    "Краткое содержание второе.",
+    "Краткое содержание второе.\n\n***Критика***\nОдин источник устарел.\nИтог подан односторонне.",
+)
 
 
 def write_doc(tmp_path, name: str = "summary.md", text: str = SUMMARY, srt: str | None = SRT):
@@ -352,6 +361,79 @@ class TestLinkRepair:
         # The newline survives (it is not in the encode table) and the space is
         # encoded -- the link is not collapsed onto one line.
         assert out == "[A](a\n%20b.md)\n"
+
+
+class TestCriticismSubBlock:
+    """A non-heading sub-block in block 3 must be invisible to every pass.
+
+    The skill documents the criticism sub-block as bold-italic precisely because
+    a heading there would be numbered by `assign_anchors`, and the block-4 index
+    is narrowed to block 6 -- leaving a dangling `s-N` that `verify` rejects.
+    These tests pin that reasoning down.
+    """
+
+    def test_block_6_numbering_is_unaffected(self, tmp_path):
+        path = write_doc(tmp_path, text=SUMMARY_WITH_CRITICISM)
+        assert cli.main(["postprocess", "-Md", str(path), "-Apply"]) == 0
+        after = read_text(path)
+
+        section_6 = after.split("## 6.")[1]
+        anchors = re.findall(r'### <a id="(s-\d+)"></a>', section_6)
+        # Dense and starting at s-1: the block-3 sub-block consumed nothing.
+        assert anchors == ["s-1", "s-2", "s-3", "s-4"]
+
+    def test_the_criticism_text_survives_untouched(self, tmp_path):
+        path = write_doc(tmp_path, text=SUMMARY_WITH_CRITICISM)
+        assert cli.main(["postprocess", "-Md", str(path), "-Apply"]) == 0
+        after = read_text(path)
+
+        block_3 = after.split("## 3.")[1].split("## 4.")[0]
+        assert "***Критика***" in block_3
+        assert "Один источник устарел." in block_3
+        assert "Итог подан односторонне." in block_3
+        # No anchor may be attached to it.
+        assert "<a id=" not in block_3
+
+    def test_the_index_has_one_entry_per_block_6_heading(self, tmp_path):
+        """The count must be block-6 headings only, never that plus the sub-block."""
+        path = write_doc(tmp_path, text=SUMMARY_WITH_CRITICISM)
+        assert cli.main(["postprocess", "-Md", str(path), "-Apply"]) == 0
+        after = read_text(path)
+
+        index_body = after.split("## 4.")[1].split("## 5.")[0]
+        assert index_body.count("- [") == 4
+        assert "Критика" not in index_body
+
+    def test_a_criticism_sub_block_keeps_the_run_idempotent(self, tmp_path):
+        path = write_doc(tmp_path, text=SUMMARY_WITH_CRITICISM)
+        args = ["postprocess", "-Md", str(path), "-Apply"]
+        assert cli.main(args) == 0
+        first = path.read_bytes()
+        assert cli.main(args) == 0
+        assert path.read_bytes() == first
+
+    def test_a_stale_anchor_on_the_sub_block_self_heals(self, tmp_path):
+        """A document mangled by the older whole-file numbering must converge.
+
+        The old pass numbered every `###` anywhere, so a document written with a
+        `### Criticism` heading in block 3 carries an `s-1` that belongs to it.
+        One run must move that numbering into block 6.
+        """
+        stale = SUMMARY.replace(
+            "Краткое содержание второе.",
+            'Краткое содержание второе.\n\n### <a id="s-1"></a>Критика\nЗамечание.',
+        )
+        path = write_doc(tmp_path, text=stale)
+        assert cli.main(["postprocess", "-Md", str(path), "-Apply"]) == 0
+        after = read_text(path)
+
+        block_3 = after.split("## 3.")[1].split("## 4.")[0]
+        assert "<a id=" not in block_3, "the stale anchor must be stripped"
+        assert "Критика" in block_3
+        section_6 = after.split("## 6.")[1]
+        assert re.findall(r'### <a id="(s-\d+)"></a>', section_6) == [
+            "s-1", "s-2", "s-3", "s-4"
+        ]
 
 
 class TestImages:
