@@ -1,8 +1,7 @@
 """Zip extraction, long-path aware.
 
-``zipfile`` does not validate an assembled output path the way PowerShell's
-``Expand-Archive`` does, but the destination still has to survive a deep tree, so
-every written target carries the extended-length prefix.
+Every written target carries the extended-length prefix, so an archive with a
+deep internal tree still extracts under the toolchain root.
 """
 
 from __future__ import annotations

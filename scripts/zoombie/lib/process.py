@@ -59,8 +59,8 @@ def write_result(
 ) -> None:
     """Emit the single machine-readable JSON result line on stdout.
 
-    Key order is fixed (ok, action, error, data, timestamp) so the output is
-    byte-comparable with the PowerShell implementation during the port.
+    Key order is fixed (ok, action, error, data, timestamp) so the line is
+    byte-stable for a caller that compares runs.
     """
     payload = {
         "ok": bool(ok),
@@ -85,9 +85,8 @@ def cpu_threads() -> int | None:
 def child_env(extra: dict[str, str] | None = None) -> dict[str, str]:
     """Environment for a child process, forcing UTF-8.
 
-    The PowerShell original toggled ``PYTHONUTF8`` around every native call; here
-    the variable is simply always set for children, and our own reads/writes pass
-    an explicit encoding anyway.
+    Set unconditionally rather than per call: a native tool that emits non-ASCII
+    otherwise writes it in the OEM code page and the transcript is corrupted.
     """
     env = dict(os.environ)
     env["PYTHONUTF8"] = "1"

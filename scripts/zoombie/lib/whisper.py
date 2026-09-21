@@ -127,10 +127,8 @@ def read_log(path: str | None) -> list[str]:
 
     The encoding is detected from the BOM because a redirected native stderr can
     be UTF-16. Decoding such a file as UTF-8 would leave interleaved NUL bytes, so
-    NO pattern (device, timings, backend) would ever match and device detection
-    would silently degrade to "cpu". This is the one place the PowerShell version
-    needed a heuristic NUL-strip; here the BOM check plus a NUL fallback is
-    enough.
+    no pattern (device, timings, backend) would ever match and device detection
+    would silently degrade to "cpu". The BOM check plus a NUL fallback covers it.
     """
     from . import paths
 

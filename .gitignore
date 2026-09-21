@@ -10,6 +10,23 @@ downloads/
 *.flac
 *.srt
 
+# Retained SOURCE media. The item contract keeps the original video/audio/PDF
+# beside summary.md, so a workspace of items otherwise commits hundreds of
+# megabytes. Note the transcripts above are already ignored.
+*.mp4
+*.mkv
+*.webm
+*.mov
+*.avi
+*.m4v
+*.ogg
+*.opus
+*.aac
+
+# Item internals: derived material (images, manifests, transcripts, item.json).
+# The one folder that IS generated wholesale, so a checkout stays small.
+**/.data/
+
 # Python bytecode from the PDF extractor (scripts/pdf/extract_pdf.py)
 __pycache__/
 *.py[cod]

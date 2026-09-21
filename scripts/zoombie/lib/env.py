@@ -1,9 +1,7 @@
 """The resolved runtime environment: every tool as an absolute path.
 
-Replaces the PowerShell ``Get-Environment``/``$Env`` hashtable, which was rebuilt
-by every subcommand and passed around as a loosely-typed ``$Env`` object. Here it
-is a dataclass, so a typo is an ``AttributeError`` at the call site rather than a
-silent ``None``.
+A dataclass rather than a loose mapping, so a typo is an ``AttributeError`` at
+the call site rather than a silent ``None`` downstream.
 """
 
 from __future__ import annotations

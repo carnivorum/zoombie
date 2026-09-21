@@ -1,17 +1,16 @@
 """Hardware probe and model recommendation.
 
-The PowerShell version used ``Get-CimInstance Win32_*``. Python has no WMI
-equivalent in the standard library, so this uses the tools that are actually
+Python has no WMI in the standard library, so this uses the sources that are
 reliable on Windows 10/11 and reports ``None`` rather than guessing:
 
-* **nvidia-smi** for CUDA: it is the only source that gives the VRAM total that
-  matters (``Win32_VideoController.AdapterRAM`` overflows above 4 GB) plus the
-  driver version.
-* **DXGI adapter enumeration** through ``ctypes`` for "is there a display
-  adapter at all", which decides ``vulkan`` vs ``cpu``. This avoids ``wmic``
-  (removed on recent Windows) and avoids depending on PowerShell.
+* **nvidia-smi** for CUDA: the only source that gives the VRAM total that matters
+  plus the driver version.
+* **DXGI adapter enumeration** through ``ctypes`` for "is there a display adapter
+  at all", which decides ``vulkan`` vs ``cpu``. Avoids ``wmic``, which recent
+  Windows has removed.
 * **The registry** for the CPU marketing name, and ``GlobalMemoryStatusEx`` for
-  total physical RAM.
+  total physical RAM. The registry is preferred over ``Win32_VideoController``
+  because its ``AdapterRAM`` overflows above 4 GB.
 """
 
 from __future__ import annotations

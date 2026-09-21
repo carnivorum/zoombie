@@ -117,7 +117,7 @@ class TestSidecar:
         assert set(payload) == {
             "kind", "url", "title", "id", "durationSec", "language", "model",
             "backend", "deviceUsed", "deviceVerified", "realtimeFactor",
-            "toolchainVersion", "createdAt", "sourceKept",
+            "toolchainVersion", "createdAt", "sourceKept", "sourceFile",
         }
         assert payload["url"] == "https://example.com/watch?v=abc123"
         assert payload["title"] == "A Talk"
@@ -128,8 +128,11 @@ class TestSidecar:
         assert payload["deviceUsed"] == "cuda"
         assert payload["deviceVerified"] is True
         assert payload["realtimeFactor"] == 0.25
-        # This is the field that records the media being deleted after download.
+        # This is the field that records whether the media survived the run. It is
+        # False here because the request did not retain it; the pipeline now keeps
+        # the source beside the transcript and sets both fields together.
         assert payload["sourceKept"] is False
+        assert payload["sourceFile"] is None
         assert payload["createdAt"].endswith("Z")
 
     def test_local_audio_falls_back_to_the_input_path(self, tmp_path):

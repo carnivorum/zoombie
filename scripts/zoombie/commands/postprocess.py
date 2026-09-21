@@ -39,10 +39,16 @@ import os
 import re
 
 from ..cli import Outcome
+from ..item import paths as item_paths
 from ..lib import markdown as md, paths, process
 from ..lib.errors import ZoombieError
 from ..lib.srt import SrtIndex, parse
 from ..lib.textnorm import hhmmss, norm, percent_encode_dest
+
+# The item contract's names, aliased so the passes below read naturally. Using the
+# shared constants rather than string literals is what keeps ``summary.md`` and
+# ``.data/img`` defined in exactly one place.
+SUMMARY_NAME = item_paths.SUMMARY_NAME
 
 # Section heading locators. They match the ``## N. Title`` line, so the range a
 # pass edits is always delimited by structure, not by the exact title text --
@@ -486,15 +492,40 @@ def load_manifest(image_dir: str) -> dict | None:
     return payload
 
 
-def image_url_prefix(image_dir: str) -> str:
+def image_marker(image_dir: str, md_path: str | None) -> str:
+    """The path a link must contain for this document's images.
+
+    The strip pass is matched by *path fragment*, so this and
+    :func:`image_url_prefix` MUST agree: a marker the links do not contain silently
+    disables the strip half of the image pass, and the insert half then duplicates
+    every figure on each run.
+
+    When ``md_path`` is known the fragment is the image directory's path relative
+    to the document -- ``.data/img/`` for the item layout. Without it the basename
+    is the best available answer, which is what keeps a hand-made directory such as
+    ``img/`` working.
+    """
+    if md_path:
+        relative = os.path.relpath(image_dir, os.path.dirname(os.path.abspath(md_path)))
+        relative = relative.replace("\\", "/").strip()
+        if relative and not relative.startswith(".."):
+            return relative.rstrip("/") + "/"
+    name = os.path.basename(os.path.normpath(image_dir))
+    return f"{name}/" if name else md.DEFAULT_IMAGE_MARKER
+
+
+def image_url_prefix(image_dir: str, md_path: str | None = None) -> str:
     """The destination prefix for images, relative to the Markdown file.
 
-    The layout that matters is the skill's: ``summary.md`` sits beside ``img/``, so
-    the links are written as exactly ``img/<file>``. A directory named anything
-    else falls back to its own basename so the links still resolve.
+    The layout that matters is the item's: ``summary.md`` sits at the item root and
+    its figures live in ``.data/img/``, so the links are written as exactly
+    ``.data/img/<file>``. A caller that does not know the document (a test, or a
+    hand-made directory) gets the directory's own basename, which still resolves.
+
+    This is deliberately the same computation as :func:`image_marker` -- one rule
+    for "where are the images", used by both halves of the pass.
     """
-    name = os.path.basename(os.path.normpath(image_dir))
-    return f"{name}/" if name else "img/"
+    return image_marker(image_dir, md_path)
 
 
 def image_link(prefix: str, file_name: str) -> str:
@@ -502,12 +533,20 @@ def image_link(prefix: str, file_name: str) -> str:
     return f"![{file_name}]({percent_encode_dest(prefix + file_name)})"
 
 
-def insert_images(text: str, manifest: dict | None, prefix: str) -> tuple[str, int, int]:
+def insert_images(
+    text: str,
+    manifest: dict | None,
+    prefix: str,
+    *,
+    marker: str | None = None,
+) -> tuple[str, int, int]:
     """Strip a previous run's images, then re-insert them from the manifest.
 
     ``strip_inserted_images`` runs first so a re-run removes the previous run's
     images before adding them again -- that ordering is what makes the pass
-    idempotent instead of stacking duplicates.
+    idempotent instead of stacking duplicates. ``marker`` is the path fragment the
+    strip pass looks for and defaults to ``prefix``, because the links it must
+    remove are exactly the links ``prefix`` writes.
 
     Anchoring is a two-pass rule, in order:
 
@@ -667,12 +706,23 @@ def _match_anchor(paragraphs_norm: list[str], anchor: str | None, cursor: int) -
 # the whole document
 # --------------------------------------------------------------------------- #
 
-def process_document(text: str, srt_path: str | None, image_dir: str) -> tuple[str, dict]:
+def process_document(
+    text: str,
+    srt_path: str | None,
+    image_dir: str,
+    md_path: str | None = None,
+) -> tuple[str, dict]:
     """Run every pass over one document; return ``(new_text, stats)``.
 
     Pure with respect to the filesystem except for *reading* the SRT and the image
     manifest, which makes it directly unit-testable and keeps the dry-run path
     free of any write.
+
+    ``md_path`` is the document's own path when it is known, and it exists for one
+    reason: the image links the pass writes must be relative to the FILE, so only
+    the caller that knows where the file sits can build ``.data/img/`` correctly.
+    Without it the pass falls back to the image directory's basename, which is what
+    keeps the direct unit-test call sites working unchanged.
     """
     original = text
     stats: dict = {
@@ -725,7 +775,11 @@ def process_document(text: str, srt_path: str | None, image_dir: str) -> tuple[s
     # 5. images (PDF-derived documents only; a missing manifest is a no-op)
     manifest = load_manifest(image_dir)
     if manifest is not None:
-        text, placed, skipped = insert_images(text, manifest, image_url_prefix(image_dir))
+        # The marker and the prefix come from ONE computation over the same
+        # directory, so the strip half and the insert half can never disagree about
+        # where the images live.
+        prefix = image_url_prefix(image_dir, md_path)
+        text, placed, skipped = insert_images(text, manifest, prefix, marker=prefix)
         stats["imagesPlaced"] = placed
         stats["imagesSkipped"] = skipped
 
@@ -751,8 +805,12 @@ def _srt_for(md_path: str, srt_arg: str | None) -> str | None:
         return srt_arg
     stem = os.path.splitext(md_path)[0]
     candidates = [os.path.join(stem + ".srt")]
-    if os.path.basename(md_path).lower() == "summary.md":
-        candidates.append(os.path.join(os.path.dirname(md_path), "transcript.srt"))
+    if os.path.basename(md_path).lower() == SUMMARY_NAME:
+        item_root = os.path.dirname(md_path)
+        # The item layout first (``.data/transcript.srt``), then the historical
+        # side-by-side location, so either generation of item finds its timing.
+        candidates.append(item_paths.transcript_path(item_root, "srt"))
+        candidates.append(os.path.join(item_root, "transcript.srt"))
     for candidate in candidates:
         if paths.is_file(candidate):
             return candidate
@@ -760,10 +818,23 @@ def _srt_for(md_path: str, srt_arg: str | None) -> str | None:
 
 
 def _image_dir_for(md_path: str, explicit: str | None) -> str:
-    """The image directory to read a manifest from for this document."""
+    """The image directory to read a manifest from for this document.
+
+    An explicit ``-ImageDir`` always wins. Otherwise the item layout is assumed:
+    ``<item>/.data/img``, which is where the toolchain writes figures. The
+    historical ``<item>/img`` is tried second so a document produced before the
+    item layout still resolves without being passed a flag.
+    """
     if explicit:
         return explicit
-    return os.path.join(os.path.dirname(md_path), "img")
+    item_root = os.path.dirname(md_path)
+    preferred = item_paths.image_dir(item_root)
+    if paths.is_dir(preferred):
+        return preferred
+    legacy = os.path.join(item_root, item_paths.IMAGE_DIR_NAME)
+    if paths.is_dir(legacy):
+        return legacy
+    return preferred
 
 
 def _collect_markdown(target: str, recurse: bool) -> list[str]:
@@ -821,7 +892,7 @@ def run(args) -> Outcome:
 
         srt_path = _srt_for(md_path, args.srt)
         image_dir = _image_dir_for(md_path, args.image_dir)
-        updated, stats = process_document(original, srt_path, image_dir)
+        updated, stats = process_document(original, srt_path, image_dir, md_path)
 
         entry = {"md": md_path, "applied": False, **stats}
         if updated != original:

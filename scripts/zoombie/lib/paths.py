@@ -1,24 +1,21 @@
 """Path rules: the ASCII toolchain root, the 260-character budget, and safe work dirs.
 
-Two independent Windows failure modes are handled here, and they need different
-remedies, which is why this module has both a ``to_extended`` prefix helper and an
-``assert_fits`` guard:
+Two independent Windows failure modes need two different remedies, which is why
+the module has both a prefix helper and a length guard:
 
 * **Non-ASCII (Cyrillic) paths.** whisper.cpp, PyMuPDF and Tesseract all
-  misbehave when a path contains non-ASCII characters. The fix is structural:
-  every input is copied into an ASCII scratch dir under an ASCII root, the native
-  tool runs entirely inside it, and artifacts are copied back afterwards. See
+  misbehave on them, so every input is copied into an ASCII scratch dir, the
+  native tool runs inside it, and artifacts are copied back. See
   :func:`copy_into_safe_work`.
 
-* **The legacy 260-character limit.** Native tools open paths with plain C APIs
-  and cannot use the ``\\\\?\\`` extended-length prefix, so a path handed to them
-  is only length-*checked* (and refused with the real cause) by
-  :func:`assert_fits`. Managed I/O is different: it *can* use the prefix, so it
-  goes through :func:`to_extended`.
+* **The 260-character limit.** Native tools open paths with plain C APIs and
+  cannot use the ``\\\\?\\`` prefix, so a path handed to them is length-*checked*
+  and refused with the real cause by :func:`assert_fits`. Managed I/O *can* use
+  the prefix, so it goes through :func:`to_extended`.
 
-Unlike the PowerShell original, this module needs no per-call "strip the prefix
-again" step: ``os`` and ``shutil`` handle a prefixed path correctly, so the
-prefix never has to be scrubbed from enumeration results.
+The invariant that matters when editing: a ``\\\\?\\`` path must never reach a
+native tool call or the JSON output, which is why :class:`Entry` builds
+prefix-free paths and :func:`absolute` strips the prefix.
 """
 
 from __future__ import annotations
@@ -171,6 +168,7 @@ def to_extended(path: str) -> str:
     Idempotent. Normalization happens before the prefix is added, because the
     prefix disables it.
     """
+    # NOTE: the prefix disables path normalization, so abspath() must run first.
     if not path:
         return path
     if path.startswith("\\\\?\\"):
@@ -187,9 +185,8 @@ def to_extended(path: str) -> str:
 def from_extended(path: str) -> str:
     """Remove a ``\\\\?\\`` / ``\\\\?\\UNC\\`` prefix, if present.
 
-    Retained for reporting and for tests. Managed I/O does not need it -- that is
-    the main simplification over the PowerShell original, where every enumerated
-    path had to be scrubbed because ``?`` is a wildcard in the shell's cmdlets.
+    Needed for reporting and for measuring length: the prefix does not count
+    toward the 260-character limit the caller is trying to stay under.
     """
     if not path:
         return path
@@ -203,10 +200,9 @@ def from_extended(path: str) -> str:
 def absolute(path: str) -> str:
     """Absolute form of a path, WITHOUT an extended-length prefix.
 
-    This is the form to hand to a native tool. ``os.path.abspath`` is string
-    arithmetic plus ``getcwd``, so unlike PowerShell's ``GetFullPath`` it does not
-    raise on an over-long path -- the caller's own :func:`assert_fits` is what
-    produces the actionable error.
+    This is the form to hand to a native tool. It never raises on an over-long
+    path, so the caller's own :func:`assert_fits` is what produces the
+    actionable error.
     """
     if not path:
         return path
@@ -437,11 +433,8 @@ def remove(path: str | None, *, recursive: bool = False) -> None:
 def remove_quietly(path: str | None, *, recursive: bool = False) -> bool:
     """Best-effort removal. Returns True when the path is gone afterwards.
 
-    Replaces the PowerShell version's background job with a short timeout: that
-    job existed because ``Remove-Item -Recurse`` can block forever on a file a
-    killed child still holds. A plain ``shutil.rmtree`` fails immediately
-    instead, so the time-boxing is unnecessary -- the dir is simply left behind
-    for the ``clean`` subcommand rather than holding the run hostage.
+    Never blocks and never raises. A directory a killed child still holds is left
+    behind for the ``clean`` subcommand rather than holding the run hostage.
     """
     if not path or not exists(path):
         return True

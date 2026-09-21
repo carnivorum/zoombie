@@ -1,9 +1,7 @@
 """The installer/updater flow: detect, then install each component in order.
 
-Replaces ``setup-worker.ps1``. The shape is deliberately the same sequence, so a
-reader of the old script can follow this one, but the state that used to be three
-PowerShell script-scoped globals (``$script:DryRun``/``Check``/``Force``) is one
-:class:`components.Modes` value passed explicitly.
+The three modes (``check``/``dry_run``/apply) are carried explicitly in one
+:class:`components.Modes` value, rather than passed around as loose flags.
 """
 
 from __future__ import annotations

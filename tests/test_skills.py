@@ -8,6 +8,10 @@ test cross-checked the skill inventory against the CLI and against the docs.
 The lesson is that a skill file is not standalone: it names other skills and it
 invokes CLI subcommands. Both are references that can dangle, so both are
 checked here.
+
+A second class of guard keeps the token cost down: the shared blocks and the
+per-skill budget are asserted, so the next edit that re-pastes boilerplate fails
+the suite instead of being paid for by every agent that loads a skill.
 """
 
 from __future__ import annotations
@@ -20,6 +24,7 @@ import pytest
 from zoombie import SKILL_VERSION
 from zoombie.cli import build_parser
 from zoombie.lib import skills as skills_mod
+from zoombie.lib.errors import ZoombieError
 
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 SKILLS_DIR = os.path.join(REPO_ROOT, "skills")
@@ -36,12 +41,35 @@ EXPECTED_SKILLS = {
 }
 
 
+# The largest acceptable skill source. Exceeding it means boilerplate crept back
+# in or the skill is doing two jobs; split it or move the shared text into
+# skills/_shared/ rather than raise the bound.
+#
+# The current maximum is zoombie-summarize, by design: it owns the 6-block
+# contract, which no other skill should carry. The budget sits just above it, so
+# another skill growing to this size - or any skill re-pasting a shared block,
+# which costs roughly 1.5 KB - fails rather than being paid for by every agent
+# that loads it.
+MAX_SKILL_BYTES = 11000
+
+# The canonical include blocks. Kept explicit so a rename is a deliberate edit
+# here, and so a deleted block is a failure rather than a silently missing include.
+EXPECTED_INCLUDES = {"cli-resolve", "json-contract", "repo-fallback", "shell-note"}
+
+_OPEN_RE = re.compile(r"<!--\s*zoombie:include\s+([A-Za-z0-9._-]+)\s*-->")
+_CLOSE_RE = re.compile(r"<!--\s*/zoombie:include\s*-->")
+
+
 def _skill_paths() -> list[str]:
     return [
         os.path.join(SKILLS_DIR, entry.name, "SKILL.md")
         for entry in sorted(os.scandir(SKILLS_DIR), key=lambda e: e.name)
         if entry.is_dir() and os.path.isfile(os.path.join(entry.path, "SKILL.md"))
     ]
+
+
+def _shared_dir() -> str:
+    return skills_mod.shared_dir(SKILLS_DIR)
 
 
 def _read(path: str) -> str:
@@ -164,3 +192,113 @@ class TestCrossReferences:
                         f"{skill}: 'zoombie {name} {flag}' is not a known option "
                         f"of that subcommand"
                     )
+
+
+# ---------------------------------------------------------------------------
+# Shared blocks - token economy
+# ---------------------------------------------------------------------------
+
+class TestSharedIncludes:
+    """The repo shares boilerplate; the deployed skill must not carry a marker.
+
+    These are the guards that keep the de-duplication from either breaking the
+    deploy (an unknown name) or quietly undoing itself (a re-pasted block).
+    """
+
+    def test_every_expected_block_exists(self):
+        for name in EXPECTED_INCLUDES:
+            path = os.path.join(_shared_dir(), f"{name}.md")
+            assert os.path.isfile(path), f"missing shared block: {path}"
+
+    def test_shared_folder_is_not_a_skill(self):
+        """A folder with no SKILL.md is skipped by both inventory and deploy."""
+        assert not os.path.isfile(os.path.join(_shared_dir(), "SKILL.md"))
+        found = {os.path.basename(os.path.dirname(p)) for p in _skill_paths()}
+        assert skills_mod.SHARED_FOLDER not in found
+
+    def test_every_used_include_exists(self):
+        for path in _skill_paths():
+            for name in _OPEN_RE.findall(_read(path)):
+                assert name in EXPECTED_INCLUDES, (
+                    f"{os.path.basename(os.path.dirname(path))} includes "
+                    f"'{name}', which is not a known block"
+                )
+
+    def test_markers_are_balanced(self):
+        for path in _skill_paths():
+            text = _read(path)
+            opens = len(_OPEN_RE.findall(text))
+            closes = len(_CLOSE_RE.findall(text))
+            assert opens == closes, (
+                f"{os.path.basename(os.path.dirname(path))}: {opens} open vs "
+                f"{closes} close marker(s)"
+            )
+
+    def test_each_include_appears_at_most_once(self):
+        for path in _skill_paths():
+            names = _OPEN_RE.findall(_read(path))
+            duplicates = {n for n in names if names.count(n) > 1}
+            assert not duplicates, (
+                f"{os.path.basename(os.path.dirname(path))}: duplicated include "
+                f"marker(s) {sorted(duplicates)}"
+            )
+
+    def test_no_shared_body_is_re_pasted(self):
+        """The check that catches a block pasted back in instead of included."""
+        for name in EXPECTED_INCLUDES:
+            body = _read(os.path.join(_shared_dir(), f"{name}.md")).strip()
+            # A short body would make this check meaningless.
+            assert len(body.splitlines()) >= 2, f"{name} block is too small"
+            for path in _skill_paths():
+                assert body not in _read(path), (
+                    f"{os.path.basename(os.path.dirname(path))} contains the "
+                    f"'{name}' block verbatim; use the include marker instead"
+                )
+
+    def test_expansion_removes_every_marker(self):
+        for path in _skill_paths():
+            expanded = skills_mod.expand_includes(_read(path), _shared_dir())
+            assert "zoombie:include" not in expanded, (
+                f"{os.path.basename(os.path.dirname(path))}: a marker survived "
+                "expansion, so the deployed skill would carry it"
+            )
+
+    def test_expansion_inlines_the_body(self):
+        for path in _skill_paths():
+            expanded = skills_mod.expand_includes(_read(path), _shared_dir())
+            for name in _OPEN_RE.findall(_read(path)):
+                body = _read(os.path.join(_shared_dir(), f"{name}.md")).strip()
+                assert body in expanded
+
+    def test_expansion_is_idempotent(self):
+        for path in _skill_paths():
+            once = skills_mod.expand_includes(_read(path), _shared_dir())
+            twice = skills_mod.expand_includes(once, _shared_dir())
+            assert once == twice
+
+    def test_unknown_include_is_a_failure(self):
+        with pytest.raises(ZoombieError):
+            skills_mod.expand_includes(
+                "<!-- zoombie:include not-a-block -->\n<!-- /zoombie:include -->\n",
+                _shared_dir(),
+            )
+
+    def test_unclosed_include_is_a_failure(self):
+        with pytest.raises(ZoombieError):
+            skills_mod.expand_includes(
+                "<!-- zoombie:include cli-resolve -->\ntext with no close\n",
+                _shared_dir(),
+            )
+
+
+class TestSkillBudget:
+    """A per-skill byte budget, so a re-inflated skill fails the suite."""
+
+    def test_no_skill_exceeds_the_budget(self):
+        for path in _skill_paths():
+            size = os.path.getsize(path)
+            assert size <= MAX_SKILL_BYTES, (
+                f"{os.path.basename(os.path.dirname(path))} is {size} bytes "
+                f"(budget {MAX_SKILL_BYTES}). Move shared text into "
+                f"skills/_shared/ or split the skill."
+            )

@@ -64,9 +64,8 @@ def save(manifest: dict) -> str:
 def dig(obj: Any, dotted: str, default: Any = None) -> Any:
     """Read a dotted path from nested dicts, returning ``default`` if absent.
 
-    Replaces the PowerShell ``Get-ManifestValue``/``Get-Field`` pair. In Python a
-    missing key is already an ordinary ``KeyError`` rather than a strict-mode
-    crash, but a dotted walk still makes the defensive reads shorter.
+    A dotted walk keeps the defensive reads short and returns ``default`` for a
+    missing key, a short list or a scalar where a dict was expected.
     """
     current = obj
     for key in dotted.split("."):

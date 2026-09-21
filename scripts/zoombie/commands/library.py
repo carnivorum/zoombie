@@ -1,169 +1,65 @@
-"""``index``: regenerate the ``README.md`` index of a summary library.
+"""``index``: regenerate the ``README.md`` index of an item library.
 
-A "library" is a folder of item folders named after the established reference
-convention::
+A library is a folder of **items**. An item is a directory of any name holding a
+``summary.md`` and a ``.data/`` directory; see :mod:`zoombie.item.paths`. The
+folder name is the user's to choose and is never parsed here -- number, date and
+title come from ``.data/item.json``, falling back to a legacy name and then to the
+summary's own H1.
 
-    <number> - <DD.MM.YYYY> - <title>
-
-e.g. ``12 - 06.05.2020 - Заметки``. Each item folder may carry a ``summary.md``
-(the prose the ``zoombie-summarize`` skill writes) and an ``img/`` folder with a
-``manifest.json`` sidecar (written by :mod:`zoombie.commands.readpdf`).
-
-The scan is deliberately **regex + :mod:`os.path`**, never ``pathlib``:
-
-* the folder name is parsed with :data:`FOLDER_RE`, so the three fields are
-  extracted independently. ``os.path.splitext`` would cut at the FIRST dot and
-  turn ``12 - 06.05.2020 - Заметки`` into ``12 - 06.05``, and
-  ``pathlib.Path().stem`` mangles it the same way;
-* ``os.path.splitext`` is still used where it belongs -- on a *file* name, to
-  find the ``<base>.md`` next to a transcript.
+This module is a **renderer over the shared scan** (:func:`zoombie.item.scan.scan`).
+That is deliberate and load-bearing: the ``items`` command an agent calls and the
+index a human reads must agree about what a library contains, and two independent
+parsers is how they would eventually stop agreeing. There is one walk of the tree,
+in :mod:`zoombie.item.scan`, and both callers render its result.
 
 **Dry run by default.** The index is written only with ``-Apply``, and the whole
 document is built in memory and written once, so a failure halfway through can
 never leave a half-written ``README.md`` behind. This mirrors
-:mod:`zoombie.commands.postprocess` exactly, and for the same reason: a skill
-calls this command, so it must not be able to corrupt a file by accident.
-
-:func:`scan_library` is the reusable half. The summarize skill's "reindex the
-workspace" offer calls it directly, so the offer and the command can never
-disagree about what the library contains.
+:mod:`zoombie.commands.postprocess` exactly, and for the same reason: a skill calls
+this command, so it must not be able to corrupt a file by accident.
 """
 
 from __future__ import annotations
 
 import os
-import re
 
+from .. import SKILL_VERSION
 from ..cli import Outcome
+from ..item import meta as item_meta, paths as item_paths, registry, scan
 from ..lib import paths, process
 from ..lib.errors import ZoombieError
 from ..lib.textnorm import percent_encode_dest
 
-# The item-folder naming convention: number, DD.MM.YYYY date, free-text title.
-# The title group is allowed to be empty so a folder that lost its title is
-# still indexed (with an empty title) rather than silently skipped.
-FOLDER_RE = re.compile(r"^(\d+)\s*-\s*(\d{2}\.\d{2}\.\d{4})\s*-\s*(.*)$")
-
-SUMMARY_NAME = "summary.md"
-MANIFEST_NAME = "manifest.json"
-IMAGE_DIR_NAME = "img"
+SUMMARY_NAME = item_paths.SUMMARY_NAME
+MANIFEST_NAME = item_paths.MANIFEST_NAME
+DATA_DIR_NAME = item_paths.DATA_DIR_NAME
 DEFAULT_OUTPUT_NAME = "README.md"
 
-# The first ATX H1 of a document: the item's display title.
-H1_RE = re.compile(r"^#[ \t]+(.+?)[ \t]*$", re.MULTILINE)
-
-
-def _read_text(path: str) -> str | None:
-    """Read a UTF-8 (BOM-tolerant) file, or ``None`` when it is unreadable."""
-    try:
-        with open(paths.to_extended(path), "r", encoding="utf-8-sig") as handle:
-            return handle.read()
-    except OSError:
-        return None
-
-
-def title_of(summary_text: str | None, fallback: str) -> str:
-    """The item's display title: the summary's H1, else the folder-name title.
-
-    The H1 is what a reader sees, so it wins when it exists; the folder-name
-    title (group 3 of :data:`FOLDER_RE`) is the fallback, which is what an item
-    folder without a ``summary.md`` still reports.
-    """
-    if summary_text:
-        match = H1_RE.search(summary_text)
-        if match:
-            title = match.group(1).strip()
-            if title:
-                return title
-    return fallback.strip()
-
-
-def image_count(item_dir: str) -> int:
-    """Number of ``img/*.png`` files in an item folder."""
-    image_dir = os.path.join(item_dir, IMAGE_DIR_NAME)
-    if not paths.is_dir(image_dir):
-        return 0
-    return sum(
-        1
-        for entry in paths.list_dir(image_dir, files=True)
-        if entry.name.lower().endswith(".png")
-    )
-
-
-def manifest_of(item_dir: str) -> str | None:
-    """The ``manifest.json`` an item folder carries, or ``None``.
-
-    Two locations are accepted because they are both produced by this toolchain:
-    ``readpdf`` writes the sidecar into the image directory (``img/manifest.json``
-    by default), while an explicit ``-ImageDir <item>`` puts it beside the
-    Markdown. Checking both means an item is never reported as manifest-less
-    merely because a non-default image directory was used.
-    """
-    for candidate in (
-        os.path.join(item_dir, IMAGE_DIR_NAME, MANIFEST_NAME),
-        os.path.join(item_dir, MANIFEST_NAME),
-    ):
-        if paths.is_file(candidate):
-            return candidate
-    return None
+# Kept as a module-level name for callers that referenced it. It is now the LEGACY
+# reader ONLY -- it back-fills metadata for an item that predates ``item.json`` --
+# and never decides whether something is an item.
+FOLDER_RE = item_meta.LEGACY_FOLDER_RE
 
 
 def scan_library(root: str) -> list[dict]:
-    """Every recognizable item folder under ``root``, sorted by number.
+    """Every item under ``root``, sorted for reading.
 
-    Returns one dict per item with the keys the CLI reports: ``number``, ``date``,
-    ``title``, ``path``, ``summary`` (the ``summary.md`` path, or ``None``),
-    ``imageCount`` and ``hasManifest``. Folders that do not match
-    :data:`FOLDER_RE` are not items and are omitted; :func:`scan_library_detail`
-    returns them separately as ``skipped``.
-
-    Sorting is **numeric** (``2`` before ``10``), not lexicographic, which is the
-    whole reason the number is captured as an ``int`` rather than kept as text.
+    Retained as the reusable half the summarize skill's "reindex the workspace"
+    offer calls, so the offer and the command cannot disagree. Both now delegate to
+    :func:`zoombie.item.scan.scan`, which is the single definition of an item.
     """
-    return scan_library_detail(root)[0]
+    return scan.scan(root).items
 
 
 def scan_library_detail(root: str) -> tuple[list[dict], list[dict]]:
-    """``(items, skipped)`` for ``root`` -- the full scan behind :func:`scan_library`.
+    """``(items, skipped)`` for ``root``.
 
-    ``skipped`` names every immediate subfolder that is not an item folder, with
-    the reason, so a caller can report a mis-named folder instead of silently
-    dropping it from the index.
+    ``skipped`` names every immediate subfolder that is not an item, with the
+    reason, so a caller can report a mis-named -- or rather mis-populated -- folder
+    instead of silently dropping it from the index.
     """
-    items: list[dict] = []
-    skipped: list[dict] = []
-
-    for entry in paths.list_dir(root, dirs=True):
-        match = FOLDER_RE.match(entry.name)
-        if match is None:
-            skipped.append(
-                {
-                    "name": entry.name,
-                    "path": entry.path,
-                    "reason": "does not match '<number> - <DD.MM.YYYY> - <title>'",
-                }
-            )
-            continue
-
-        summary_path = os.path.join(entry.path, SUMMARY_NAME)
-        has_summary = paths.is_file(summary_path)
-        summary = _read_text(summary_path) if has_summary else None
-
-        items.append(
-            {
-                "number": int(match.group(1)),
-                "date": match.group(2),
-                "title": title_of(summary, match.group(3)),
-                "path": entry.path,
-                "summary": summary_path if has_summary else None,
-                "imageCount": image_count(entry.path),
-                "hasManifest": manifest_of(entry.path) is not None,
-            }
-        )
-
-    items.sort(key=lambda item: (item["number"], item["date"]))
-    skipped.sort(key=lambda item: item["name"].lower())
-    return items, skipped
+    result = scan.scan(root)
+    return result.items, result.skipped
 
 
 # --------------------------------------------------------------------------- #
@@ -180,35 +76,45 @@ def _cell(text: str) -> str:
     return text.replace("\\", "\\\\").replace("|", "\\|").replace("\r", " ").replace("\n", " ")
 
 
+def _summary_link(root: str, item: dict) -> str:
+    """The ``summary.md`` link for one item, or ``-`` when it has none."""
+    if not item["summary"]:
+        return "-"
+    relative = os.path.relpath(item_paths.summary_path(item["path"]), root)
+    return f"[{SUMMARY_NAME}]({percent_encode_dest(relative.replace(chr(92), '/'))})"
+
+
 def render_table(root: str, items: list[dict]) -> str:
-    """The Markdown table, one row per item folder.
+    """The Markdown table, one row per item.
 
     The link destination goes through :func:`percent_encode_dest` -- the same
-    helper ``postprocess`` uses for its links -- so a folder name containing a
-    space is a valid destination while the Cyrillic in it stays human-readable
-    rather than turning into ``%D0%97`` noise.
+    helper ``postprocess`` uses for its links -- so a folder name containing a space
+    is a valid destination while the Cyrillic in it stays human-readable rather
+    than turning into ``%D0%97`` noise.
     """
     lines = [
-        "| # | Date | Title | Summary | Img | Manifest |",
-        "|---|------|-------|---------|-----|----------|",
+        "| Item | # | Date | Title | Summary | Source | Img | Manifest |",
+        "|------|---|------|-------|---------|--------|-----|----------|",
     ]
     for item in items:
-        number = str(item["number"])
-        if item["summary"]:
-            relative = os.path.relpath(item["summary"], root).replace("\\", "/")
-            summary = f"[{SUMMARY_NAME}]({percent_encode_dest(relative)})"
-        else:
-            summary = "-"
-        images = str(item["imageCount"]) if item["imageCount"] else "-"
+        name = _cell(item["name"])
+        item_link = f"[{name}]({percent_encode_dest(item['name'] + '/')})"
+        number = "-" if item["number"] is None else str(item["number"])
+        # The date is RENDERED here, not stored: ``item.json`` holds ISO so that it
+        # sorts, and the display form is the Russian convention this project uses.
+        date = registry.date_display(item["date"]) or "-"
+        source = item["source"].get("file") or "-"
+        images = str(item["images"]) if item["images"] else "-"
         manifest = "yes" if item["hasManifest"] else "-"
         lines.append(
-            f"| {number} | {_cell(item['date'])} | {_cell(item['title'])} "
-            f"| {summary} | {images} | {manifest} |"
+            f"| {item_link} | {number} | {_cell(date)} | {_cell(item['title'])} "
+            f"| {_summary_link(root, item)} | {_cell(source)} | {images} | {manifest} |"
         )
     return "\n".join(lines)
 
 
-def render_markdown(root: str, items: list[dict], skipped: list[dict]) -> str:
+def render_markdown(root: str, items: list[dict], skipped: list[dict],
+                    naming: dict | None = None) -> str:
     """The full ``README.md`` text for a library.
 
     Built entirely from the scan result, so two runs over an unchanged library
@@ -219,9 +125,20 @@ def render_markdown(root: str, items: list[dict], skipped: list[dict]) -> str:
         "# Library index",
         "",
         f"Items: {len(items)}. Generated by `zoombie index` from `{root}`.",
+        f"Toolchain: {SKILL_VERSION}.",
         "",
     ]
-    parts.append(render_table(root, items) if items else "_No item folders found._")
+
+    if naming:
+        parts.extend(
+            [
+                f"Naming convention: `{naming.get('description')}` "
+                f"(confidence: {naming.get('confidence')}).",
+                "",
+            ]
+        )
+
+    parts.append(render_table(root, items) if items else "_No items found._")
 
     if skipped:
         parts.extend(
@@ -229,8 +146,7 @@ def render_markdown(root: str, items: list[dict], skipped: list[dict]) -> str:
                 "",
                 "## Skipped",
                 "",
-                "Folders that do not follow the `<number> - <DD.MM.YYYY> - <title>`"
-                " convention:",
+                "Folders that hold neither a `summary.md` nor a `.data/` directory:",
                 "",
             ]
         )
@@ -258,8 +174,8 @@ def run(args) -> Outcome:
     output = paths.absolute(args.output) if args.output else os.path.join(root, DEFAULT_OUTPUT_NAME)
     paths.assert_fits(output, "The index output path")
 
-    items, skipped = scan_library_detail(root)
-    markdown = render_markdown(root, items, skipped)
+    result = scan.scan(root)
+    markdown = render_markdown(root, result.items, result.skipped, result.naming)
 
     written = False
     if args.apply:
@@ -270,17 +186,19 @@ def run(args) -> Outcome:
         written = True
 
     if not args.json:
-        for item in items:
+        for item in result.items:
+            number = "-" if item["number"] is None else item["number"]
             process.log(
-                f"  {item['number']}: {item['date']} {item['title']} "
+                f"  {number}: {item['date'] or '-'} {item['title']} "
                 f"summary={'yes' if item['summary'] else 'no'} "
-                f"images={item['imageCount']} manifest={'yes' if item['hasManifest'] else 'no'}"
+                f"images={item['images']} "
+                f"source={item['source']['file'] or '-'}"
             )
-        for entry in skipped:
+        for entry in result.skipped:
             process.log(f"  skipped: {entry['name']} -- {entry['reason']}", "warn")
 
     process.log(
-        f"index: {len(items)} item(s), {len(skipped)} skipped -> {output}"
+        f"index: {len(result.items)} item(s), {len(result.skipped)} skipped -> {output}"
         f"{'' if written else ' (dry run; pass -Apply to write)'}"
     )
 
@@ -291,7 +209,8 @@ def run(args) -> Outcome:
             "output": output,
             "dryRun": not args.apply,
             "written": written,
-            "items": items,
-            "skipped": skipped,
+            "naming": result.naming,
+            "items": result.items,
+            "skipped": result.skipped,
         },
     )

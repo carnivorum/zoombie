@@ -306,11 +306,20 @@ class TestRoleBehaviour:
         # Being right quietly must be allowed, or the role becomes noise.
         assert "agree when it does not" in lowered
 
-    def test_criticism_is_a_named_section_once(self, items):
-        assert "Criticism" in items
-        # Stated once, and explicitly not padded.
-        assert "stated once" in items.lower()
-        assert "never pad either section" in items.lower()
+    def test_criticism_is_stated_once_and_unpadded(self, items):
+        """Stated in one place, and explicitly not padded.
+
+        The stance appears in roleDefinition; the skeleton step in
+        customInstructions must not restate it at length, which is what made the
+        role prompt expensive without adding a rule.
+        """
+        lowered = items.lower()
+        assert "criticism, not contrarianism" in lowered
+        assert "give them once" in lowered
+        assert "state each once" in lowered
+        assert "never pad either section" in lowered
+        # The long-form restatement was removed; a short cross-reference stays.
+        assert "one line each and stated once" not in lowered
 
     def test_criticism_and_uncertainty_stay_distinct(self, items):
         # They answer different questions; collapsing them into one hedge is the
@@ -346,3 +355,60 @@ class TestRoleBehaviour:
 
     def test_forbids_hand_editing_cli_managed_parts(self, items):
         assert "never hand-edit what the CLI owns" in items
+
+
+# ---------------------------------------------------------------------------
+# Prompt size - the always-on, per-turn cost
+# ---------------------------------------------------------------------------
+
+def _role_items() -> str:
+    """The deployed role's item text, read from the canonical source."""
+    here = os.path.dirname(os.path.abspath(__file__))
+    repo = os.path.dirname(here)
+    return modes.read_source(os.path.join(repo, "modes", "zoombie.yaml")).items_text
+
+
+class TestPromptSize:
+    """The role prompt is billed on every turn in the mode.
+
+    A budget, not a target: it exists so the next edit that restates what a skill
+    already owns fails the suite instead of quietly doubling what every Zoombie
+    turn costs. Raise it deliberately, with a reason.
+    """
+
+    # Character ceilings for the two fields the model reads on every turn.
+    ROLE_DEFINITION_MAX = 4500
+    CUSTOM_INSTRUCTIONS_MAX = 5400
+
+    def test_role_definition_stays_within_budget(self):
+        items = _role_items()
+        match = re.search(
+            r"roleDefinition:\s*\|(?P<body>.*?)(?=\n    [a-zA-Z]+:)", items, re.DOTALL
+        )
+        assert match, "roleDefinition block not found"
+        body = match.group("body")
+        assert len(body) <= self.ROLE_DEFINITION_MAX, (
+            f"roleDefinition is {len(body)} characters "
+            f"(budget {self.ROLE_DEFINITION_MAX})"
+        )
+
+    def test_custom_instructions_stay_within_budget(self):
+        items = _role_items()
+        match = re.search(
+            r"customInstructions:\s*\|(?P<body>.*?)(?=\n    [a-zA-Z]+:)", items, re.DOTALL
+        )
+        assert match, "customInstructions block not found"
+        body = match.group("body")
+        assert len(body) <= self.CUSTOM_INSTRUCTIONS_MAX, (
+            f"customInstructions is {len(body)} characters "
+            f"(budget {self.CUSTOM_INSTRUCTIONS_MAX})"
+        )
+
+    def test_delegates_the_item_model_to_the_skill(self):
+        """The item layout and the block-6 rule are owned by zoombie-summarize."""
+        items = _role_items().lower()
+        assert "zoombie-summarize owns" in items
+        # The restated shape must be gone, while the correctness guards remain.
+        assert "summary.md sits at the item root" not in items
+        assert "nextnumber" in items
+        assert "read-only" in items

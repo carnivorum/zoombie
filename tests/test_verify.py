@@ -83,7 +83,10 @@ class TestCleanTree:
     def test_the_report_has_the_documented_shape(self, tmp_path):
         root = build_tree(tmp_path)
         report = vf.verify_tree(str(root))
-        assert set(report) == {"root", "filesChecked", "problems", "ok"}
+        # ``advisories`` carries the checks that inform without failing a tree --
+        # the block-6 "this is a copy" declaration is one, because every document
+        # written before that convention existed would otherwise fail.
+        assert set(report) == {"root", "filesChecked", "problems", "advisories", "ok"}
         assert report["root"] == str(root)
 
     def test_json_flag_still_exits_zero_and_keeps_the_shape(self, tmp_path):

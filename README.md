@@ -394,8 +394,16 @@ REM backendConfigured vs backendObserved, with a warning on mismatch
 The six skills in [`skills/`](skills/) are the canonical sources. They only
 inspect the project, propose paths, collect the user's confirmation, and then
 call the CLI. They are namespaced `zoombie-*` so their names cannot collide with a
-foreign skill, and they carry `cvrm-zoombie-version: 4.3.0`, which the installer
+foreign skill, and they carry `cvrm-zoombie-version: 4.5.0`, which the installer
 compares to decide `up to date` vs `updated`.
+
+Four blocks repeat across all six - how to resolve the launcher, the JSON
+contract, the repo fallback and the shell note - so they live once in
+[`skills/_shared/`](skills/_shared/) and a source marks the include site with
+`<!-- zoombie:include <name> -->`. **Deployment expands those markers**, so the
+installed skill is self-contained and an agent never resolves an include at
+runtime. The action is decided by comparing the expanded text, so editing a
+shared block redeploys without a version bump.
 
 | Skill | Produces |
 |-------|----------|
@@ -404,7 +412,7 @@ compares to decide `up to date` vs `updated`.
 | `zoombie-transcribe-audio` | a transcript (+ SRT) via `zoombie transcribe` |
 | `zoombie-transcribe-video` | the whole chain via `zoombie pipeline` |
 | `zoombie-pdf-to-md` | Markdown (+ images) via `zoombie readpdf` |
-| `zoombie-summarize` | a 6-block `summary.md` in a named library folder |
+| `zoombie-summarize` | a 6-block `summary.md` in an item folder |
 
 `zoombie-pdf-to-md` converts a PDF to Markdown. Text PDFs need nothing extra;
 scanned PDFs use an opt-in Tesseract OCR fallback (`-Ocr`). It reuses the Python
@@ -414,13 +422,56 @@ scratch dir first, so the Cyrillic-path invariant holds for PyMuPDF exactly as i
 does for whisper.cpp.
 
 `zoombie-summarize` turns a transcript, a PDF-derived Markdown, or arbitrary text
-into a 6-block `summary.md` inside a named library folder
-(`<number> - <DD.MM.YYYY> - <title>`). It writes the prose itself; everything
-mechanical -- anchors, heading timestamps from the SRT, the regenerated block-4
-index, link repair and inline-image re-insertion -- is done by `zoombie
-postprocess`, so a re-run cannot drift. It offers to reindex the whole library
-with `zoombie index`, which rebuilds the library `README.md` from a deterministic
-scan of the item folders.
+into a 6-block `summary.md` inside an **item**. An item is a folder whose name is
+the user's own choice — it is never parsed — laid out as:
+
+```
+<item>/                  any name
+    summary.md           the document, at the root
+    <source media>       the video/audio/PDF, when kept
+    .data/               everything derived
+        img/             figures + manifest.json + README.md
+        transcript.txt, transcript.srt, source.json, item.json
+```
+
+The item's `number`, `date` and `title` live in `.data/item.json`, not in the
+folder name, so a library can use whatever naming its owner prefers. `zoombie
+items` measures that naming and reports what the directory already does — the
+convention, its confidence, the sample count and the next number — so naming a new
+item follows the directory's own convention and falls back to
+`<DD.MM.YYYY> - <title>` only when there is no evidence. Block 6 is a **verbatim
+copy** of the source with recognition artefacts cleaned out, not a recap, and its
+heading says so. `zoombie migrate` moves a pre-item library onto the layout, dry
+run by default.
+
+It writes the prose itself; everything mechanical -- anchors, heading timestamps
+from the SRT, the regenerated block-4 index, link repair and inline-image
+re-insertion -- is done by `zoombie postprocess`, so a re-run cannot drift. It
+offers to reindex the whole library with `zoombie index`, which rebuilds the
+library `README.md` from the same deterministic scan the `items` command uses.
+
+| Command | Does |
+|---------|------|
+| `zoombie items` | scan a workspace for items; one JSON line, read-only |
+| `zoombie items -Depth N` | how many levels below the root to search; `1` is the default |
+| `zoombie items -Recurse` | alias for `-Depth 2`: also look inside non-item subfolders |
+| `zoombie index` | render the library `README.md` from the same scan |
+| `zoombie migrate` | move a library onto the `.data/` item layout |
+| `zoombie postprocess` | the mechanical passes over a `summary.md` |
+| `zoombie verify` | self-check a tree; advisories are reported but do not fail it |
+
+**Depth.** A scan reads one level below the root by default, because a library is a
+folder of items. `-Depth N` widens it: each level of non-item folder between the
+root and an item costs one, so `a/b/item` needs `-Depth 3`. `-Recurse` is an alias
+for `-Depth 2`. A directory that is itself an item is never descended into — its
+`.data/` is its internals, not a nested workspace — and every item found below the
+root carries a `relative` path, so a caller never has to rebuild one.
+
+The confidence in the naming verdict is capped to `weak` unless the items are at
+least half of the folders measured, because a directory of ordinary source folders
+is "plainly named" too: without the cap, `items -Root .` on a repository with no
+items at all would report a strong convention and propose names for a folder that
+holds none.
 
 ## Hacking
 
@@ -449,9 +500,15 @@ scan of the item folders.
   path and always pulls the published repo.
 - Bump `SKILL_VERSION` in [`__init__.py`](scripts/zoombie/__init__.py) when skill
   content changes, so deployment can tell an installed skill is out of date. It is
-  currently `4.3.0`; every `SKILL.md` carries the same value in
+  currently `4.5.0`; every `SKILL.md` carries the same value in
   `cvrm-zoombie-version`, inside the first 12 lines — `read_marker` reads only the
   front matter, so a marker that drifts below it reads as unowned.
+- **A comment must earn its place.** Keep one that prevents a realistic future
+  regression or explains a non-obvious constraint (why a `\\?\` path must never
+  reach JSON, why a bare `customModes:` is not an empty list). Delete history:
+  what the code used to be, what it replaces, and any rationale that is already
+  in this README. The reader is often an agent paying per token, and it cannot
+  act on either.
 - The PDF dependencies are installed with `pip install --user`, matching the
   comment in [`requirements-pdf.txt`](scripts/requirements-pdf.txt). pip also
   writes console launchers into `%APPDATA%\Python\<ver>\Scripts`, which this

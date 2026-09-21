@@ -60,9 +60,14 @@ class Request:
     source_title: str | None = None
     source_id: str | None = None
     source_kind: str = "video"
-    # False when the caller deletes the media after transcribing (pipeline's
-    # default), which is exactly the case the sidecar exists for.
+    # True when the caller RETAINED the media beside the transcript -- the item
+    # contract's normal case. False stays valid and meaningful: a URL-only item, or
+    # a media name too long to place. The sidecar exists so that either state is
+    # legible without the file.
     source_kept: bool = False
+    # Name of the media file when it WAS retained, so a reader can find it without
+    # globbing the item folder for a media extension.
+    source_file: str | None = None
 
 
 @dataclass
@@ -515,8 +520,10 @@ def source_metadata(request: Request, report: Report) -> dict:
         "realtimeFactor": report.realtime_factor,
         "toolchainVersion": SKILL_VERSION,
         "createdAt": process.utc_now_iso(),
-        # The explicit record of whether the media this came from still exists.
+        # The explicit record of whether the media this came from still exists,
+        # and its name when it does.
         "sourceKept": request.source_kept,
+        "sourceFile": request.source_file,
     }
 
 

@@ -1,6 +1,6 @@
 ---
 name: zoombie-transcribe-video
-cvrm-zoombie-version: 4.3.0
+cvrm-zoombie-version: 4.5.0
 description: End-to-end pipeline that turns a video file or a video URL into SOURCE material - a TXT transcript, an SRT subtitle track and a .source.json origin sidecar - by chaining the zoombie download, extract and transcribe stages in one CLI call. Use when the user says things like transcribe this video, transcribe this link, or give me a transcript of this recording. It deliberately writes no summary and no readable document; zoombie-summarize produces those. Collects every output-path confirmation up front in one pass.
 ---
 
@@ -47,17 +47,8 @@ In the confirmed output folder, one `pipeline` call writes:
 
 ## Run this, nothing else
 
-Resolve the CLI first. It normally lives under the user profile, but on a
-machine whose user name is not ASCII the toolchain is installed under
-`%PUBLIC%` instead (whisper.cpp breaks on non-ASCII paths), so check both:
-
-```powershell
-$cli = @(
-    "$env:USERPROFILE\zoombie-env\bin\zoombie\zoombie.cmd",
-    "$env:PUBLIC\zoombie-env\bin\zoombie\zoombie.cmd"
-) | Where-Object { Test-Path $_ } | Select-Object -First 1
-if (-not $cli) { throw "zoombie CLI not found. Run the zoombie bootstrap first: irm https://raw.githubusercontent.com/carnivorum/zoombie/main/scripts/bootstrap.ps1 | iex  (or scripts\bootstrap.cmd from a checkout)." }
-```
+<!-- zoombie:include cli-resolve -->
+<!-- /zoombie:include -->
 
 Then call it — this is the only command this skill needs:
 
@@ -69,15 +60,13 @@ There is no `-Format` here: the pipeline's audio is always a 16 kHz mono WAV,
 because that is the only thing whisper.cpp consumes. `-Format` belongs to
 `download` and `extract`.
 
-If the installed CLI is missing entirely, fall back to the repo copy:
+<!-- zoombie:include repo-fallback -->
+<!-- /zoombie:include -->
 
-```powershell
-cd "<repo>\scripts"
-python -m zoombie pipeline -Source "<url-or-file>" -Output "<confirmed-basename>"
-```
+<!-- zoombie:include json-contract -->
+<!-- /zoombie:include -->
 
-The CLI prints one JSON line: `{ ok, action, data, error }`. Read
-`data.artifacts.txt.path`, `data.artifacts.srt.path` and
+Read `data.artifacts.txt.path`, `data.artifacts.srt.path` and
 `data.artifacts.sidecar.path` (each with its own `size`), plus `data.outputBase`.
 `data.artifacts.srt` is `null` when `-NoSrt` suppressed it.
 
@@ -148,5 +137,6 @@ too because the audio is written to ASCII before whisper sees it.
   abandoned GPU attempt before a CPU retry.
 - Never delete a user-supplied local source file. Never overwrite without
   asking.
-- Shell: any. The launcher is a `.cmd` shim, so it works from `cmd.exe`,
-  PowerShell or a plain process spawn without a wrapper.
+
+<!-- zoombie:include shell-note -->
+<!-- /zoombie:include -->

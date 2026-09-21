@@ -6,9 +6,8 @@ Every function is idempotent and honours the three modes via :class:`Modes`:
 * ``dry_run`` - report what would be done, write nothing
 * apply       - the default
 
-That single mode object replaces the PowerShell ``$script:DryRun`` /
-``$script:Check`` / ``$script:Force`` globals plus the ``Test-WriteAllowed``
-helper, so the decision is explicit at every write site.
+The mode is carried in one object, so the write decision is explicit at every
+write site.
 """
 
 from __future__ import annotations

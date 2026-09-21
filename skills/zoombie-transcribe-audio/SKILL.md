@@ -1,6 +1,6 @@
 ---
 name: zoombie-transcribe-audio
-cvrm-zoombie-version: 4.3.0
+cvrm-zoombie-version: 4.5.0
 description: Transcribe an audio file into SOURCE material - a TXT transcript, an SRT subtitle track and a .source.json origin sidecar - using a local whisper.cpp binary with a CUDA/Vulkan/CPU backend. Use when the user wants a speech-to-text transcript, subtitles, or SRT/TXT output for a recording. It deliberately writes no summary and no readable document; zoombie-summarize produces those. Always inspects the project, proposes transcript output paths, and confirms the destination before writing anything.
 ---
 
@@ -44,17 +44,8 @@ In the confirmed output folder, one `transcribe` call writes:
 
 ## Run this, nothing else
 
-Resolve the CLI first. It normally lives under the user profile, but on a
-machine whose user name is not ASCII the toolchain is installed under
-`%PUBLIC%` instead (whisper.cpp breaks on non-ASCII paths), so check both:
-
-```powershell
-$cli = @(
-    "$env:USERPROFILE\zoombie-env\bin\zoombie\zoombie.cmd",
-    "$env:PUBLIC\zoombie-env\bin\zoombie\zoombie.cmd"
-) | Where-Object { Test-Path $_ } | Select-Object -First 1
-if (-not $cli) { throw "zoombie CLI not found. Run the zoombie bootstrap first: irm https://raw.githubusercontent.com/carnivorum/zoombie/main/scripts/bootstrap.ps1 | iex  (or scripts\bootstrap.cmd from a checkout)." }
-```
+<!-- zoombie:include cli-resolve -->
+<!-- /zoombie:include -->
 
 Then call it — this is the only command this skill needs:
 
@@ -66,15 +57,13 @@ Then call it — this is the only command this skill needs:
 machine whose GPU is configured and usable. You should need neither normally —
 see the GPU policy below.
 
-If the installed CLI is missing entirely, fall back to the repo copy:
+<!-- zoombie:include repo-fallback -->
+<!-- /zoombie:include -->
 
-```powershell
-cd "<repo>\scripts"
-python -m zoombie transcribe -Source "<audio>" -Output "<confirmed-basename>"
-```
+<!-- zoombie:include json-contract -->
+<!-- /zoombie:include -->
 
-The CLI prints one JSON line: `{ ok, action, data, error }`. Read
-`data.artifacts.txt.path`, `data.artifacts.srt.path` and
+Read `data.artifacts.txt.path`, `data.artifacts.srt.path` and
 `data.artifacts.sidecar.path` (each with its own `size`), plus `data.outputBase`.
 `data.artifacts.srt` is `null` when `-NoSrt` suppressed it. Do **not**
 hand-assemble a `whisper-cli` command.
@@ -135,5 +124,6 @@ do anything special — just pass the paths the user confirmed.
   `false`, GPU use is unproven: report that plainly, and pass `-StrictGpu` on a
   re-run to make it a hard failure. `gpuAttemptWallMs` is the time wasted by an
   abandoned GPU attempt before a CPU retry.
-- Shell: any. The launcher is a `.cmd` shim, so it works from `cmd.exe`,
-  PowerShell or a plain process spawn without a wrapper.
+
+<!-- zoombie:include shell-note -->
+<!-- /zoombie:include -->

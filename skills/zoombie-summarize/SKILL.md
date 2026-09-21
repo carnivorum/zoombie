@@ -1,7 +1,7 @@
 ---
 name: zoombie-summarize
-cvrm-zoombie-version: 4.3.0
-description: Turn SOURCE material into a readable 6-block summary.md inside a named library folder - a transcript, a PDF-derived Markdown, or arbitrary text. Use when the user wants a summary, notes, a digest, a write-up, or a readable document from something they already have. You write the prose yourself; the mechanical passes (anchors, heading timestamps from the SRT, the regenerated table of contents, link encoding, image re-insertion) are done by zoombie postprocess, so a re-run cannot drift.
+cvrm-zoombie-version: 4.5.0
+description: Turn SOURCE material into a readable 6-block summary.md inside an item folder - a transcript, a PDF-derived Markdown, or arbitrary text. Use when the user wants a summary, notes, a digest, a write-up, or a readable document from something they already have. You write the prose yourself; the mechanical passes (anchors, heading timestamps from the SRT, the regenerated table of contents, link encoding, image re-insertion) are done by zoombie postprocess, so a re-run cannot drift.
 ---
 
 # Skill: zoombie-summarize
@@ -26,7 +26,31 @@ A `summary.md` is exactly six `##` sections, numbered:
 | 3 | Short summary | you, optionally ending with a criticism sub-block |
 | 4 | Table of contents | **the CLI** — regenerated every run |
 | 5 | Related articles | you + the CLI's link repair |
-| 6 | Full content, with `###` subheadings | you write the headings and prose; **the CLI adds the anchors and timestamps** |
+| 6 | **The source text, verbatim** (a copy, not a recap), with `###` subheadings | you write the headings and prose; **the CLI adds the anchors and timestamps** |
+
+**Block 6 is a COPY of the source, not a summary of it.** It carries the source
+text itself, with recognition artefacts cleaned out -- filler, duplicated cues and
+machine noise removed, punctuation restored -- and nothing condensed, paraphrased
+or re-ordered. A reader must be able to treat it as the source.
+
+**The heading must SAY so**, because nothing else in the file does. This is not
+cosmetic: a task on another machine read block 6 as a recap and treated a verbatim
+copy as a second-hand digest, precisely because the heading was the only signal and
+it did not give one. Use a heading that names the copy, in the document's language:
+
+```markdown
+## 6. Полный текст источника (копия, очищенная от артефактов распознавания)
+```
+
+or, in English:
+
+```markdown
+## 6. Source text - verbatim copy, cleaned of recognition artifacts
+```
+
+`verify` reports a summary whose block-6 heading does not declare itself a copy.
+The pass itself is unaffected -- block 6 is located by its NUMBER, not its title --
+so the wording is yours as long as it says what the block is.
 
 **The passes address sections by NUMBER, not by title.** `## 4.` is matched as
 `^##\s*4\.`, so a title in any language is safe and rephrasing it cannot break
@@ -46,8 +70,11 @@ used by this repo's own tests are the convention:
 
 ## 4. Содержание
 ## 5. Связанные статьи
-## 6. Полное содержание транскрипта
+## 6. Полный текст источника (копия, очищенная от артефактов распознавания)
 ```
+
+(The Russian titles are the convention this repo's own tests use; the numbering is
+what matters to the passes, and block 6's title must declare the copy.)
 
 ### The criticism sub-block (block 3)
 
@@ -79,7 +106,7 @@ criticise", because in a library document that line is pure noise.
 3. Regenerates block 4 as an indented bullet index linking `#s-N`.
 4. Percent-encodes link destinations and de-brackets link labels.
 5. For a PDF-derived document, strips previously inserted images and re-inserts
-   them from `img/manifest.json`.
+   them from `.data/img/manifest.json`.
 6. Collapses blank runs and ensures exactly one trailing newline.
 
 Each pass works on a *range* rebuilt from the document, never by appending, so
@@ -88,30 +115,25 @@ acceptance criterion, and it is why re-running is always safe.
 
 ## Run this, nothing else
 
-Resolve the CLI first. It normally lives under the user profile, but on a
-machine whose user name is not ASCII the toolchain is installed under
-`%PUBLIC%` instead, so check both:
-
-```powershell
-$cli = @(
-    "$env:USERPROFILE\zoombie-env\bin\zoombie\zoombie.cmd",
-    "$env:PUBLIC\zoombie-env\bin\zoombie\zoombie.cmd"
-) | Where-Object { Test-Path $_ } | Select-Object -First 1
-if (-not $cli) { throw "zoombie CLI not found. Run the zoombie bootstrap first: irm https://raw.githubusercontent.com/carnivorum/zoombie/main/scripts/bootstrap.ps1 | iex  (or scripts\bootstrap.cmd from a checkout)." }
-```
+<!-- zoombie:include cli-resolve -->
+<!-- /zoombie:include -->
 
 Then the mechanical pass — **dry run by default, and `-Apply` is what writes**:
 
 ```powershell
 # report what would change, write nothing
-& $cli postprocess -Md "<item>\summary.md" -Srt "<base>.srt" -ImageDir "<item>\img"
+& $cli postprocess -Md "<item>\summary.md"
 
 # write it (byte-identical on a second run)
-& $cli postprocess -Md "<item>\summary.md" -Srt "<base>.srt" -ImageDir "<item>\img" -Apply
+& $cli postprocess -Md "<item>\summary.md" -Apply
 
 # a whole folder instead of one file (add -Recurse to walk subfolders)
 & $cli postprocess -Dir "<library>" -Apply
 ```
+
+`-Srt` and `-ImageDir` are optional: the default is the item layout, so the
+sibling `.data/transcript.srt` and the `.data/img/` manifest are found for you.
+Pass them only to override.
 
 Rebuild the library index from a deterministic scan of the item folders:
 
@@ -127,8 +149,10 @@ broken image references):
 & $cli verify -Dir "<library>"
 ```
 
-The CLI prints one JSON line: `{ ok, action, data, error }`. Read `data` for what
-changed. Do **not** hand-assemble a Python command.
+<!-- zoombie:include json-contract -->
+<!-- /zoombie:include -->
+
+Read `data` for what changed. Do **not** hand-assemble a Python command.
 
 ## Procedure
 
@@ -137,9 +161,36 @@ changed. Do **not** hand-assemble a Python command.
    a `<base>.srt` (timing) and a `<base>.source.json` (origin) from transcribe,
    or a `<base>.md` plus an image directory from `readpdf`.
 
-2. **Confirm the destination.** Items live in a named library folder:
-   `<number> - <DD.MM.YYYY> - <title>`. Propose 2-4 concrete options and wait for
-   the user to choose. Never invent the number or silently pick a date.
+2. **Confirm the destination - and MEASURE before you propose.** An item is a
+   folder of ANY name; the name carries no meaning to the toolchain and is never
+   parsed, so you never have to fit a format. Its shape is fixed:
+
+   ```
+   <item>/                  ← any name; the user's choice
+       summary.md           ← the document you write
+       <source media>       ← the video/audio/PDF, when kept
+       .data/               ← derived material, never hand-edited
+           img/             ← figures + manifest.json + README.md
+           transcript.txt, transcript.srt, source.json, item.json
+   ```
+
+   Read what the workspace already does instead of imposing a convention:
+
+   ```powershell
+   # what exists here, what number is next, and which naming the folder uses
+   & $cli items -Root "<target>" -Title "<the item's title>"
+   ```
+
+   `items` reports the naming convention it MEASURED in that directory, with a
+   confidence and a sample count, and `-Title` renders concrete name proposals
+   from it. Follow the directory's own convention. With no evidence at all, the
+   recommendation is `<DD.MM.YYYY> - <title>`; say that is the default. Then
+   present the proposals and wait for the user to choose.
+
+   **Use the number you were given.** `nextNumber` comes from the scan, so copy
+   it. Never invent a number, never write a placeholder such as `NN`, and never
+   silently pick a date. A folder name is free -- but a number the toolchain
+   assigned is not yours to guess.
 
 3. **Write the prose** for the blocks you own: 1, 2, 3, and the block-6 headings
    with their content. Put the origin link in block 2 — for a video whose local
@@ -159,9 +210,13 @@ changed. Do **not** hand-assemble a Python command.
   placement are wrong, fix the *input* or the *prose* and run `postprocess`
   again. Hand-patching block 4 or an `<a id>` is the one way to break the
   idempotency guarantee.
-- **One document per item.** The item folder holds `summary.md` and, when there
-  are images, `img/`. `img/README.md` and `img/manifest.json` are sidecars, not
-  documents.
+- **One document per item.** The item folder holds `summary.md`, the source media
+  when it was kept, and `.data/`. Everything under `.data/` -- `img/` with its
+  `README.md` and `manifest.json`, the transcript, `item.json` -- is a sidecar or
+  derived material, not a document. Never hand-edit it.
+- **The name is the user's.** Do not rename a folder to satisfy a convention, and
+  do not read meaning from one: the item's number, date and title live in
+  `.data/item.json`.
 - **Dry run first** when the document already exists, so you can show the user
   the diff before it is written.
 - **Do not re-transcribe or re-convert.** If the source material is missing, hand

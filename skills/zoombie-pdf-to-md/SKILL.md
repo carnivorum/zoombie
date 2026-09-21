@@ -1,6 +1,6 @@
 ---
 name: zoombie-pdf-to-md
-cvrm-zoombie-version: 4.3.0
+cvrm-zoombie-version: 4.5.0
 description: Convert a PDF into SOURCE material - a faithful Markdown rendering plus extracted images with placement metadata - using PyMuPDF4LLM, with an optional Tesseract OCR fallback for scanned pages. Use when the user wants to extract text from a PDF, turn a PDF into Markdown, read a PDF document, or prepare a PDF for docs. It deliberately does not summarise or restructure the document; zoombie-summarize does that. Always inspects the project first, proposes candidate output paths, and confirms with the user before writing anything.
 ---
 
@@ -23,8 +23,8 @@ In the confirmed output folder, one `readpdf` call writes:
 | Artifact | Content |
 |----------|---------|
 | `<base>.md` | a faithful markdown rendering of the PDF |
-| `<base>.images\` (or the `-ImageDir` target) | extracted PNGs named `001 - p01.png`, in reading order |
-| `<manifest.json>` inside the image dir | the placement metadata |
+| `<item>\.data\img\` (the default), or the `-ImageDir` target | extracted PNGs named `001 - p01.png`, in reading order |
+| `manifest.json` inside the image dir | the placement metadata |
 | `<README.md>` inside the image dir | the same data as a human-readable table |
 
 - Images are collected from what is actually **drawn** on the page
@@ -39,18 +39,8 @@ In the confirmed output folder, one `readpdf` call writes:
 
 ## Run this, nothing else
 
-Resolve the CLI first. It normally lives under the user profile, but on a
-machine whose user name is not ASCII the toolchain is installed under
-`%PUBLIC%` instead (the native libraries break on non-ASCII paths), so check
-both:
-
-```powershell
-$cli = @(
-    "$env:USERPROFILE\zoombie-env\bin\zoombie\zoombie.cmd",
-    "$env:PUBLIC\zoombie-env\bin\zoombie\zoombie.cmd"
-) | Where-Object { Test-Path $_ } | Select-Object -First 1
-if (-not $cli) { throw "zoombie CLI not found. Run the zoombie bootstrap first: irm https://raw.githubusercontent.com/carnivorum/zoombie/main/scripts/bootstrap.ps1 | iex  (or scripts\bootstrap.cmd from a checkout)." }
-```
+<!-- zoombie:include cli-resolve -->
+<!-- /zoombie:include -->
 
 Then call it — this is the only command this skill needs:
 
@@ -58,18 +48,16 @@ Then call it — this is the only command this skill needs:
 & $cli readpdf -Source "<pdf>" -Output "<confirmed-basename>" [-Ocr] [-Images] [-ImagesOnly] [-ImageDir "<dir>"] [-MinPx N] [-MinPt N] [-Pages "1-5,8"] [-Force]
 ```
 
-If the installed CLI is missing entirely, fall back to the repo copy:
+<!-- zoombie:include repo-fallback -->
+<!-- /zoombie:include -->
 
-```powershell
-cd "<repo>\scripts"
-python -m zoombie readpdf -Source "<pdf>" -Output "<confirmed-basename>"
-```
+<!-- zoombie:include json-contract -->
+<!-- /zoombie:include -->
 
-The CLI prints one JSON line: `{ ok, action, data, error }`. Read `data.output`
-for the `.md` path, `data.artifacts.images.path` for the image directory and
-`data.artifacts.images.manifest` for the sidecar, and `data.pages`,
-`data.ocrUsed`, `data.keptScannedPages` for what happened. Do **not**
-hand-assemble a Python command.
+Read `data.output` for the `.md` path, `data.artifacts.images.path` for the
+image directory and `data.artifacts.images.manifest` for the sidecar, and
+`data.pages`, `data.ocrUsed`, `data.keptScannedPages` for what happened.
+Do **not** hand-assemble a Python command.
 
 ## Images, precisely
 
@@ -77,10 +65,14 @@ hand-assemble a Python command.
 |------|--------|
 | `-Images` | extract images (and render the Markdown) |
 | `-ImagesOnly` | extract images and the sidecar only; render no Markdown |
-| `-ImageDir <dir>` | explicit image directory (default `<base>.images`); implies extraction |
+| `-ImageDir <dir>` | explicit image directory (default: the item layout `<item>\.data\img`); implies extraction |
 | `-MinPx N` | drop images below this pixel size (default 64) |
 | `-MinPt N` | drop images below this on-page size in points (default 30) |
 
+- The default `-ImageDir` is the **item layout** (`<item>\.data\img`), so the
+  figures land where the summary that will reference them expects them, rather
+  than beside the PDF's own basename. Pass `-ImageDir` explicitly for a
+  standalone conversion outside an item.
 - `-ImagesOnly` is the library-friendly mode: it **skips markdown entirely** and
   therefore does **not** apply the `<base>.md` exists guard, so it can be run
   again after the document already exists. Its result carries
@@ -163,5 +155,6 @@ document it is writing.
   drops are never silent: the run logs how many images were kept and how many
   were skipped, and `data.artifacts.images.skipped` carries the skipped count
   (the reasons are `glyph`, `xref0`, `duplicate`, `error` or `scanned-page`).
-- Shell: any. The launcher is a `.cmd` shim, so it works from `cmd.exe`,
-  PowerShell or a plain process spawn without a wrapper.
+
+<!-- zoombie:include shell-note -->
+<!-- /zoombie:include -->

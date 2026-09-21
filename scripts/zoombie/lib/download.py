@@ -1,9 +1,8 @@
 """File download, with resume and integrity checking.
 
-The PowerShell version shelled out to ``curl.exe`` per file and had no resume, so
-a failed 1.6 GB model fetch restarted from zero. This uses ``urllib`` from the
-standard library, which needs no external tool, and adds resume support for the
-large, resumable artifacts (models, archives).
+``urllib`` from the standard library, so no external tool is needed, with resume
+support for the large resumable artifacts (models, archives) - a failed 1.6 GB
+model fetch continues instead of restarting.
 """
 
 from __future__ import annotations

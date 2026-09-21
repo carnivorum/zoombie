@@ -1,16 +1,15 @@
 """The single entry point: parse, dispatch, emit one JSON line.
 
-Contract (unchanged from the PowerShell CLI, so no caller has to change):
+Contract:
 
 * stdout carries exactly one JSON line: ``{ok, action, error, data, timestamp}``
 * stderr carries all human-readable progress
 * exit code 0 on success, 1 on failure
 
-Option names keep their PowerShell spelling (``-Source``, ``-Output``, ...),
-including ``-Source`` rather than ``-Input`` even though the reason for that
-choice no longer applies. Renaming would churn every skill and both docs for no
-benefit; lowercase aliases are accepted too, so both ``-Source`` and ``--source``
-work.
+Option names use the single-dash capitalised spelling (``-Source``, ``-Output``),
+with conventional lowercase aliases accepted too, so both ``-Source`` and
+``--source`` work. Renaming them would churn every skill and both docs for no
+benefit.
 """
 
 from __future__ import annotations
@@ -143,7 +142,10 @@ def build_parser() -> argparse.ArgumentParser:
     )
     readpdf.add_argument(
         "-ImageDir", "--image-dir", dest="image_dir", default=None,
-        help="explicit image directory (default: <base>.images)",
+        help=(
+            "explicit image directory (default: <item>/.data/img when the output "
+            "folder is an item, else <base>.images)"
+        ),
     )
     readpdf.add_argument(
         "-MinPx", "--min-px", dest="min_px", type=int, default=pdf.DEFAULT_MIN_PX,
@@ -215,6 +217,56 @@ def build_parser() -> argparse.ArgumentParser:
         "-Apply", "--apply", action="store_true", help="write the index (default: dry run)"
     )
 
+    # --- items ------------------------------------------------------------
+    # Enumerate the items in a workspace. Defaults to the CURRENT directory
+    # because that is what an agent has in hand, and returns the whole picture
+    # in one JSON line so learning "what summaries exist here" costs one call
+    # rather than a directory listing plus a document read per item.
+    items = subparsers.add_parser(
+        "items", help="scan a workspace for items and report them compactly"
+    )
+    items.add_argument(
+        "-Root", "--root", dest="root", default=None,
+        help="workspace root (default: the current directory)",
+    )
+    # ONE control for depth. ``default=None`` is deliberate: it is what makes "the
+    # caller did not ask" distinguishable from an explicit ``-Depth 1``, and that
+    # distinction is what the previous shape lacked -- a default baked into argparse
+    # meant the flag was ignored unless a second flag was also given.
+    items.add_argument(
+        "-Depth", "--depth", dest="depth", type=int, default=None,
+        help="levels below the root to search; 1 = direct children only (default: 1)",
+    )
+    items.add_argument(
+        "-Recurse", "--recurse", action="store_true",
+        help="alias for -Depth 2: also look inside non-item subfolders",
+    )
+    items.add_argument(
+        "-Title", "--title", dest="title", default=None,
+        help="propose folder names for a new item with this title ('|' separates)",
+    )
+    items.add_argument(
+        "-Date", "--date", dest="date", default=None,
+        help="ISO date for a proposed name (default: leave the date out)",
+    )
+    items.add_argument("-Json", "--json", action="store_true", help="quiet; the scan stays in data")
+
+    # --- migrate ----------------------------------------------------------
+    # Moves a pre-item-model library onto <item>/.data/. Dry run by default,
+    # like index and postprocess, and for a stronger reason: this one moves the
+    # user's files.
+    migrate = subparsers.add_parser(
+        "migrate", help="move a library onto the .data/ item layout (dry run by default)"
+    )
+    migrate.add_argument(
+        "-Dir", "--dir", dest="dir", required=True, help="the library root folder"
+    )
+    migrate.add_argument("-Json", "--json", action="store_true", help="quiet; the plan stays in data")
+    migrate.add_argument(
+        "-Apply", "--apply", action="store_true",
+        help="perform the moves (default: dry run)",
+    )
+
     # --- modes ------------------------------------------------------------
     # Redeploys the Zoombie role into the global custom_modes.yaml without a full
     # setup, so a prompt edit can ship on its own. Dry run by default for the same
@@ -273,6 +325,12 @@ def _dispatch(args: argparse.Namespace) -> Outcome:
     if args.command == "index":
         from .commands import library
         return library.run(args)
+    if args.command == "items":
+        from .commands import items as items_cmd
+        return items_cmd.run(args)
+    if args.command == "migrate":
+        from .commands import migrate
+        return migrate.run(args)
     if args.command == "modes":
         from .commands import modes
         return modes.run(args)

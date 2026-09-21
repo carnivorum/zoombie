@@ -8,9 +8,9 @@ re-reads on every run. The package is deliberately split by concern:
     zoombie.lib.*          shared helpers (paths, tools, whisper, cublas, ...)
     zoombie.install.*      the installer/updater
 
-Naming rules for this package (the PowerShell original was far too verbose):
-no ``Zoombie`` in any symbol, no ``Verb-Noun`` pairs, short imperative function
-names, and one module per concern so the module name carries the context.
+Naming rules: no ``Zoombie`` in any symbol, no ``Verb-Noun`` pairs, short
+imperative function names, and one module per concern so the module name carries
+the context.
 """
 
 from __future__ import annotations
@@ -20,7 +20,10 @@ from __future__ import annotations
 # NOTE: read_marker() reads this from the FIRST 12 LINES of each SKILL.md, so a
 # skill file whose marker line drifted below the front matter silently reads as
 # unowned. Keep the marker inside the front matter.
-SKILL_VERSION = "4.3.0"
+#
+# 4.5.0: skills share their boilerplate through skills/_shared/, expanded at
+# deploy time, and the role prompt is compressed.
+SKILL_VERSION = "4.5.0"
 
 # The version marker written into every SKILL.md we own, to prove ownership.
 MARKER_KEY = "cvrm-zoombie-version"
@@ -33,6 +36,8 @@ MARKER_KEY = "cvrm-zoombie-version"
 # ``lib/modes.py``, and this value is only ever written to env.json. Editing the
 # prompts therefore does NOT churn the five SKILL.md markers the way sharing one
 # number would, which is why the two are kept apart.
-ROLE_VERSION = "1.0.0"
+# 1.2.0: the prompt drops what zoombie-summarize already owns and states the
+# not-a-coder rule once instead of three times.
+ROLE_VERSION = "1.2.0"
 
 __all__ = ["SKILL_VERSION", "MARKER_KEY", "ROLE_VERSION"]

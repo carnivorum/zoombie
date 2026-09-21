@@ -1,6 +1,6 @@
 ---
 name: zoombie-download-video
-cvrm-zoombie-version: 4.3.0
+cvrm-zoombie-version: 4.5.0
 description: Download a video (or its audio only) from a URL using yt-dlp, supporting YouTube and other yt-dlp-compatible sites such as RuTube, Vimeo, Twitter/X, Twitch and TikTok. Use when the user provides a link and asks to download, save, grab, or fetch a video, or when a later step needs a local copy of a remote video. Always inspects the project first, proposes candidate destinations, and confirms where to save before downloading anything.
 ---
 
@@ -11,17 +11,8 @@ decides *where* to save and asks the user to confirm.
 
 ## Run this, nothing else
 
-Resolve the CLI first. It normally lives under the user profile, but on a
-machine whose user name is not ASCII the toolchain is installed under
-`%PUBLIC%` instead (whisper.cpp breaks on non-ASCII paths), so check both:
-
-```powershell
-$cli = @(
-    "$env:USERPROFILE\zoombie-env\bin\zoombie\zoombie.cmd",
-    "$env:PUBLIC\zoombie-env\bin\zoombie\zoombie.cmd"
-) | Where-Object { Test-Path $_ } | Select-Object -First 1
-if (-not $cli) { throw "zoombie CLI not found. Run the zoombie bootstrap first: irm https://raw.githubusercontent.com/carnivorum/zoombie/main/scripts/bootstrap.ps1 | iex  (or scripts\bootstrap.cmd from a checkout)." }
-```
+<!-- zoombie:include cli-resolve -->
+<!-- /zoombie:include -->
 
 Then call it — this is the only command this skill needs:
 
@@ -29,15 +20,14 @@ Then call it — this is the only command this skill needs:
 & $cli download -Source "<url>" -DownloadDir "<confirmed-dir>" [-AudioOnly] [-Format wav] [-Force]
 ```
 
-If the installed CLI is missing entirely, fall back to the repo copy:
+<!-- zoombie:include repo-fallback -->
+<!-- /zoombie:include -->
 
-```powershell
-cd "<repo>\scripts"
-python -m zoombie download -Source "<url>" -DownloadDir "<confirmed-dir>"
-```
+<!-- zoombie:include json-contract -->
+<!-- /zoombie:include -->
 
-The CLI prints one JSON line: `{ ok, action, data, error }`. Read `data.file`
-for the saved path. Do **not** hand-assemble a `yt-dlp` command.
+Read `data.file` for the saved path. Do **not** hand-assemble a `yt-dlp`
+command.
 
 ## Procedure
 
@@ -69,5 +59,6 @@ for the saved path. Do **not** hand-assemble a `yt-dlp` command.
   is unsupported, the video is region-locked, or it needs cookies/auth.
 - `-AudioOnly` can convert straight to a whisper-ready 16 kHz mono WAV
   (`-Format wav`, the default), which is what the transcription stage wants.
-- Shell: any. The launcher is a `.cmd` shim, so it works from `cmd.exe`,
-  PowerShell or a plain process spawn without a wrapper.
+
+<!-- zoombie:include shell-note -->
+<!-- /zoombie:include -->

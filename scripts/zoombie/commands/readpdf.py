@@ -24,6 +24,7 @@ import json
 import os
 
 from ..cli import Outcome
+from ..item import paths as item_paths
 from ..lib import env as env_mod, paths, pdf, process
 from ..lib.errors import SetupRequiredError, ZoombieError
 
@@ -127,8 +128,31 @@ def run(args) -> Outcome:
     # that `readpdf -Source x.pdf -ImagesOnly` works with no second flag.
     want_images = bool(args.images or args.images_only or args.image_dir)
     images_dir = None
+    images_default_reason: str | None = None
     if want_images:
-        images_dir = paths.absolute(args.image_dir) if args.image_dir else f"{base}.images"
+        # An explicit -ImageDir always wins -- that is the escape hatch.
+        if args.image_dir:
+            images_dir = paths.absolute(args.image_dir)
+        else:
+            parent = os.path.dirname(base)
+            # Default to the ITEM layout -- ``<item>/.data/img`` -- because readpdf
+            # is the item producer: the figures it extracts belong to the summary
+            # written beside them, not to the PDF's own basename. That default is
+            # only right INSIDE an item, though: for a standalone conversion it
+            # would scatter a ``.data/img`` beside an unrelated folder that merely
+            # happens to be the PDF's parent. So the item layout is used only when
+            # the parent actually IS an item, and the historical ``<base>.images``
+            # is the fallback -- reported, because a caller wondering why the
+            # figures are not in ``.data/img`` must be able to read the reason.
+            if item_paths.is_item(parent):
+                images_dir = item_paths.image_dir(parent)
+                images_default_reason = "the output folder is an item"
+            else:
+                images_dir = f"{base}.images"
+                images_default_reason = (
+                    "the output folder is not an item, so the historical "
+                    "<base>.images was used instead of <item>/.data/img"
+                )
         # Slack covers the longest thing appended inside it: '<NNN> - pNN.png'.
         paths.assert_fits(images_dir, "The readpdf image directory", slack=16)
 
@@ -179,6 +203,7 @@ def run(args) -> Outcome:
                 "output": output_md,
                 "imagesOnly": bool(args.images_only),
                 "images": images_dir,
+                "imagesDefaultReason": images_default_reason,
                 "options": {
                     "ocr": options.ocr, "pages": options.pages,
                     "images": options.images_dir, "minPx": options.min_px,
@@ -217,6 +242,9 @@ def run(args) -> Outcome:
             "manifest": result.images_manifest
             and os.path.join(images_dir, os.path.basename(result.images_manifest)),
             "skipped": len(result.images_skipped),
+            # Why THIS directory was chosen: the item layout when the output
+            # folder is an item, the historical ``<base>.images`` when it is not.
+            "defaultReason": images_default_reason,
         }
 
     if not args.keep_work:

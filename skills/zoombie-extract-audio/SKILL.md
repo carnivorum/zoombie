@@ -1,6 +1,6 @@
 ---
 name: zoombie-extract-audio
-cvrm-zoombie-version: 4.3.0
+cvrm-zoombie-version: 4.5.0
 description: Extract the audio track from a video file into a whisper-ready WAV (or mp3/m4a/flac) using ffmpeg. Use when the user wants to pull audio out of a video or recording, prepare media for transcription, or convert to 16 kHz mono PCM. Always inspects the project first, proposes candidate output destinations, and confirms with the user before running ffmpeg or writing any file.
 ---
 
@@ -11,17 +11,8 @@ decides *where* to write and asks the user to confirm.
 
 ## Run this, nothing else
 
-Resolve the CLI first. It normally lives under the user profile, but on a
-machine whose user name is not ASCII the toolchain is installed under
-`%PUBLIC%` instead (whisper.cpp breaks on non-ASCII paths), so check both:
-
-```powershell
-$cli = @(
-    "$env:USERPROFILE\zoombie-env\bin\zoombie\zoombie.cmd",
-    "$env:PUBLIC\zoombie-env\bin\zoombie\zoombie.cmd"
-) | Where-Object { Test-Path $_ } | Select-Object -First 1
-if (-not $cli) { throw "zoombie CLI not found. Run the zoombie bootstrap first: irm https://raw.githubusercontent.com/carnivorum/zoombie/main/scripts/bootstrap.ps1 | iex  (or scripts\bootstrap.cmd from a checkout)." }
-```
+<!-- zoombie:include cli-resolve -->
+<!-- /zoombie:include -->
 
 Then call it — this is the only command this skill needs:
 
@@ -29,15 +20,14 @@ Then call it — this is the only command this skill needs:
 & $cli extract -Source "<video>" -Output "<confirmed-output>" [-Format wav] [-Force]
 ```
 
-If the installed CLI is missing entirely, fall back to the repo copy:
+<!-- zoombie:include repo-fallback -->
+<!-- /zoombie:include -->
 
-```powershell
-cd "<repo>\scripts"
-python -m zoombie extract -Source "<video>" -Output "<confirmed-output>"
-```
+<!-- zoombie:include json-contract -->
+<!-- /zoombie:include -->
 
-The CLI prints one JSON line: `{ ok, action, data, error }`. Read
-`data.output` and `data.size`. Do **not** hand-assemble an `ffmpeg` command.
+Read `data.output` and `data.size`. Do **not** hand-assemble an `ffmpeg`
+command.
 
 ## Procedure
 
@@ -64,5 +54,6 @@ The CLI prints one JSON line: `{ ok, action, data, error }`. Read
 - Supported formats: `wav` (default), `mp3`, `m4a`, `flac`. Warn the user that
   whisper.cpp performs best with 16 kHz mono WAV.
 - Never overwrite without asking; pass `-Force` only with the user's consent.
-- Shell: any. The launcher is a `.cmd` shim, so it works from `cmd.exe`,
-  PowerShell or a plain process spawn without a wrapper.
+
+<!-- zoombie:include shell-note -->
+<!-- /zoombie:include -->

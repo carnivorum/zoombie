@@ -18,6 +18,42 @@ from ..lib.errors import StepFailedError, ZoombieError
 URL_PATTERN = re.compile(r"^https?://", re.IGNORECASE)
 
 
+def _retain_source(video_path: str, output_base: str) -> str | None:
+    """Copy the source media beside the transcript; return where, or ``None``.
+
+    The item contract says the source sits at the item root next to ``summary.md``,
+    so this is a COPY and not a move: the download directory is still cleaned up
+    afterwards, and a failure to copy must not lose the original while the
+    transcription is already written.
+
+    Best effort by design. A media file name is content-controlled -- a video
+    title may be long, non-ASCII, or both -- so the destination can exceed the
+    Windows budget, and that must be a logged skip rather than a failed run whose
+    transcript is already on disk. The caller records what happened in
+    ``sourceKept``, so the absence is visible in the sidecar instead of silent.
+    """
+    if not paths.is_file(video_path):
+        return None
+
+    destination = os.path.join(os.path.dirname(output_base), os.path.basename(video_path))
+    try:
+        # Room for the extension and the Windows path budget; the NAME is not ours
+        # to shorten, so an over-long one is refused rather than truncated.
+        paths.assert_fits(destination, "The retained source path")
+    except Exception as exc:  # noqa: BLE001 - any budget/length refusal is a skip
+        process.log(f"  source not retained beside the transcript: {exc}", "warn")
+        return None
+
+    try:
+        paths.copy_file(video_path, destination)
+    except OSError as exc:
+        process.log(f"  source not retained beside the transcript: {exc}", "warn")
+        return None
+
+    process.log(f"  source retained: {destination}")
+    return destination
+
+
 def _download(environment: env_mod.Env, args, log_dir: str) -> tuple[str, str, ytdlp.Origin | None]:
     """Download the source URL. Returns ``(video_path, owned_dir, origin)``.
 
@@ -132,6 +168,17 @@ def run(args) -> Outcome:
             what="ffmpeg",
         )
 
+        # REQUIREMENT: the source media is kept, beside ``summary.md`` at the item
+        # root. This REVERSES the previous default, which deleted the download right
+        # after transcription and recorded ``sourceKept: false`` -- the very case the
+        # origin sidecar existed to survive.
+        #
+        # Retention is best effort, logged either way: a destination that cannot fit
+        # the Windows budget must not fail a run whose transcription succeeded, and the
+        # sidecar records what actually happened, so an item whose media was not kept
+        # stays well-formed.
+        kept_source = _retain_source(video_path, base)
+    
         request = stt.Request(
             audio_path=audio_out,
             output_base=base,
@@ -154,22 +201,21 @@ def run(args) -> Outcome:
             source_title=origin.title if origin else None,
             source_id=origin.id if origin else None,
             source_kind="video" if is_url else "audio",
-            # The media is removed below unless -KeepWork, and that is exactly what
-            # the sidecar exists to survive.
-            source_kept=bool(args.keep_work),
+            # True when the media was actually placed beside the transcript; read
+            # from what happened, not from what was requested.
+            source_kept=bool(kept_source),
+            source_file=os.path.basename(kept_source) if kept_source else None,
         )
         report = stt.transcribe(environment, request)
     finally:
-        # Remove the downloaded video (its transcript is the actual output), the
-        # temp download dir when we created it, and this stage's work dir with the
-        # intermediate audio.wav. whisper's own scratch was already cleaned inside
-        # stt.transcribe. Removal failures are reported, not fatal: a silent
-        # failure is how a download leak stays invisible.
-        if not args.keep_work:
-            if downloaded:
-                paths.remove_quietly(downloaded)
-            if owned_dl_dir:
-                paths.remove_quietly(owned_dl_dir, recursive=True)
-            paths.remove_quietly(work, recursive=True)
+        # Remove the DOWNLOAD FOLDER and the intermediate audio.wav. The media
+        # itself survives in the item when it was copied out, which is the change:
+        # only genuinely temporary material is cleaned up here. whisper's own
+        # scratch was already cleaned inside stt.transcribe, and the download dir
+        # goes even under -KeepWork, because -KeepWork now means "do not tidy the
+        # work dir", not "delete the video".
+        if owned_dl_dir:
+            paths.remove_quietly(owned_dl_dir, recursive=True)
+        paths.remove_quietly(work, recursive=True)
 
     return Outcome(ok=True, data=report.to_data())

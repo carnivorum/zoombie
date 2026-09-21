@@ -261,7 +261,7 @@ Versioning:
 
 - Every skill is namespaced `zoombie-*`, so its name can never collide with a
   foreign skill — deployment simply overwrites.
-- Each skill carries `cvrm-zoombie-version: 4.3.0`; on a re-run the version is
+- Each skill carries `cvrm-zoombie-version: 4.5.0`; on a re-run the version is
   compared and the skill is reported as `up to date` or `updated`. The marker must
   stay inside the first 12 lines of `SKILL.md`: the comparison reads only the
   front matter, so a marker pushed below it reads as unowned.
@@ -305,6 +305,44 @@ python -m zoombie modes -Apply     REM write it
 The target can be redirected with `ZOOMBIE_MODES_PATH`. If the file is not where
 the extension keeps it, or a workspace has its own `.roomodes`, that override is
 how to point the deploy at the right file.
+
+### The item model
+
+A produced `summary.md` lives in an **item**: a folder whose name is the user's own
+choice and is never parsed by the toolchain.
+
+```
+<item>/                  any name
+    summary.md           the document
+    <source media>       the video/audio/PDF, when kept
+    .data/               everything derived  (HIDDEN: dot-prefixed)
+        img/             figures + manifest.json + README.md
+        transcript.txt, transcript.srt, source.json, item.json
+```
+
+Two things are worth knowing before you go looking for files:
+
+- **`.data/` is hidden.** Explorer and a default `Get-ChildItem` do not show it, so
+  images and transcripts appear to be missing when they are not. Use
+  `Get-ChildItem -Force` or `dir /a`, or let `zoombie items` report what is there.
+- **The item's number and date are in `.data/item.json`**, not in the folder name.
+  An older library that predates the item layout still works and can be moved onto
+  it with `zoombie migrate` (dry run by default; `-Apply` to write). The migration
+  never renames a folder and never renames a file inside `img/`.
+
+To see what a workspace holds:
+
+```bat
+cd scripts
+python -m zoombie items                       REM the current directory, one level
+python -m zoombie items -Root "<folder>"      REM somewhere else
+python -m zoombie items -Title "<title>"      REM also propose names for a new item
+python -m zoombie items -Depth 2              REM also look one level further down
+```
+
+A scan reads one level below the root unless `-Depth` says otherwise; `-Recurse` is
+an alias for `-Depth 2`. An item's `.data/` is never descended into, so image
+directories never appear as folders the toolchain could not recognize.
 
 ---
 
@@ -422,7 +460,7 @@ cause and the fix rather than overstating the result.
 [ ] Installed backend matches the CURRENT hardware (`backendDetected`), not a sticky value from an earlier run
 [ ] Model downloaded and recorded in env.json
 [ ] CLI deployed to zoombie-env\bin\zoombie\zoombie.cmd, and the launcher works from ANY working directory
-[ ] Six zoombie-* skills deployed to %USERPROFILE%\.roo\skills\ with cvrm-zoombie-version 4.3.0
+[ ] Six zoombie-* skills deployed to %USERPROFILE%\.roo\skills\ with cvrm-zoombie-version 4.5.0
 [ ] The Zoombie role merged into the global custom_modes.yaml, only our entry replaced, and any hand-written mode in that file still intact
 [ ] A `.md` artifact can be written in the Zoombie role and a `.py` file is refused by its edit restriction
 [ ] No stray .roo\skills directory outside %USERPROFILE%

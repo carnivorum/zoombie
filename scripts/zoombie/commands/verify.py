@@ -35,12 +35,14 @@ import re
 from urllib.parse import unquote
 
 from ..cli import Outcome
+from ..item import paths as item_paths
 from ..lib import markdown as md, paths, process
 from ..lib.errors import ZoombieError
 from .postprocess import (
     ABSOLUTE_RE,
     SECTION2_RE,
     SECTION5_RE,
+    SECTION6_RE,
     iter_link_spans,
 )
 
@@ -51,9 +53,38 @@ KIND_MISSING_README = "missing-readme"
 KIND_DEAD_ANCHOR = "dead-anchor"
 KIND_DEAD_LINK = "dead-link"
 KIND_MISSING_SOURCE = "missing-source"
+KIND_SECTION6_UNDECLARED = "section6-not-declared"
 
-MANIFEST_NAME = "manifest.json"
-README_NAME = "README.md"
+# Problems are fatal by default: `verify` exit code 1 is a contract, and most of
+# what it reports (a dead anchor, a missing manifest) is a broken document. A check
+# that flags documents written BEFORE a convention existed is marked advisory, so
+# it informs without failing a tree that is otherwise sound.
+SEVERITY_ERROR = "error"
+SEVERITY_WARNING = "warning"
+
+MANIFEST_NAME = item_paths.MANIFEST_NAME
+README_NAME = item_paths.IMAGE_README_NAME
+IMAGE_DIR_NAME = item_paths.IMAGE_DIR_NAME
+DATA_DIR_NAME = item_paths.DATA_DIR_NAME
+
+# Block 6 is a VERBATIM COPY of the source with recognition artefacts cleaned out.
+# It is not a recap, a digest or a summary of a summary -- and a task on another
+# machine read it as exactly that, because the only thing distinguishing the two
+# was prose. So the heading must say which it is.
+#
+# Matched over the heading LINE only, and by a token that survives rephrasing, so
+# a natural title in either language passes. This is a lint, not a schema: it
+# cannot prove the body is a copy, only that the heading does not claim otherwise.
+DECLARATION_TOKENS = (
+    "копия",
+    "copy",
+    "verbatim",
+    "дословно",
+    "полный текст",
+    "full text",
+    "source text",
+    "текст источника",
+)
 
 # ``<a id="s-N"></a>`` written by the anchor pass; only our own prefix counts.
 ANCHOR_RE = re.compile(r'<a\s+id="(s-\d+)"\s*></a>')
@@ -130,7 +161,10 @@ def _check_links(md_path: str, text: str, problems: list[dict]) -> None:
         exists = bool(resolved) and paths.exists(resolved)
 
         if is_image:
-            if "img/" in dest.replace("\\", "/") and not exists:
+            # An image link is one that addresses an image DIRECTORY. The marker is
+            # deliberately ``img/`` and not a full path, so both the item layout
+            # (``.data/img/``) and a hand-made ``img/`` are recognized.
+            if (IMAGE_DIR_NAME + "/") in dest.replace("\\", "/") and not exists:
                 add(KIND_MISSING_IMAGE, dest_offset, f"[{label}]({dest}) -> {resolved}")
             continue
 
@@ -149,26 +183,91 @@ def _check_links(md_path: str, text: str, problems: list[dict]) -> None:
             add(KIND_DEAD_LINK, dest_offset, f"[{label}]({dest}) -> {resolved}")
 
 
-def _image_dirs_to_check(root: str, recurse: bool) -> list[str]:
-    """Every directory named ``img`` inside the scanned scope.
+def _check_section6(md_path: str, text: str, problems: list[dict]) -> None:
+    """Report a block-6 heading that does not declare itself a copy of the source.
 
-    Enumerating the directories directly (rather than only the ones a link
-    happens to point at) is what catches an ``img/`` folder whose manifest was
-    never written -- the case a link-only walk is blind to.
+    The failure this catches is not structural -- the document is perfectly valid
+    Markdown -- but it is the one that has already happened: a reader (in that case
+    an agent on another machine) took block 6 for a recap and treated a verbatim
+    copy as a second-hand summary. Nothing in the file said otherwise.
+
+    An ABSENT block-6 heading is reported too: a document whose content is simply
+    prose has no copy, and silently passing it would hide the case where an agent
+    dropped the source entirely.
+    """
+    bounds = md.block_range(text, SECTION6_RE)
+    if bounds is None:
+        problems.append(
+            {
+                "file": md_path,
+                "line": 0,
+                "kind": KIND_SECTION6_UNDECLARED,
+                "severity": SEVERITY_WARNING,
+                "detail": "no '## 6.' section; block 6 is the verbatim copy of the source",
+            }
+        )
+        return
+
+    # The heading LINE, not the body: the declaration belongs in the title, where a
+    # reader meets it before the text.
+    body_start = bounds[0]
+    heading_start = text.rfind("\n", 0, body_start) + 1
+    heading = text[heading_start:body_start if body_start > heading_start else len(text)]
+    heading = heading.split("\n", 1)[0].strip().lower()
+    if not any(token in heading for token in DECLARATION_TOKENS):
+        problems.append(
+            {
+                "file": md_path,
+                "line": _line_of(text, heading_start),
+                "kind": KIND_SECTION6_UNDECLARED,
+                # ADVISORY, deliberately. Every document produced before this
+                # convention existed reads as undeclared, so making it fatal would
+                # fail every library in existence and make `verify` useless as a
+                # gate. The signal is worth surfacing; it is not worth a migration
+                # tax. This is the "warning, not failure" option from the plan.
+                "severity": SEVERITY_WARNING,
+                "detail": (
+                    "block 6 heading does not state that it is a copy of the source "
+                    f"(expected one of: {', '.join(DECLARATION_TOKENS)})"
+                ),
+            }
+        )
+
+
+def _image_dirs_to_check(root: str, recurse: bool) -> list[str]:
+    """Every image directory inside the scanned scope.
+
+    Enumerating the directories directly (rather than only the ones a link happens
+    to point at) is what catches an image directory whose manifest was never
+    written -- the case a link-only walk is blind to.
+
+    Both layouts are found, because a library mid-migration holds one of each: the
+    item layout's ``<item>/.data/img`` and the historical ``<item>/img``. The
+    non-recursive branch must look TWO levels down for the former, which is why it
+    walks the children of each immediate child rather than only the root's own.
     """
     candidates: list[str] = []
     if recurse:
         for walk_root, dirs, _files in os.walk(paths.to_extended(root)):
             for name in dirs:
-                if name.lower() == "img":
-                    candidates.append(_de_extend(os.path.join(walk_root, name), paths.to_extended(root), root))
+                if name.lower() == IMAGE_DIR_NAME:
+                    candidates.append(
+                        _de_extend(os.path.join(walk_root, name), paths.to_extended(root), root)
+                    )
     else:
+        # The scan root is checked too, because `-Dir <item>` is a normal way to
+        # run this and then the item IS the root. So are the immediate children, for
+        # a library of items. For each, the item layout is tried before the legacy
+        # one -- a tree mid-migration holds one of each.
         bases = [root]
         bases.extend(entry.path for entry in paths.list_dir(root, dirs=True))
         for base in bases:
-            for entry in paths.list_dir(base, dirs=True):
-                if entry.name.lower() == "img":
-                    candidates.append(entry.path)
+            for candidate in (
+                item_paths.image_dir(base),
+                os.path.join(base, IMAGE_DIR_NAME),
+            ):
+                if paths.is_dir(candidate):
+                    candidates.append(candidate)
     return sorted(set(candidates))
 
 
@@ -239,6 +338,10 @@ def verify_tree(root: str, recurse: bool = False) -> dict:
             )
             continue
         _check_links(md_path, text, problems)
+        # Only a summary is a 6-block document. A transcript or a README has no
+        # block 6 to declare anything about.
+        if os.path.basename(md_path).lower() == item_paths.SUMMARY_NAME:
+            _check_section6(md_path, text, problems)
 
     # A deduplicated report, sorted so two runs are byte-comparable.
     unique: list[dict] = []
@@ -251,11 +354,18 @@ def verify_tree(root: str, recurse: bool = False) -> dict:
         unique.append(problem)
     unique.sort(key=lambda problem: (problem["file"], problem["line"], problem["kind"]))
 
+    fatal = [p for p in unique if p.get("severity") != SEVERITY_WARNING]
+    advisories = [p for p in unique if p.get("severity") == SEVERITY_WARNING]
+
     return {
         "root": root,
         "filesChecked": len(files),
-        "problems": unique,
-        "ok": not unique,
+        # ``problems`` keeps its original meaning: things that are WRONG. An
+        # advisory is reported in its own list so a caller that counts problems is
+        # not silently inflated by a document that merely predates a convention.
+        "problems": fatal,
+        "advisories": advisories,
+        "ok": not fatal,
     }
 
 
@@ -278,9 +388,13 @@ def run(args) -> Outcome:
         for problem in report["problems"]:
             location = f"{problem['file']}:{problem['line']}"
             process.log(f"{problem['kind']}: {location} -- {problem['detail']}", "warn")
+        for advisory in report["advisories"]:
+            location = f"{advisory['file']}:{advisory['line']}"
+            process.log(f"{advisory['kind']}: {location} -- {advisory['detail']}", "info")
     process.log(
         f"verify: {report['filesChecked']} file(s) checked, "
-        f"{len(report['problems'])} problem(s)"
+        f"{len(report['problems'])} problem(s), "
+        f"{len(report['advisories'])} advisory"
     )
 
     # ``ok=False`` is what makes the CLI exit 1; the report still travels in

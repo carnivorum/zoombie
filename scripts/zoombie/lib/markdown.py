@@ -32,6 +32,8 @@ import re
 
 __all__ = [
     "ANCHOR_PREFIX",
+    "DEFAULT_IMAGE_MARKER",
+    "inserted_image_re",
     "anchor_id",
     "block_range",
     "replace_range",
@@ -55,16 +57,50 @@ _BLOCK_HEADING_RE = re.compile(r"^##[ \t]+", re.MULTILINE)
 # in the surrounding prose is neither adopted nor mistaken for ours.
 _ANCHOR_RE = re.compile(rf"<a id=\"({ANCHOR_PREFIX}-\d+)\"></a>")
 _BLANK_RUN_RE = re.compile(r"\n{3,}")
-# One or more Markdown images pointing into an ``img/`` folder, anchored to a
-# line start. Matching a *run* collapses the historical bug where images were
-# glued both to each other and to the following paragraph
-# (``![a]![b]Идем дальше.``) into a single match, so a re-run strips them
-# cleanly instead of stacking duplicates. Whatever text follows the run on the
-# same line is preserved by the ``keep`` group.
-INSERTED_IMG_RE = re.compile(
-    r"^[ \t]*(?:!\[[^\]]*\]\(<?[^)\n]*img/[^)\n]*>?\))+[ \t]*(?P<keep>[^\n]*)",
-    re.MULTILINE,
-)
+# One or more Markdown images whose destination contains an image directory,
+# anchored to a line start. Matching a *run* collapses the historical bug where
+# images were glued both to each other and to the following paragraph
+# (``![a]![b]Идем дальше.``) into a single match, so a re-run strips them cleanly
+# instead of stacking duplicates. Whatever text follows the run on the same line
+# is preserved by the ``keep`` group.
+#
+# The destination fragment defaults to :data:`DEFAULT_IMAGE_MARKER` and is what
+# keeps this pattern in step with wherever images actually live. It used to be the
+# literal ``img/``, which coupled the byte-idempotency guarantee to a directory
+# NAME: when images moved to ``.data/img/`` the substring happened to survive, so
+# nothing broke -- but a rename, or an ``-ImageDir`` pointing elsewhere, would have
+# made the strip pass match nothing while the insert pass kept adding, growing the
+# document on every run. Callers that know the real directory pass it
+# (:func:`strip_inserted_images`), so the guarantee no longer rests on a name.
+DEFAULT_IMAGE_MARKER = "img/"
+_TRAILING_SEPARATORS = "/\\"
+
+
+def inserted_image_re(marker: str | None = None) -> re.Pattern[str]:
+    """Build the inserted-image pattern for one image directory.
+
+    ``marker`` is the path fragment the image links contain -- typically the
+    directory's own relative path plus a trailing slash (``.data/img/``), not a
+    bare name. ``None`` or empty falls back to :data:`DEFAULT_IMAGE_MARKER`, which
+    is what keeps the zero-argument call sites correct.
+    """
+    text = (marker or "").replace("\\", "/").strip()
+    if text:
+        text = text.strip(_TRAILING_SEPARATORS) + "/"
+    else:
+        text = DEFAULT_IMAGE_MARKER
+    # ``re.escape`` because a marker is a PATH, and a path may contain regex
+    # metacharacters (a dot in ``.data``, brackets in a folder name).
+    return re.compile(
+        r"^[ \t]*(?:!\[[^\]]*\]\(<?[^)\n]*" + re.escape(text) + r"[^)\n]*>?\))+"
+        r"[ \t]*(?P<keep>[^\n]*)",
+        re.MULTILINE,
+    )
+
+
+# The default pattern, kept as a module-level name because it is the documented
+# shape of an inserted image and several call sites read it.
+INSERTED_IMG_RE = inserted_image_re()
 
 
 def anchor_id(n: int) -> str:
@@ -240,21 +276,30 @@ def render_index(headings: list[dict]) -> str:
 # inline images
 # ---------------------------------------------------------------------------
 
-def strip_inserted_images(body: str) -> str:
+def strip_inserted_images(body: str, marker: str | None = None) -> str:
     """Remove the image links a previous run inserted, keeping other text.
 
-    The regex matches a whole *run* of consecutive ``![...](...img/...)`` links
-    and preserves whatever follows on the last matched line, so a document that
-    an older broken run corrupted (images glued to each other, and to the next
-    paragraph) is repaired losslessly instead of losing prose. The pass is
-    repeated until it stops changing the text, then blank runs are collapsed.
+    The pattern matches a whole *run* of consecutive image links pointing into
+    ``marker`` and preserves whatever follows on the last matched line, so a
+    document that an older broken run corrupted (images glued to each other, and
+    to the next paragraph) is repaired losslessly instead of losing prose. The pass
+    is repeated until it stops changing the text, then blank runs are collapsed.
+
+    ``marker`` is the image directory's path fragment as it appears in the links
+    (``.data/img/``). It defaults to ``None`` -- which uses
+    :data:`DEFAULT_IMAGE_MARKER` -- so the historical callers keep working, but a
+    caller that knows the directory MUST pass it: matching a marker that no longer
+    appears in the links silently disables the strip half of the pass, and the
+    insert half then duplicates every figure on each run.
     """
+    pattern = inserted_image_re(marker)
+
     def _keep(match: re.Match[str]) -> str:
         return match.group("keep")
 
     cleaned = body
     for _ in range(5):
-        updated = INSERTED_IMG_RE.sub(_keep, cleaned)
+        updated = pattern.sub(_keep, cleaned)
         if updated == cleaned:
             break
         cleaned = updated
