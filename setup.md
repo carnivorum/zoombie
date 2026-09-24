@@ -79,8 +79,10 @@ Hard rules:
 whisper.cpp misbehaves when a path it receives contains non-ASCII (Cyrillic)
 characters. This setup removes the problem structurally:
 
-- The toolchain lives in a strictly ASCII root, normally
-  `%USERPROFILE%\zoombie-env` (see below for the non-ASCII-profile fallback).
+- The toolchain lives in an ASCII root: normally `%USERPROFILE%\zoombie-env`, but
+  it MOVES to `%PUBLIC%\zoombie-env` automatically when the profile path is not
+  ASCII (see below). Any non-Latin Windows username hits this on the very first
+  install, so treat the fallback as a normal case, not an aside.
 - The CLI copies every input into an ASCII scratch dir, runs whisper there, and
   copies the artifacts back to the user's real (possibly Cyrillic) destination.
 - No tool is invoked by PATH; every tool is called by an absolute path resolved
@@ -240,7 +242,7 @@ and `%PUBLIC%\zoombie-env` when the profile path is not ASCII:
 | whisper model | `zoombie-env\models\` | size chosen from the detected hardware (~0.15–3 GB) |
 | PDF dependencies | the existing Python | `pymupdf4llm` + `pytesseract` via `pip install --user`; Python is already required |
 | pip shims | `%APPDATA%\Python\<ver>\Scripts` | any launcher this install creates is removed again; pre-existing tools are left alone |
-| Tesseract | system-wide | *optional*; detection only, needed for `readpdf -Ocr` |
+| Tesseract | system-wide | *optional*; detection only, needed for `readpdf -Ocr` / `readimages -Ocr` |
 | the CLI | `zoombie-env\bin\zoombie\` | `zoombie.cmd` + the packaged `zoombie\` package and `pdf\` helper, at a stable ASCII path |
 | skills | `%USERPROFILE%\.roo\skills\` | deployed from [`skills/`](skills/); stays under the profile even when the root is under `%PUBLIC%`, because the editor owns this path and no native tool opens it |
 | the Zoombie role | `%APPDATA%\Code\User\globalStorage\zoocodeorganization.zoo-code\settings\custom_modes.yaml` | **merged**, not overwritten, from [`modes/`](modes/): only our entry is replaced, so a hand-written mode in that file survives |
@@ -274,10 +276,12 @@ Versioning:
 
 - Every skill is namespaced `zoombie-*`, so its name can never collide with a
   foreign skill — deployment simply overwrites.
-- Each skill carries `cvrm-zoombie-version: 4.5.0`; on a re-run the version is
-  compared and the skill is reported as `up to date` or `updated`. The marker must
-  stay inside the first 12 lines of `SKILL.md`: the comparison reads only the
-  front matter, so a marker pushed below it reads as unowned.
+- Each skill carries `cvrm-zoombie-version: 4.8.0` (the value of
+  `zoombie.__init__.SKILL_VERSION`, which is the single source of truth). On a
+  re-run the version is compared and the skill is reported as `up to date` or
+  `updated`. The marker must stay inside the first 12 lines of `SKILL.md`: the
+  comparison reads only the front matter, so a marker pushed below it reads as
+  unowned.
 
 If the user prefers project-local skills, they are already versioned sources in
 [`skills/`](skills/); copy that folder into `<project>\.roo\skills\` by hand.
@@ -285,9 +289,11 @@ Project skills shadow global ones with the same name.
 
 Verify Zoo sees the six skills: `zoombie-download-video`,
 `zoombie-extract-audio`, `zoombie-transcribe-audio`, `zoombie-transcribe-video`,
-`zoombie-pdf-to-md`, `zoombie-summarize`, each sourced as `global`. If one does
+`zoombie-images-to-md`, `zoombie-summarize`, each sourced as `global`. If one does
 not appear, confirm the path is exactly `<skills-root>\<name>\SKILL.md` and that
-the front matter parses.
+the front matter parses. A rename (`zoombie-pdf-to-md` -> `zoombie-images-to-md`)
+leaves the old folder behind, so the installer prunes a deployed `zoombie-*` skill
+whose `SKILL.md` carries our marker but which no longer has a source.
 
 ### The Zoombie role
 
@@ -408,9 +414,16 @@ The self-test:
 A pass ends with `PASS: Cyrillic destination path worked end to end` and exit
 code 0. If it fails, report the failing line; do not claim success.
 
-**Speech synthesis can be SKIPPED.** The TTS step needs `pyttsx3`; when it is
-absent the self-test prints `SKIPPED: speech synthesis unavailable` and the
-end-to-end chain cannot run. Install it with:
+**The installer now provisions the self-test's speech dependency.** `pyttsx3`
+is not a runtime dependency of the pipeline — ffmpeg, whisper.cpp and yt-dlp all
+work without it — but the self-test's TTS step needs it, and without it the
+end-to-end chain SKIPS instead of running. So `setup` installs it (from
+`requirements-selftest.txt`, reported at `data.manifest.selftest`), which is what
+makes a green self-test mean the chain actually ran.
+
+If it is still missing (no Python, or the install failed) the self-test prints
+`SKIPPED: speech synthesis unavailable`. Treat that as an install defect to fix,
+not a normal outcome:
 
 ```bat
 python -m pip install --user -r requirements-selftest.txt
@@ -428,7 +441,7 @@ locations, not a temp dir):
 REM the root is %PUBLIC%\zoombie-env on a non-ASCII profile; probe both
 set "ZOOMBIE_BIN=%USERPROFILE%\zoombie-env\bin\zoombie\zoombie.cmd"
 if not exist "%ZOOMBIE_BIN%" set "ZOOMBIE_BIN=%PUBLIC%\zoombie-env\bin\zoombie\zoombie.cmd"
-"%ZOOMBIE_BIN%" pipeline -Source "<url>" -Output "<confirmed-basename>"
+"%ZOOMBIE_BIN%" pipeline -Source "<url>" -Output "<confirmed-item-folder>"
 ```
 
 ---
@@ -445,13 +458,21 @@ Give the user a final table with:
   runtime was provisioned (`data.manifest.whisper.cudaRuntimeReady`) and for
   which cuBLAS major (`data.manifest.whisper.cudaRuntime.cublasMajor`), and the
   binary path. Also report `backendDetected` (the current machine's hardware
-  verdict): if it differs from the installed `backend`, the build was replaced to
-  match this machine. If the two backends disagree, or a CUDA machine reports no
+  verdict) and `requestedBackend`. If `backendDetected` differs from the installed
+  `backend`, say which case it is: `whisper.backendSubstituted` true means no asset
+  shipped for the requested backend and the CPU build was used instead (the normal
+  outcome on a machine whose GPU asset is not published); a substitution that is
+  NOT recorded would mean the build is being replaced. If a CUDA machine reports no
   cuBLAS DLLs, say so plainly.
 - GPU policy outcome (`data.gpuPolicy`). On a machine with a fitted GPU,
   `setup` FAILS (`ok:false`) when the CUDA backend cannot initialise, naming the
   reason and the preserved whisper log. Report that plainly; do not present it as
-  a working GPU install. A CPU-only machine is never subject to this.
+  a working GPU install. A CPU-only machine is never subject to this. Separately,
+  when a GPU is present but the effective backend is `cpu`, `gpuPolicy.gpuIgnored`
+  is true: the GPU is **unused**. Say so, and give the reason from
+  `data.manifest.whisper.backendReason` (for example an integrated GPU sharing the
+  system memory, or no `vulkan` asset shipped so the CPU build was substituted —
+  `gpuPolicy.backendSubstituted`).
 - model name and size,
 - PDF toolchain: the Python used and whether the dependencies installed cleanly
   (`data.manifest.pdf.ok`), and whether Tesseract was detected
@@ -473,11 +494,11 @@ cause and the fix rather than overstating the result.
 [ ] `bootstrap.cmd -Check` run and its findings reported
 [ ] User confirmed the download, then `bootstrap.cmd` applied
 [ ] Toolchain installed under the ASCII root %USERPROFILE%\zoombie-env (or %PUBLIC%\zoombie-env on a non-ASCII profile)
-[ ] Backend selected from hardware (cuda > vulkan > cpu) and explained
-[ ] Installed backend matches the CURRENT hardware (`backendDetected`), not a sticky value from an earlier run
+[ ] Backend selected from hardware AND explained in plain language (`whisper.backendReason`): cuda for NVIDIA; vulkan only for a discrete GPU with enough dedicated VRAM and a current driver; cpu otherwise (including integrated GPUs, which share the system memory bus)
+[ ] Installed backend matches the CURRENT hardware (`backendDetected`), OR differs for a recorded reason: `whisper.backendSubstituted` is true when no asset exists for the detected backend and the CPU build was used instead
 [ ] Model downloaded and recorded in env.json
 [ ] CLI deployed to zoombie-env\bin\zoombie\zoombie.cmd, and the launcher works from ANY working directory
-[ ] Six zoombie-* skills deployed to %USERPROFILE%\.roo\skills\ with cvrm-zoombie-version 4.5.0
+[ ] Six zoombie-* skills deployed to %USERPROFILE%\.roo\skills\ with cvrm-zoombie-version 4.8.0
 [ ] The Zoombie role merged into the global custom_modes.yaml, only our entry replaced, and any hand-written mode in that file still intact
 [ ] A `.md` artifact can be written in the Zoombie role and a `.py` file is refused by its edit restriction
 [ ] No stray .roo\skills directory outside %USERPROFILE%
@@ -485,7 +506,7 @@ cause and the fix rather than overstating the result.
 [ ] PDF dependencies installed into the existing Python; Tesseract detection noted (optional)
 [ ] Backend verified, not assumed: `backendObserved` matches `backendConfigured`; on a CUDA machine the cuBLAS runtime for the ASSET's major (e.g. `cublas64_11.dll`, `cublasLt64_11.dll`) is present beside `whisper-cli.exe`
 [ ] GPU policy holds: a machine with a fitted GPU reports `deviceUsed: cuda` on a real transcription, or `setup` FAILED and said why
-[ ] A real transcription reports `deviceUsed: cuda` and a `realtimeFactor` well below 1.0
+[ ] On a GPU-accelerated install (cuda, or a discrete-GPU vulkan), a real transcription reports `deviceUsed: cuda`/`vulkan` and a `realtimeFactor` well below 1.0. **This line does not apply to a CPU install** — `deviceUsed: cpu` there is the intended outcome, not a failure
 [ ] Non-ASCII (Cyrillic) paths handled: inputs isolated in ASCII work dirs
 [ ] Path lengths sane: `doctor` reports `data.report.paths.whisperExeFits` and `modelPathFits` true, and the installer did not refuse the root as too deep
 [ ] `python -m zoombie.selftest` passed (7/7 key words, Cyrillic destination, GPU assertion, deliberate `-NoGpu` run), or reported the TTS step SKIPPED with the pure regression guards still passing

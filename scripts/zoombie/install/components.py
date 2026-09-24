@@ -309,6 +309,14 @@ def install_whisper(modes: Modes, hardware_profile: hardware.Profile) -> dict:
 
     The detected backend is authoritative, not any value a previous run wrote into
     env.json: a machine that gained or lost a GPU must not keep the old build.
+
+    ONE exception, and it is what stops a reinstall loop on a non-NVIDIA machine:
+    when the repo ships no asset for the detected backend, the CPU build is an
+    unavoidable substitution. That fact is recorded in env.json
+    (``backendSubstituted`` + ``requestedBackend``), so the next run recognises the
+    same substitution and keeps the existing build instead of re-downloading it.
+    A real change (a GPU appears, so the request changes) clears the invariant and
+    the build is genuinely replaced.
     """
     dest_dir = paths.env_path("bin", "whisper")
     exe = os.path.join(dest_dir, "whisper-cli.exe")
@@ -318,10 +326,28 @@ def install_whisper(modes: Modes, hardware_profile: hardware.Profile) -> dict:
     installed_backend = manifest.dig(previous, "whisper.backend")
     previous_tag = manifest.dig(previous, "whisper.tag")
     previous_asset = manifest.dig(previous, "whisper.asset")
+    previous_requested = manifest.dig(previous, "whisper.requestedBackend")
+    previous_substituted = bool(manifest.dig(previous, "whisper.backendSubstituted"))
+
+    # A substitution we already made, for the SAME request, is not a mismatch: the
+    # CPU build was the best available answer and still is. Keeping it is the whole
+    # point; only a changed request (or a non-substituted mismatch) forces a swap.
+    substitution_holds = (
+        previous_substituted
+        and installed_backend == "cpu"
+        and desired != "cpu"
+        and previous_requested == desired
+    )
 
     present = paths.is_file(exe) and not modes.force
     if present and installed_backend and installed_backend != desired:
-        if modes.may_write:
+        if substitution_holds:
+            process.log(
+                f"installed whisper backend 'cpu' is the recorded substitution for "
+                f"'{desired}' (no {desired} asset shipped); keeping it",
+                "warn",
+            )
+        elif modes.may_write:
             process.log(
                 f"installed whisper backend '{installed_backend}' no longer matches "
                 f"detected hardware '{desired}'; reinstalling",
@@ -338,6 +364,7 @@ def install_whisper(modes: Modes, hardware_profile: hardware.Profile) -> dict:
     if present:
         process.log(f"whisper-cli present: {exe}")
         effective = installed_backend or desired
+        substituted = bool(installed_backend) and installed_backend != desired
         # If a previous run never recorded which asset it used, recover it with a
         # single release scan so env.json stays a complete record.
         if not previous_tag and modes.may_write:
@@ -355,13 +382,22 @@ def install_whisper(modes: Modes, hardware_profile: hardware.Profile) -> dict:
             cublas_info = install_cublas(modes, dest_dir, cuda_major)
         return {
             "exe": exe, "tag": previous_tag, "asset": previous_asset,
-            "backend": effective, "cudaMajor": cuda_major, "cublas": cublas_info,
+            "backend": effective, "requestedBackend": desired, "substituted": substituted,
+            "cudaMajor": cuda_major, "cublas": cublas_info,
         }
 
     asset = select_asset(desired)
+    substituted = False
     if not asset and desired != "cpu":
         process.log(f"no {desired} asset found; falling back to CPU build", "warn")
         asset = select_asset("cpu")
+        substituted = asset is not None
+        if substituted:
+            process.log(
+                f"recording the CPU build as a substitution for '{desired}' so the "
+                "next run does not re-download it",
+                "warn",
+            )
     if not asset:
         raise RuntimeError("No suitable whisper.cpp Windows asset found in any release.")
 
@@ -401,7 +437,8 @@ def install_whisper(modes: Modes, hardware_profile: hardware.Profile) -> dict:
             dry_cublas = install_cublas(modes, dest_dir, asset_cuda_major or 0)
         return {
             "exe": exe, "tag": asset["tag"], "asset": asset["name"],
-            "backend": asset["backend"], "cudaMajor": asset_cuda_major,
+            "backend": asset["backend"], "requestedBackend": desired,
+            "substituted": substituted, "cudaMajor": asset_cuda_major,
             "cublas": dry_cublas,
         }
 
@@ -435,10 +472,14 @@ def install_whisper(modes: Modes, hardware_profile: hardware.Profile) -> dict:
                     f"provisioned: {cublas_info['note']}"
                 )
 
-        modes.note(f"installed whisper.cpp {asset['tag']} ({asset['backend']})")
+        if substituted:
+            modes.note(f"whisper backend substituted: cpu instead of {desired}")
+        else:
+            modes.note(f"installed whisper.cpp {asset['tag']} ({asset['backend']})")
         return {
             "exe": exe, "tag": asset["tag"], "asset": asset["name"],
-            "backend": asset["backend"], "cudaMajor": asset_cuda_major,
+            "backend": asset["backend"], "requestedBackend": desired,
+            "substituted": substituted, "cudaMajor": asset_cuda_major,
             "cublas": cublas_info,
         }
     finally:
@@ -543,6 +584,66 @@ def install_pdf_dependencies(modes: Modes, python: str | None, requirements: str
 
 
 # ---------------------------------------------------------------------------
+# Self-test speech dependency
+# ---------------------------------------------------------------------------
+
+def install_selftest_dependencies(modes: Modes, python: str | None, requirements: str) -> dict:
+    """Ensure the self-test's TTS dependency (pyttsx3) is present.
+
+    pyttsx3 is NOT a runtime dependency of the pipeline: ffmpeg, whisper.cpp and
+    yt-dlp all work without it. It is only needed by the self-test's speech step.
+    But the project rule is "never claim success without the self-test passing",
+    and without pyttsx3 the end-to-end chain SKIPS instead. So the installer
+    provisions it here, which is what makes a green result mean the chain ran.
+
+    A failure is reported, never raised: the self-test degrades to a SKIP, exactly
+    as readpdf does when its toolchain is absent, and that must not fail setup.
+    """
+    result = {"ok": False, "python": python, "note": None}
+
+    if not python:
+        result["note"] = "Python not found; the self-test TTS step will be SKIPPED"
+        process.log(f"self-test dependency: {result['note']}", "warn")
+        return result
+
+    # Already importable: nothing to do, and nothing to download.
+    if tools.python_module_ok(python, "pyttsx3"):
+        result["ok"] = True
+        process.log("self-test speech dependency present: pyttsx3")
+        return result
+
+    if not paths.is_file(requirements):
+        result["note"] = "requirements-selftest.txt not found"
+        process.log(f"self-test dependency: {result['note']}", "warn")
+        return result
+
+    if not modes.may_write:
+        process.log(f"would pip install -r {requirements} into {python}", "step")
+        result["ok"] = True
+        return result
+
+    before = tools.pip_shim_snapshot()
+    process.log("installing the self-test speech dependency (pip --user)", "step")
+    if tools.pip_install(python, ["-r", requirements]) != 0:
+        result["note"] = "pip install failed; the self-test TTS step will be SKIPPED"
+        process.log(f"self-test dependency: {result['note']}", "warn")
+        return result
+
+    removed = tools.remove_new_pip_shims(before)
+    if removed:
+        process.log(f"removed {removed} unused pip entry-point shim(s)")
+
+    if not tools.python_module_ok(python, "pyttsx3"):
+        result["note"] = "installed but not importable; the self-test TTS step will be SKIPPED"
+        process.log(f"self-test dependency: {result['note']}", "warn")
+        return result
+
+    result["ok"] = True
+    modes.note("installed the self-test speech dependency (pyttsx3)")
+    return result
+
+
+# ---------------------------------------------------------------------------
 # CLI + bootstrap + skills
 # ---------------------------------------------------------------------------
 
@@ -572,6 +673,15 @@ def deploy_cli(modes: Modes) -> str:
     requirements = os.path.join(source_dir, "requirements-pdf.txt")
     if paths.is_file(requirements):
         paths.copy_file(requirements, os.path.join(dest_dir, "requirements-pdf.txt"))
+
+    # The self-test requirements travel too, so the documented remedy
+    # (`pip install --user -r requirements-selftest.txt`) works from the deployed
+    # directory and not only from a checkout.
+    selftest_requirements = os.path.join(source_dir, "requirements-selftest.txt")
+    if paths.is_file(selftest_requirements):
+        paths.copy_file(
+            selftest_requirements, os.path.join(dest_dir, "requirements-selftest.txt")
+        )
 
     write_launcher(launcher, dest_dir)
     process.log(f"CLI installed: {launcher}")

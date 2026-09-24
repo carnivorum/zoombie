@@ -574,6 +574,83 @@ class TestImages:
         assert "img/001" not in read_text(path)
 
 
+class TestSlideTimes:
+    """A slide manifest's ``timeSec`` prefers over the fuzzy SRT text search.
+
+    The association is by ORDER (one ``###`` per slide, in reading order), so the
+    test proves the exact time lands on the exact heading without any of the
+    narration needing to match the cue text.
+    """
+
+    def _doc(self) -> str:
+        return (
+            "# T\n\n## 4. Содержание\n\n## 6. Полный текст (копия)\n"
+            "### Slide one\nМы начинаем разговор о портфеле клиента.\n\n"
+            "### Slide two\nПродолжаем с дополнительными материалами.\n"
+        )
+
+    def _manifest(self, image_dir, times):
+        image_dir.mkdir(exist_ok=True)
+        rows = [
+            {"file": f"{i:03d} - x.png", "timeSec": t, "anchor_text": ""}
+            for i, t in enumerate(times, start=1)
+        ]
+        (image_dir / "manifest.json").write_text(
+            json.dumps({"source": "v.mp4", "count": len(rows), "images": rows},
+                       ensure_ascii=False),
+            encoding="utf-8",
+        )
+
+    def test_time_sec_stamps_headings_by_order(self, tmp_path):
+        image_dir = tmp_path / "img"
+        self._manifest(image_dir, [83.0, 3661.0])
+        out, stats = pp.process_document(
+            self._doc(), None, str(image_dir), str(tmp_path / "summary.md")
+        )
+        # 83s -> 00:01:23, 3661s -> 01:01:01, with no SRT at all.
+        assert f"00:01:23 {EM} Slide one" in out
+        assert f"01:01:01 {EM} Slide two" in out
+        assert stats["unmatched"] == []
+
+    def test_more_times_than_headings_is_truncated(self, tmp_path):
+        image_dir = tmp_path / "img"
+        self._manifest(image_dir, [1.0, 2.0, 3.0, 4.0])
+        out, _ = pp.process_document(
+            self._doc(), None, str(image_dir), str(tmp_path / "summary.md")
+        )
+        # The surplus times must not invent a heading or wrap onto another one:
+        # only the two real headings are stamped, in block 4 and block 6 each.
+        assert out.count(EM) == 4
+
+    def test_without_time_sec_the_srt_path_is_unchanged(self, tmp_path):
+        image_dir = tmp_path / "img"
+        image_dir.mkdir()
+        (image_dir / "manifest.json").write_text(
+            json.dumps({"source": "v.mp4", "count": 0, "images": []},
+                       ensure_ascii=False),
+            encoding="utf-8",
+        )
+        srt = tmp_path / "t.srt"
+        srt.write_text(
+            "1\n00:00:05,000 --> 00:00:06,000\nМы начинаем разговор о портфеле клиента\n",
+            encoding="utf-8",
+        )
+        out, _ = pp.process_document(
+            self._doc(), str(srt), str(image_dir), str(tmp_path / "summary.md")
+        )
+        # 5s -> 00:00:05. A manifest with no timeSec must not disable the SRT
+        # path for the heading it DOES match.
+        assert f"00:00:05 {EM} Slide one" in out
+
+    def test_is_idempotent(self, tmp_path):
+        image_dir = tmp_path / "img"
+        self._manifest(image_dir, [10.0, 20.0])
+        doc = self._doc()
+        once, _ = pp.process_document(doc, None, str(image_dir), str(tmp_path / "s.md"))
+        twice, _ = pp.process_document(once, None, str(image_dir), str(tmp_path / "s.md"))
+        assert once == twice
+
+
 class TestWhitespace:
     def test_blank_runs_collapse_and_one_trailing_newline_is_kept(self):
         text = "# T\n\n\n\n### A\nПервый.\n\n\n\n### B\nВторой.\n\n\n"

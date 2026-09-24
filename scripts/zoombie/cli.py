@@ -15,11 +15,12 @@ benefit.
 from __future__ import annotations
 
 import argparse
+import os
 import sys
 from dataclasses import dataclass, field
 
 from . import SKILL_VERSION
-from .lib import pdf, process
+from .lib import pdf, process, slides
 from .lib.errors import ZoombieError
 
 
@@ -37,9 +38,9 @@ def _add_common(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("-Force", "--force", action="store_true", help="overwrite existing outputs")
 
 
-def _add_source_output(parser: argparse.ArgumentParser) -> None:
+def _add_source_output(parser: argparse.ArgumentParser, output_help: str = "output file or basename") -> None:
     parser.add_argument("-Source", "--source", dest="source", required=True, help="source file or URL")
-    parser.add_argument("-Output", "--output", dest="output", default=None, help="output file or basename")
+    parser.add_argument("-Output", "--output", dest="output", default=None, help=output_help)
 
 
 def _add_work(parser: argparse.ArgumentParser) -> None:
@@ -93,7 +94,14 @@ def build_parser() -> argparse.ArgumentParser:
 
     # --- transcribe -------------------------------------------------------
     transcribe = subparsers.add_parser("transcribe", help="transcribe audio to text")
-    _add_source_output(transcribe)
+    _add_source_output(
+        transcribe,
+        output_help=(
+            "the item folder that receives the transcripts; the artifacts land in "
+            "<item>/.data/ as transcript.txt, transcript.srt, source.json "
+            "(default: the source file's folder)"
+        ),
+    )
     _add_model(transcribe)
     _add_work(transcribe)
     _add_gpu_policy(transcribe)
@@ -110,7 +118,13 @@ def build_parser() -> argparse.ArgumentParser:
 
     # --- pipeline ---------------------------------------------------------
     pipeline = subparsers.add_parser("pipeline", help="download, extract and transcribe in one call")
-    _add_source_output(pipeline)
+    _add_source_output(
+        pipeline,
+        output_help=(
+            "the item folder; the transcripts land in <item>/.data/ and the retained "
+            "media at the item root (default: the source file's folder)"
+        ),
+    )
     _add_model(pipeline)
     _add_work(pipeline)
     _add_gpu_policy(pipeline)
@@ -135,6 +149,17 @@ def build_parser() -> argparse.ArgumentParser:
     _add_source_output(readpdf)
     _add_work(readpdf)
     readpdf.add_argument("-Ocr", "--ocr", action="store_true", help="OCR scanned pages with Tesseract")
+    readpdf.add_argument(
+        "-Vision", "--vision", dest="vision_dir", default=None,
+        help=(
+            "render pages with NO text layer to PNG in this directory for a vision "
+            "reader (text pages are never rendered; ignored when -Ocr is given)"
+        ),
+    )
+    readpdf.add_argument(
+        "-Dpi", "--dpi", dest="dpi", type=int, default=200,
+        help="render dpi for -Vision (default: 200)",
+    )
     readpdf.add_argument("-Images", "--images", action="store_true", help="also extract embedded images")
     readpdf.add_argument(
         "-ImagesOnly", "--images-only", dest="images_only", action="store_true",
@@ -159,6 +184,76 @@ def build_parser() -> argparse.ArgumentParser:
     readpdf.add_argument("-Lang", "--lang", dest="lang", default="eng", help="Tesseract language code")
     _add_common(readpdf)
 
+    # --- readimages -------------------------------------------------------
+    # The image-input half of images-to-md: a loose image or a folder of them.
+    # Without -Ocr it records the images and their sidecar for a VISION reader
+    # and writes no text; with -Ocr it runs Tesseract. It never guesses text.
+    readimages = subparsers.add_parser("readimages", help="turn images into Markdown (OCR or vision)")
+    _add_source_output(readimages)
+    readimages.add_argument("-Ocr", "--ocr", action="store_true", help="read the images with Tesseract")
+    readimages.add_argument("-Lang", "--lang", dest="lang", default="eng", help="Tesseract language code")
+    readimages.add_argument(
+        "-ImageDir", "--image-dir", dest="image_dir", default=None,
+        help="where to write the sidecar (default: <base>.images)",
+    )
+    _add_common(readimages)
+
+    # --- slides -----------------------------------------------------------
+    # Extract slide frames from a video plus a placement manifest, so
+    # ``postprocess`` can embed them in ``summary.md`` block 6. Two modes:
+    # exact -Times (one frame each, the minimal set) or auto-detect with a
+    # perceptual-hash dedup. The narration spoken during each slide's interval
+    # becomes the manifest's anchor_text, which is the join to the audio.
+    slides_cmd = subparsers.add_parser("slides", help="extract slides from a video with a manifest")
+    _add_source_output(slides_cmd)
+    _add_work(slides_cmd)
+    slides_cmd.add_argument(
+        "-ImageDir", "--image-dir", dest="image_dir", default=None,
+        help="explicit image directory (default: <Output>/.data/img)",
+    )
+    slides_cmd.add_argument(
+        "-Times", "--times", dest="times", default=None,
+        help="exact slide timestamps, comma or newline separated (HH:MM:SS or SS)",
+    )
+    slides_cmd.add_argument(
+        "-TimesFile", "--times-file", dest="times_file", default=None,
+        help="read exact timestamps from a file, one per line",
+    )
+    slides_cmd.add_argument(
+        "-Srt", "--srt", dest="srt", default=None,
+        help="SRT used for the slide anchor text (default: <item>/.data/transcript.srt)",
+    )
+    slides_cmd.add_argument(
+        "-Scale", "--scale", dest="scale", type=int, default=slides.DEFAULT_SCALE_WIDTH,
+        help=f"output frame width in px (default: {slides.DEFAULT_SCALE_WIDTH})",
+    )
+    slides_cmd.add_argument(
+        "-SampleRate", "--sample-rate", dest="sample_rate", type=float,
+        default=slides.DEFAULT_SAMPLE_RATE,
+        help=f"auto-detect sampling, frames per second (default: {slides.DEFAULT_SAMPLE_RATE})",
+    )
+    slides_cmd.add_argument(
+        "-HashDistance", "--hash-distance", dest="hash_distance", type=int,
+        default=slides.DEFAULT_HASH_DISTANCE,
+        help=(
+            "max perceptual-hash distance for 'same slide' "
+            f"(default: {slides.DEFAULT_HASH_DISTANCE})"
+        ),
+    )
+    slides_cmd.add_argument(
+        "-MinSlideSec", "--min-slide-sec", dest="min_slide_seconds", type=float,
+        default=slides.DEFAULT_MIN_SLIDE_SECONDS,
+        help=(
+            "merge runs shorter than this many seconds "
+            f"(default: {slides.DEFAULT_MIN_SLIDE_SECONDS})"
+        ),
+    )
+    slides_cmd.add_argument(
+        "-MinPx", "--min-px", dest="min_px", type=int, default=slides.DEFAULT_MIN_PX,
+        help=f"drop frames below this pixel size (default: {slides.DEFAULT_MIN_PX})",
+    )
+    _add_common(slides_cmd)
+
     # --- postprocess ------------------------------------------------------
     # The mechanical half of the summarize skill. Dry run by default: it writes
     # ONLY with -Apply, because a skill calls it and must not be able to corrupt
@@ -173,7 +268,8 @@ def build_parser() -> argparse.ArgumentParser:
     )
     postprocess.add_argument(
         "-Srt", "--srt", dest="srt", default=None,
-        help="SRT for the heading timestamps (default: sibling <base>.srt or transcript.srt)",
+        help="SRT for the heading timestamps (default: <item>/.data/transcript.srt, "
+             "or a sibling <base>.srt)",
     )
     postprocess.add_argument(
         "-ImageDir", "--image-dir", dest="image_dir", default=None,
@@ -316,6 +412,12 @@ def _dispatch(args: argparse.Namespace) -> Outcome:
     if args.command == "readpdf":
         from .commands import readpdf
         return readpdf.run(args)
+    if args.command == "readimages":
+        from .commands import readimages
+        return readimages.run(args)
+    if args.command == "slides":
+        from .commands import slides
+        return slides.run(args)
     if args.command == "postprocess":
         from .commands import postprocess
         return postprocess.run(args)
@@ -337,10 +439,43 @@ def _dispatch(args: argparse.Namespace) -> Outcome:
     raise ZoombieError(f"unknown command: {args.command}")
 
 
+def expand_arg_files(argv: list[str] | None = None) -> list[str]:
+    """Resolve ``@path`` arguments to the stripped UTF-8 text of that file.
+
+    Windows console code pages mangle non-ASCII (Cyrillic) ARGUMENTS: a Cyrillic
+    ``-Output``/``-DownloadDir``/``-Source`` passed inline arrives corrupted
+    whatever the shell's encoding is set to. The escape hatch is an ``@file``
+    argument -- the value is read from a UTF-8 file by Python, so the console
+    code page is never involved. This mirrors the ``@file`` convention other
+    CLI tools use.
+
+    Only a token that BEGINS with ``@`` is expanded, so an argument that merely
+    CONTAINS ``@`` (an email, a URL with userinfo) is untouched. A path that does
+    not exist is left verbatim, because a leading ``@`` is also a legal file name.
+    """
+    if argv is None:
+        argv = sys.argv[1:]
+    expanded: list[str] = []
+    for token in argv:
+        if token.startswith("@") and len(token) > 1:
+            path = token[1:]
+            if os.path.isfile(path):
+                try:
+                    # utf-8-sig so a Notepad-saved BOM does not become a leading
+                    # \\ufeff in the value; strip the trailing newline a file ends
+                    # with.
+                    with open(path, "r", encoding="utf-8-sig") as handle:
+                        token = handle.read().strip()
+                except OSError:
+                    pass
+        expanded.append(token)
+    return expanded
+
+
 def main(argv: list[str] | None = None) -> int:
     """Parse, run one command, emit exactly one JSON result line."""
     parser = build_parser()
-    args = parser.parse_args(argv)
+    args = parser.parse_args(expand_arg_files(argv))
 
     try:
         outcome = _dispatch(args)

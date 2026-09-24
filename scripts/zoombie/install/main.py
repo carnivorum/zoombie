@@ -42,6 +42,17 @@ def find_python() -> str | None:
     return None
 
 
+def is_gpu_ignored(hardware_backend: str, installed_backend: str | None) -> bool:
+    """True when hardware advertises a GPU but the effective backend is the CPU.
+
+    This is the silent-CPU-on-a-GPU-machine case: the chooser legitimately prefers
+    the CPU for an integrated GPU (shared memory) or when no GPU asset ships, but
+    the caller must still be told the GPU is unused. Extracted so the policy is
+    testable without running the whole installer.
+    """
+    return hardware_backend in ("cuda", "vulkan") and installed_backend == "cpu"
+
+
 def run(argv: list[str] | None = None, *, write_result: bool = True) -> int:
     args = build_parser().parse_args(argv)
 
@@ -189,12 +200,22 @@ def _install(modes: components.Modes, args, root: str, result: dict) -> tuple[bo
             "winget install UB-Mannheim.TesseractOCR"
         )
 
+    # The self-test's own dependency (pyttsx3, for the TTS step). It is NOT a
+    # runtime dependency of the pipeline, but the project rule is "never claim
+    # success without the self-test passing", and without it the end-to-end chain
+    # SKIPS. Installing it here is what makes a green result mean the chain ran.
+    process.log("ensuring the self-test speech dependency", "step")
+    selftest_requirements = os.path.join(env_mod.cli_dir(), "requirements-selftest.txt")
+    selftest_info = components.install_selftest_dependencies(
+        modes, python, selftest_requirements
+    )
+
     # --- manifest ---------------------------------------------------------
     built = _build_manifest(
         root=root, python=python, python_version=tools.tool_version(python, ["--version"]),
         ytdlp_info=ytdlp_info, whisper_info=whisper_info, backend_probe=backend_probe,
         cuda_runtime=cuda_runtime, model_info=model_info, pdf_info=pdf_info,
-        mode_results=mode_results, hw=hw,
+        selftest_info=selftest_info, mode_results=mode_results, hw=hw,
     )
     if modes.may_write:
         manifest.save(built)
@@ -220,9 +241,12 @@ def _install(modes: components.Modes, args, root: str, result: dict) -> tuple[bo
         missing.append("pdf-deps")
     if modes.check and not pdf_info.get("tesseract"):
         missing.append("tesseract (optional)")
+    # pyttsx3 is deliberately NOT in `missing`: without it the self-test degrades
+    # to a reported SKIP rather than a failure, exactly as readpdf does. It is
+    # reported as its own field instead of failing the whole install.
 
-    # POLICY: a GPU is fitted and the build is CUDA, yet the backend cannot
-    # initialise. That is a hard failure, not a note. CHECK/DRY-RUN stay
+    # POLICY 1 (hard): a GPU is fitted and the build is CUDA, yet the backend
+    # cannot initialise. That is a hard failure, not a note. CHECK/DRY-RUN stay
     # informational because they are allowed to inspect an unfinished install.
     cuda_mismatch = (
         backend_configured == "cuda"
@@ -241,6 +265,22 @@ def _install(modes: components.Modes, args, root: str, result: dict) -> tuple[bo
             "warn",
         )
 
+    # POLICY 2 (warning): a GPU is present but the effective backend is the CPU.
+    # This is NOT a failure -- the chooser deliberately prefers the CPU for an
+    # integrated GPU, and a substitution is unavoidable when no GPU asset ships --
+    # but the user must be told the GPU is unused, in plain language, instead of
+    # having to read the self-test log to discover it.
+    requested_backend = whisper_info.get("requestedBackend") or hw.backend
+    backend_substituted = bool(whisper_info.get("substituted"))
+    gpu_ignored = is_gpu_ignored(hw.backend, backend_configured)
+    if gpu_ignored:
+        reason = hw.backend_reason or f"hardware advertises '{hw.backend}' but the CPU build will run"
+        process.log(
+            f"GPU policy: a GPU is fitted but the effective backend is 'cpu'; GPU "
+            f"acceleration is unused. Reason: {reason}",
+            "warn",
+        )
+
     if modes.check:
         process.log(f"CHECK complete. Missing: {', '.join(missing) if missing else 'none'}", "step")
 
@@ -255,6 +295,9 @@ def _install(modes: components.Modes, args, root: str, result: dict) -> tuple[bo
             "enforced": cuda_policy_failed,
             "hardwareBackend": hw.backend,
             "installedBackend": backend_configured,
+            "requestedBackend": requested_backend,
+            "backendSubstituted": backend_substituted,
+            "gpuIgnored": gpu_ignored,
             "backendObserved": backend_probe.device,
             "cudaRuntimeReady": cuda_runtime.ready,
         },
@@ -275,7 +318,7 @@ def _install(modes: components.Modes, args, root: str, result: dict) -> tuple[bo
 
 def _build_manifest(
     *, root, python, python_version, ytdlp_info, whisper_info, backend_probe,
-    cuda_runtime, model_info, pdf_info, mode_results, hw,
+    cuda_runtime, model_info, pdf_info, selftest_info, mode_results, hw,
 ) -> dict:
     """Assemble env.json.
 
@@ -313,6 +356,15 @@ def _build_manifest(
             # `backend` (the installed build) so a machine that gained or lost a
             # GPU is visible instead of being masked by a sticky old value.
             "backendDetected": hw.backend,
+            # The reason the chooser picked the backend, in plain language.
+            "backendReason": hw.backend_reason,
+            # requestedBackend is the chooser's ask; `backend` is what was actually
+            # installed. They differ exactly when a substitution was unavoidable
+            # (no asset shipped for the requested backend), and recording BOTH is
+            # what lets the next run recognise the substitution and stop
+            # re-downloading the CPU build on every invocation.
+            "requestedBackend": whisper_info.get("requestedBackend"),
+            "backendSubstituted": bool(whisper_info.get("substituted")),
             "backendRecomputed": whisper_info.get("backend") == hw.backend,
             # Recorded separately because they answer different questions:
             # `backend` is what we asked for, `backendObserved` is what
@@ -320,6 +372,11 @@ def _build_manifest(
             "backendObserved": backend_probe.device,
             "cudaRuntimeReady": cuda_runtime.ready,
             "cudaRuntime": cuda_runtime.to_report(),
+        },
+        "selftest": {
+            "python": selftest_info.get("python"),
+            "ok": bool(selftest_info.get("ok")),
+            "note": selftest_info.get("note"),
         },
         "model": {
             "path": model_info.get("path"),

@@ -280,6 +280,30 @@ def _headings_in_range(text: str, start: int, end: int) -> list[dict]:
     return [heading for heading in md.heading_list(text) if start <= heading["start"] < end]
 
 
+def time_stamps(
+    text: str, heading_start: int, heading_end: int, times: list[float]
+) -> dict[str, str]:
+    """Deterministic heading stamps read from a slide manifest's times.
+
+    A slide manifest already carries the exact time each slide was on screen, so
+    the ordinal heading-to-slide association is exact and needs no text search.
+    The association is by ORDER, which is the documented block-6 convention (one
+    ``###`` per slide, in reading order): heading ``k`` gets time ``k``. A manifest
+    with fewer times than headings leaves the extra headings to the SRT fallback,
+    and one with more is truncated -- so neither shape can ever clamp a wrong time
+    onto a real heading.
+    """
+    stamps: dict[str, str] = {}
+    headings = _headings_in_range(text, heading_start, heading_end)
+    for position, seconds in enumerate(times):
+        if position >= len(headings):
+            break
+        if seconds is None:
+            continue
+        stamps[headings[position]["anchor"]] = hhmmss(seconds)
+    return stamps
+
+
 def stamp_headings(
     text: str,
     index: SrtIndex | None,
@@ -739,6 +763,19 @@ def process_document(
     # POSITION (the last ``##`` section) rather than by title, so a renamed
     # section still works and a ``###`` sub-heading in an earlier block cannot
     # hijack it.
+    # The image manifest is loaded up front (not only for the image pass): a slide
+    # manifest carries deterministic ``timeSec`` values that must PREFER over the
+    # fuzzy SRT text search for a heading's stamp.
+    manifest = load_manifest(image_dir)
+    manifest_times: list[float] = []
+    for entry in (manifest or {}).get("images", []):
+        if not isinstance(entry, dict) or entry.get("timeSec") is None:
+            continue
+        try:
+            manifest_times.append(float(entry["timeSec"]))
+        except (TypeError, ValueError):
+            continue
+
     region = subheading_region(text)
     start = region[0] if region is not None else None
 
@@ -759,6 +796,19 @@ def process_document(
         cues = parse(srt_path) if srt_path else []
         index = SrtIndex(cues) if cues else None
         stamps, unmatched, timestamped = stamp_headings(text, index, start, end)
+        # Deterministic time wins over the fuzzy match. Applying it to the SAME
+        # anchor id keeps ``apply_stamps`` (and therefore idempotency) unchanged:
+        # only the source of the value differs, and a re-run recomputes the same
+        # value from the same manifest.
+        if manifest_times:
+            stamps.update(time_stamps(text, start, end, manifest_times))
+            # Without this, a heading the manifest stamped would still be reported
+            # as "unmatched" by the SRT pass that ran first.
+            unmatched = [
+                heading["title"]
+                for heading in _headings_in_range(text, start, end)
+                if heading["anchor"] not in stamps
+            ]
         text = apply_stamps(text, stamps, start, end)
         entries = build_index_entries(text, start, end, stamps)
         stats["headings"] = len(entries)
@@ -772,8 +822,7 @@ def process_document(
     text, links = rewrite_links(text)
     stats["linksRewritten"] = links
 
-    # 5. images (PDF-derived documents only; a missing manifest is a no-op)
-    manifest = load_manifest(image_dir)
+    # 5. images (a missing manifest is a no-op)
     if manifest is not None:
         # The marker and the prefix come from ONE computation over the same
         # directory, so the strip half and the insert half can never disagree about
@@ -795,11 +844,13 @@ def process_document(
 def _srt_for(md_path: str, srt_arg: str | None) -> str | None:
     """Resolve the SRT to read timings from.
 
-    An explicit ``-Srt`` always wins. Otherwise the sibling ``<base>.srt`` is
-    tried, and -- because a summary sits next to a transcript rather than next to
-    an audio file -- ``transcript.srt`` in the same folder is tried second. The
-    fallback is decided with :func:`os.path.splitext` on the *file* name only,
-    never ``Path().stem``, which would mangle a folder that contains dots.
+    An explicit ``-Srt`` always wins. Otherwise, for a ``summary.md``, the item
+    layout is tried (``<item>/.data/transcript.srt`` -- where ``transcribe`` and
+    ``pipeline`` now write), then the historical flat ``transcript.srt`` beside
+    the summary, so an item that predates the move still resolves its timing. A
+    non-summary ``<base>.md`` keeps its sibling ``<base>.srt``. The paths are
+    built with :func:`os.path.splitext` on the *file* name only, never
+    ``Path().stem``, which would mangle a folder that contains dots.
     """
     if srt_arg:
         return srt_arg

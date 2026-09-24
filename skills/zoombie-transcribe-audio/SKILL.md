@@ -1,6 +1,6 @@
 ---
 name: zoombie-transcribe-audio
-cvrm-zoombie-version: 4.6.0
+cvrm-zoombie-version: 4.8.0
 description: Transcribe an audio file into SOURCE material - a TXT transcript, an SRT subtitle track and a .source.json origin sidecar - using a local whisper.cpp binary with a CUDA/Vulkan/CPU backend. Use when the user wants a speech-to-text transcript, subtitles, or SRT/TXT output for a recording. It deliberately writes no summary and no readable document; zoombie-summarize produces those. Always inspects the project, proposes transcript output paths, and confirms the destination before writing anything.
 ---
 
@@ -15,13 +15,17 @@ CLI. This skill only decides *where* to write and asks the user to confirm.
 
 ## Producer contract
 
-In the confirmed output folder, one `transcribe` call writes:
+`-Output` names the **item folder**; the artifacts always land in its `.data/`
+subdirectory, which is the documented item layout. Nothing is written at the item
+root -- so a transcript can never again sit loose beside `summary.md`.
+
+In the confirmed item folder, one `transcribe` call writes:
 
 | Artifact | Authoritative for |
 |----------|-------------------|
-| `<base>.txt` | the transcript WORDING |
-| `<base>.srt` | the TIMING, and for spotting machine noise |
-| `<base>.source.json` | the ORIGIN of the audio |
+| `.data/transcript.txt` | the transcript WORDING |
+| `.data/transcript.srt` | the TIMING, and for spotting machine noise |
+| `.data/source.json` | the ORIGIN of the audio |
 
 - `.txt` and `.srt` come from ONE whisper decode. The SRT is never a separate
   pass and is never a yt-dlp subtitle download: yt-dlp is never asked for
@@ -32,7 +36,7 @@ In the confirmed output folder, one `transcribe` call writes:
   from. Do not drop the SRT "to keep things tidy".
 - The `.srt` is emitted **by default**. `-NoSrt` is the opt-out and it destroys
   the timings.
-- `<base>.source.json` records the origin. Keys: `kind`, `url`, `title`, `id`,
+- `.data/source.json` records the origin. Keys: `kind`, `url`, `title`, `id`,
   `durationSec`, `language`, `model`, `backend`, `deviceUsed`, `deviceVerified`,
   `realtimeFactor`, `toolchainVersion`, `createdAt`, `sourceKept`. Every value is
   captured by the download stage, measured by this run, or `null` — nothing is
@@ -50,7 +54,7 @@ In the confirmed output folder, one `transcribe` call writes:
 Then call it — this is the only command this skill needs:
 
 ```powershell
-& $cli transcribe -Source "<audio>" -Output "<confirmed-basename>" [-Language auto] [-NoSrt] [-Model "<name>"] [-Force] [-NoGpu] [-NoFlashAttn] [-Threads N] [-AllowCpuFallback] [-StrictGpu]
+& $cli transcribe -Source "<audio>" -Output "<confirmed-item-folder>" [-Language auto] [-NoSrt] [-Model "<name>"] [-Force] [-NoGpu] [-NoFlashAttn] [-Threads N] [-AllowCpuFallback] [-StrictGpu]
 ```
 
 `-NoGpu` forces a deliberate CPU run; `-AllowCpuFallback` permits a CPU run on a
@@ -76,6 +80,13 @@ path, then copies the artifacts back to the user's real destination. So a
 destination folder containing Cyrillic characters is safe. You do not need to
 do anything special — just pass the paths the user confirmed.
 
+A Cyrillic **argument**, though, can be mangled by the Windows console code page
+before the CLI sees it. If quoting inline is unreliable, write the value to a
+UTF-8 file under the workspace `/.tmp/` folder and pass `@<file>` instead, e.g.
+`-Output "@.tmp\name.txt"`; the CLI reads the value from the file. This works for
+`-Source` and `-Output`. Stage that file under `/.tmp/` and delete it when done,
+never in `C:\Temp` (outside the workspace) or the workspace root.
+
 ## Procedure
 
 1. **Inspect the project** — look for existing transcript locations
@@ -84,29 +95,32 @@ do anything special — just pass the paths the user confirmed.
 2. **Locate the audio input.** Use the user's path, or the project's recent
    `.wav`/`.mp3`/`.m4a`/`.flac`. If ambiguous, ask.
 
-3. **Propose 2–4 concrete transcript output paths** and **ask the user to
-   confirm** the folder and basename before writing anything. Wait for an
-   explicit answer.
+3. **Propose 2–4 concrete item folders** and **ask the user to confirm** the
+   folder before writing anything. Wait for an explicit answer. The transcripts
+   will be created under `<item>/.data/` -- say so, because `.data/` is hidden in
+   Explorer and a user looking for `transcript.txt` at the item root will not see
+   it.
 
-4. **Run the CLI** with the confirmed basename. Add `-Language <code>` only to
+4. **Run the CLI** with the confirmed **item folder** as `-Output`. Add `-Language <code>` only to
    force a language (auto by default). Do **not** pass `-Srt`: it still parses
    but is a legacy no-op alias, because the `.srt` is already produced. Pass
    `-NoSrt` only if the user explicitly accepts losing the only timing source.
 
-5. **Report every artifact produced** with its path and size — `.txt`, `.srt`
-   (say so plainly if it is `null`), and `.source.json` — plus `data.deviceUsed`,
-   `data.deviceVerified` and `data.realtimeFactor`.
+5. **Report every artifact produced** with its path and size — `.data/transcript.txt`,
+   `.data/transcript.srt` (say so plainly if it is `null`), and `.data/source.json`
+   — plus `data.deviceUsed`, `data.deviceVerified` and `data.realtimeFactor`, and
+   the resolved `data.itemDir`.
 
 6. **Hand off to `zoombie-summarize`**, naming the exact artifacts it will
-   consume: `<base>.txt` (the wording), `<base>.srt` (the timing) and
-   `<base>.source.json` (the origin). Write no `.md` file yourself.
+   consume: `.data/transcript.txt` (the wording), `.data/transcript.srt` (the
+   timing) and `.data/source.json` (the origin). Write no `.md` file yourself.
 
 ## Notes
 
 - **Never overwrite without asking.** `transcribe` refuses to overwrite an
-  existing `<base>.txt` unless `-Force` is given, and it refuses *before* any
-  scratch directory is created, so an accidental re-run costs nothing. Pass
-  `-Force` only with the user's consent.
+  existing `<item>/.data/transcript.txt` unless `-Force` is given, and it refuses
+  *before* any scratch directory is created, so an accidental re-run costs
+  nothing. Pass `-Force` only with the user's consent.
 - If the CLI returns `ok:false`, report `error` plainly.
 - **A CPU run on a GPU machine is a failure, not a warning.** When a usable GPU
   backend is configured, the CLI refuses to return a CPU transcript: it returns
@@ -124,6 +138,9 @@ do anything special — just pass the paths the user confirmed.
   `false`, GPU use is unproven: report that plainly, and pass `-StrictGpu` on a
   re-run to make it a hard failure. `gpuAttemptWallMs` is the time wasted by an
   abandoned GPU attempt before a CPU retry.
+
+<!-- zoombie:include scratch-note -->
+<!-- /zoombie:include -->
 
 <!-- zoombie:include shell-note -->
 <!-- /zoombie:include -->

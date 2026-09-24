@@ -30,6 +30,7 @@ import os
 from dataclasses import dataclass, field
 
 from .. import SKILL_VERSION
+from ..item import paths as item_paths
 from . import cublas, env as env_mod, paths, process, whisper
 from .errors import StepFailedError, ZoombieError
 
@@ -40,6 +41,12 @@ class Request:
 
     audio_path: str
     output_base: str
+    # The item folder the artifacts belong to. The stage ALWAYS writes into
+    # ``<item_dir>/.data/`` when this is set, which is what keeps a transcript
+    # beside its siblings rather than flat at the item root. Empty means a direct
+    # programmatic caller that did not name an item, and the flat ``output_base``
+    # is used instead.
+    item_dir: str = ""
     language: str = "auto"
     # Accepted no-op alias for the old -Srt flag: the SRT is written by default
     # now, so the only thing that can remove it is no_srt.
@@ -75,6 +82,8 @@ class Report:
     """The outcome, already shaped for the CLI's JSON ``data`` object."""
 
     output_base: str
+    # Echoed so a caller can see which item folder received the artifacts.
+    item_dir: str = ""
     artifacts: dict = field(default_factory=dict)
     backend: str | None = None
     model: str | None = None
@@ -105,8 +114,13 @@ class Report:
         """The documented camelCase result shape."""
         return {
             "outputBase": self.output_base,
+            "itemDir": self.item_dir or None,
             "artifacts": self.artifacts,
             "backend": self.backend,
+            # The model ACTUALLY used. Surfaced so a caller can tell a default
+            # downgrade (``ggml-small``) from a deliberate choice: the transcript
+            # quality depends on it, and it was previously invisible.
+            "model": os.path.basename(self.model) if self.model else None,
             # backendConfigured is the manifest's intent; deviceUsed is what the
             # run actually did. They diverge in exactly the failure this reports.
             "backendConfigured": self.backend,
@@ -229,7 +243,11 @@ def transcribe(environment: env_mod.Env, request: Request) -> Report:
         raise ZoombieError(f"Work root must be ASCII: {work_root}")
     paths.assert_fits(work_root, "The work root (-WorkRoot)", slack=80)
 
-    output_base = request.output_base
+    # The artifacts land in the item's ``.data/`` directory: ``output_base`` IS
+    # ``<item>/.data/transcript``. The caller resolves that from ``-Output`` (see
+    # :func:`resolve_output_base`); a programmatic caller that named no item keeps
+    # its own base and writes flat, which is what the unit tests exercise.
+    output_base = request.item_dir or request.output_base
     # The longest suffix appended to the base is ``.source.json`` (12 characters) +
     # the dot, so the budget is checked with room for the sidecar.
     paths.assert_fits(output_base, "The transcribe output path", slack=13)
@@ -238,8 +256,8 @@ def transcribe(environment: env_mod.Env, request: Request) -> Report:
     # used to happen silently, unlike ``extract``/``readpdf``, which guard.
     guard_overwrite(output_base, request.force)
 
-    report = Report(output_base=output_base, backend=environment.backend,
-                    model=environment.model)
+    report = Report(output_base=output_base, item_dir=request.item_dir,
+                    backend=environment.backend, model=environment.model)
 
     # Probe the binary ONCE for the flags it advertises and for whether a GPU
     # backend can initialise at all.
@@ -281,9 +299,12 @@ def transcribe(environment: env_mod.Env, request: Request) -> Report:
 
     process.log(f"whisper-cli (ascii-safe) -> {output_base}", "step")
     process.log(
-        f"  work={work}  backend={environment.backend}  gpuCapable={gpu_capable}  "
-        f"model={os.path.basename(environment.model or '')}"
+        f"  work={work}  backend={environment.backend}  gpuCapable={gpu_capable}"
     )
+    # Named on its own line, deliberately: a silent model DOWNGRADE (an install
+    # that defaulted to ggml-small) is a real cause of a worse transcript, and it
+    # must be legible in the run's own output rather than only in the sidecar.
+    process.log(f"  model={os.path.basename(environment.model or '')}")
 
     if request.dry_run:
         report.output_base = output_base
@@ -368,12 +389,11 @@ def transcribe(environment: env_mod.Env, request: Request) -> Report:
     if "srt" not in artifacts:
         report.artifacts["srt"] = None
 
-    # Capture the ORIGIN before anything can delete the media: ``pipeline`` removes
-    # the downloaded file (and its directory) at the end of the run, so this
-    # sidecar is the only surviving link back to the source URL.
-    report.artifacts["sidecar"] = write_source_sidecar(
-        output_base, request, report, extension_count=len(extensions)
-    )
+    # The origin sidecar is written LATER, after the timing block below: it reports
+    # ``durationSec``, ``realtimeFactor``, ``deviceUsed`` and ``deviceVerified``,
+    # and every one of those is only known once the log has been read. Writing it
+    # at this point recorded them all as null/default -- exactly the false
+    # negatives the sidecar exists to prevent.
 
     # Read the captured log for the device ACTUALLY used and the timings. whisper
     # emits both on stderr, so this must read the log file and not stdout.
@@ -481,6 +501,14 @@ def transcribe(environment: env_mod.Env, request: Request) -> Report:
         )
 
     report.gpu_attempt_wall_ms = gpu_attempt_wall_ms
+
+    # Written here, not earlier: ``source_metadata`` reports the duration, the
+    # realtime factor and the device actually used, all of which are only known
+    # after the timing block above. Writing before that point recorded
+    # ``durationSec``/``realtimeFactor`` as null and the device as the default.
+    report.artifacts["sidecar"] = write_source_sidecar(
+        output_base, request, report, extension_count=len(extensions)
+    )
     return report
 
 
@@ -580,10 +608,37 @@ def preserve_logs(output_base: str, whisper_log: str, retry_log: str) -> str | N
     return preserved
 
 
+def item_dir_for(output: str | None, source: str) -> str:
+    """The item folder a transcription targets.
+
+    ``-Output`` designates the item folder itself, not a basename: the artifacts
+    are always written under ``<item>/.data/``. :func:`os.path.normpath` settles
+    the spelling -- it drops a trailing separator so ``<ws>\\item`` and
+    ``<ws>\\item\\`` name one folder, while PRESERVING a drive root (``C:\\``),
+    which a naive ``rstrip`` would reduce to a drive-relative ``C:``. An omitted
+    ``-Output`` defaults the item to the source file's own directory -- the natural
+    "summarise this recording where it already lives" case.
+    """
+    chosen = output or os.path.dirname(paths.absolute(source))
+    return os.path.normpath(paths.absolute(chosen))
+
+
+def transcript_base(item_dir: str) -> str:
+    """``<item>/.data/transcript`` -- the fixed base every artifact hangs off."""
+    return item_paths.transcript_path(item_dir, "").rstrip(".")
+
+
 def resolve_output_base(source: str, output: str | None) -> str:
-    """Default the output basename from the source, dropping any extension."""
-    base = output or os.path.join(os.getcwd(), paths.without_extension(os.path.basename(source)))
-    base = paths.absolute(base)
-    if paths.extension_of(base):
-        base = paths.without_extension(base)
-    return base
+    """Resolve the whisper output base for one transcription.
+
+    The base is ALWAYS ``<item>/.data/transcript``: an item's transcript has a
+    fixed name, because the item holds one source and a reader must be able to find
+    it without knowing the source name. The historical flat form (``<base>.txt``
+    beside ``summary.md``) is gone -- it is what scattered a transcript and its
+    ``.srt`` at the item root, out of step with the documented ``.data/`` layout.
+
+    Derived from :func:`item_dir_for` rather than defaulting separately, so the
+    base the overwrite guard checks is exactly the base the artifacts are written
+    to -- the two disagreeing is how a guard passes and the write still collides.
+    """
+    return transcript_base(item_dir_for(output, source))

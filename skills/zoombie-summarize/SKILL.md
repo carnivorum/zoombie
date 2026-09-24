@@ -1,6 +1,6 @@
 ---
 name: zoombie-summarize
-cvrm-zoombie-version: 4.6.0
+cvrm-zoombie-version: 4.8.0
 description: Turn SOURCE material into a readable 6-block summary.md inside an item folder - a transcript, a PDF-derived Markdown, or arbitrary text. Use when the user wants a summary, notes, a digest, a write-up, or a readable document from something they already have. You write the prose yourself; the mechanical passes (anchors, heading timestamps from the SRT, the regenerated table of contents, link encoding, image re-insertion) are done by zoombie postprocess, so a re-run cannot drift.
 ---
 
@@ -81,23 +81,34 @@ what matters to the passes, and block 6's title must declare the copy.)
 Block 3 may end with a criticism sub-block: the flaws worth flagging in the source
 itself — an unsupported claim, a stale figure, a one-sided framing.
 
-**It is bold-italic text, NOT a heading.** That is deliberate and load-bearing:
+**It is bold-italic text, NOT a heading.** `assign_anchors` numbers every heading
+from `###` to `######`, so a `####` would consume an `s-N` that nothing links to,
+and `verify` fails on a dangling anchor. Bold-italic is not a heading, so no pass
+sees it and block 3 can never disturb block 6.
 
-- `assign_anchors` numbers **every** heading from `###` down to `######`. A `####`
-  is no safer than a `###` — both are collected, both would consume an `s-N`.
-- The block-4 index is narrowed to block 6 by offset, so that id would have
-  nothing linking to it, and **`verify` fails a document with a dangling anchor**.
-- Bold-italic is not a heading, so the numbering, timestamp and index passes
-  never see it. Nothing about block 3 can disturb block 6.
-
-Form: a lone `***Criticism***` (or `***Критика***`) line, one blank line before
-and after, then one line per flaw.
+Form: a lone `***Criticism***` (or `***Критика***`) line, blank line either side,
+one line per flaw.
 
 It is **optional, and often absent.** Include it only when there is something
-material to say. Do not pad it, do not moralise, and do not manufacture
-objections to look rigorous — a criticism nobody can act on is noise. When the
-source is sound, omit the sub-block entirely rather than writing "nothing to
-criticise", because in a library document that line is pure noise.
+material to say; do not pad it or manufacture objections to look rigorous. When
+the source is sound, omit it rather than writing "nothing to criticise".
+
+### Slides (video sources only): ask first
+
+For a **video** source, ask before anything expensive: (1) "should I also try to
+extract slides?"; (2) if yes, "do you have exact timestamps?" — **yes** runs
+`slides -Times "..."` (one frame each, the minimal set), **no** runs `slides` to
+auto-detect and dedup. `postprocess -Apply` then embeds them via the usual image
+pass. The frames are copied into the item's `.data/img/` (the deliverable); if you
+stage the timestamp list or any other scratch in the meantime, keep it under the
+workspace `/.tmp/` folder, not in the item.
+
+**Block-6 convention that makes it work:** one `###` per slide, and **the
+narration for that slide FIRST** under each heading. `slides` sets each entry's
+`anchor_text` to that narration (so the figure is placed under it) and its
+`timeSec` (so the heading is stamped deterministically, not by fuzzy search). A
+heading led by unspoken text makes the anchor miss, and the figure is reported as
+skipped rather than misplaced.
 
 ### What `postprocess` does to that skeleton
 
@@ -152,14 +163,19 @@ broken image references):
 <!-- zoombie:include json-contract -->
 <!-- /zoombie:include -->
 
+<!-- zoombie:include scratch-note -->
+<!-- /zoombie:include -->
+
 Read `data` for what changed. Do **not** hand-assemble a Python command.
 
 ## Procedure
 
 1. **Inspect the project** and find the library root and the source artifacts.
-   If the work came from another skill, it named them: a `<base>.txt` (wording),
-   a `<base>.srt` (timing) and a `<base>.source.json` (origin) from transcribe,
-   or a `<base>.md` plus an image directory from `readpdf`.
+   If the work came from another skill, it named them: `.data/transcript.txt`
+   (wording), `.data/transcript.srt` (timing) and `.data/source.json` (origin)
+   from `transcribe`/`pipeline`, or a `<base>.md` plus an image directory from
+   `readpdf`/`readimages`. For a video you may also have `<item>/.data/img` from
+   `slides` — ask about that below before writing any prose.
 
 2. **Confirm the destination - and MEASURE before you propose.** An item is a
    folder of ANY name; the name carries no meaning to the toolchain and is never

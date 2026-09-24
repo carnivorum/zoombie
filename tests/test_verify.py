@@ -216,6 +216,47 @@ class TestDeadLink:
         assert vf.verify_tree(str(root))["ok"] is True
 
 
+class TestLineSuffixedLinks:
+    """The ``file.ext:LINE`` form is what the skills themselves mandate.
+
+    A destination like ``Безруков/summary.md:1`` must resolve the path and ignore
+    the line number. The old resolver kept ``:1`` as part of the filename, so
+    every line-suffixed link in the library was a dead link -- the checker flagged
+    the house style as broken and could not be used as a gate.
+    """
+
+    def test_a_line_suffixed_existing_link_resolves(self, tmp_path):
+        root = build_tree(tmp_path)
+        summary = (root / "summary.md").read_text(encoding="utf-8")
+        (root / "summary.md").write_text(
+            summary.replace("./other-summary.md", "./other-summary.md:5"),
+            encoding="utf-8",
+        )
+        report = vf.verify_tree(str(root))
+        assert report["ok"] is True, report["problems"]
+
+    def test_a_line_suffixed_bare_existing_link_resolves(self, tmp_path):
+        """No leading ``./`` either, as the GitHub-style house form appears."""
+        root = build_tree(tmp_path)
+        summary = (root / "summary.md").read_text(encoding="utf-8")
+        (root / "summary.md").write_text(
+            summary.replace("./other-summary.md", "other-summary.md:12"),
+            encoding="utf-8",
+        )
+        assert vf.verify_tree(str(root))["ok"] is True
+
+    def test_a_line_suffixed_MISSING_link_is_still_a_dead_link(self, tmp_path):
+        """The suffix must not blind the check to a genuinely missing file."""
+        root = build_tree(tmp_path)
+        (root / "other-summary.md").unlink()
+        summary = (root / "summary.md").read_text(encoding="utf-8")
+        (root / "summary.md").write_text(
+            summary.replace("./other-summary.md", "./other-summary.md:3"),
+            encoding="utf-8",
+        )
+        assert vf.KIND_DEAD_LINK in kinds(vf.verify_tree(str(root)))
+
+
 class TestMissingSource:
     def test_a_missing_source_document_is_reported(self, tmp_path):
         root = build_tree(tmp_path)

@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import os
 import re
+import unicodedata
 
 from ..cli import Outcome
 from ..lib import env as env_mod, paths, process, stt, ytdlp
@@ -17,14 +18,53 @@ from ..lib.errors import StepFailedError, ZoombieError
 
 URL_PATTERN = re.compile(r"^https?://", re.IGNORECASE)
 
+# Characters Windows forbids in a file name. yt-dlp's --windows-filenames strips
+# them, but a fullwidth ``？`` (U+FF1F) is NOT the ASCII ``?`` and slips through,
+# so the name is re-checked here after fullwidth folding.
+_ILLEGAL_NAME_CHARS = '<>:"/\\|?*'
 
-def _retain_source(video_path: str, output_base: str) -> str | None:
-    """Copy the source media beside the transcript; return where, or ``None``.
 
-    The item contract says the source sits at the item root next to ``summary.md``,
-    so this is a COPY and not a move: the download directory is still cleaned up
-    afterwards, and a failure to copy must not lose the original while the
-    transcription is already written.
+def _sanitize_media_name(name: str, *, max_len: int = 150) -> str:
+    """A safe basename for the retained media: NFC, ASCII punctuation, capped.
+
+    A video title is content-controlled and routinely carries fullwidth forms --
+    ``？`` (U+FF1F) renders like ``?`` but is a different code point, so a title
+    ending in one produced ``… уже сегодня？ [hash].mp4`` and forced a
+    percent-encoded link. Normalising here gives an ASCII-punctuation, NFC,
+    quote-free name with the stem capped and the extension preserved.
+    """
+    normalised = unicodedata.normalize("NFC", name)
+    stem, dot, extension = normalised.rpartition(".")
+    if not dot:
+        stem, extension = normalised, ""
+    folded = "".join(
+        chr(ord(ch) - 0xFEE0) if "\uff01" <= ch <= "\uff5e"
+        else " " if ch == "\u3000"
+        else ch
+        for ch in stem
+    )
+    cleaned = "".join(
+        ch for ch in folded if ch not in _ILLEGAL_NAME_CHARS and ord(ch) >= 32
+    )
+    cleaned = cleaned.rstrip(" .")
+    if len(cleaned) > max_len:
+        cleaned = cleaned[:max_len].rstrip(" .")
+    cleaned = cleaned or "media"
+    safe_extension = "".join(
+        ch for ch in extension if ch not in _ILLEGAL_NAME_CHARS and ord(ch) >= 32
+    )
+    safe_extension = safe_extension.rstrip(" .")
+    return f"{cleaned}.{safe_extension}" if safe_extension else cleaned
+
+
+def _retain_source(video_path: str, item_dir: str) -> str | None:
+    """Copy the source media to the item root; return where, or ``None``.
+
+    The item contract says the source sits at the item root next to ``summary.md``
+    -- NOT in ``.data/``, which holds derived material only -- so this is addressed
+    at ``item_dir`` directly and is a COPY, not a move: the download directory is
+    still cleaned up afterwards, and a failure to copy must not lose the original
+    while the transcription is already written.
 
     Best effort by design. A media file name is content-controlled -- a video
     title may be long, non-ASCII, or both -- so the destination can exceed the
@@ -35,7 +75,24 @@ def _retain_source(video_path: str, output_base: str) -> str | None:
     if not paths.is_file(video_path):
         return None
 
-    destination = os.path.join(os.path.dirname(output_base), os.path.basename(video_path))
+    destination = os.path.join(
+        item_dir,
+        _sanitize_media_name(os.path.basename(video_path)),
+    )
+
+    # Same-file is RETENTION, not a failure. When -DownloadDir equals the item
+    # folder -- the natural layout -- the source already sits where it belongs,
+    # and ``shutil.copyfile`` raises SameFileError on identical paths. The old
+    # code reported that as "not retained", which then recorded the false
+    # ``sourceKept:false`` / ``sourceFile:null`` the sidecar exists to prevent.
+    # The paths are RESOLVED before comparing, so a case-only or ``./``-prefix
+    # difference still counts as the same file.
+    if os.path.normcase(paths.absolute(video_path)) == os.path.normcase(
+        paths.absolute(destination)
+    ):
+        process.log(f"  source retained: {destination}")
+        return destination
+
     try:
         # Room for the extension and the Windows path budget; the NAME is not ours
         # to shorten, so an over-long one is refused rather than truncated.
@@ -139,7 +196,11 @@ def run(args) -> Outcome:
     work = paths.new_ascii_dir(work_root)
     audio_out = os.path.join(work, "audio.wav")
 
+    # ``-Output`` names the ITEM folder; the artifacts go to ``<item>/.data/`` and
+    # the retained media to the item root, so both are measured against the budget.
+    item_dir = stt.item_dir_for(args.output, video_path)
     base = stt.resolve_output_base(video_path, args.output)
+    paths.assert_fits(item_dir, "The pipeline item folder")
     # Room for ``.source.json`` (the longest appended suffix) plus the dot.
     paths.assert_fits(base, "The pipeline output path", slack=13)
     # ffmpeg and yt-dlp both take this path as a native argument, so only its
@@ -151,7 +212,8 @@ def run(args) -> Outcome:
             return Outcome(
                 ok=True,
                 data={"dryRun": True, "stage": "extract+transcribe",
-                      "video": video_path, "outputBase": base, "work": work},
+                      "video": video_path, "itemDir": item_dir,
+                      "outputBase": base, "work": work},
             )
         return Outcome(ok=True, data={"dryRun": True, "stage": "download", "url": args.source})
 
@@ -177,11 +239,12 @@ def run(args) -> Outcome:
         # the Windows budget must not fail a run whose transcription succeeded, and the
         # sidecar records what actually happened, so an item whose media was not kept
         # stays well-formed.
-        kept_source = _retain_source(video_path, base)
+        kept_source = _retain_source(video_path, item_dir)
     
         request = stt.Request(
             audio_path=audio_out,
             output_base=base,
+            item_dir=item_dir,
             language=args.language,
             want_srt=args.srt,
             no_srt=args.no_srt,

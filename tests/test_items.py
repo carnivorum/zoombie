@@ -524,3 +524,49 @@ class TestItemsCommand:
     def test_a_missing_root_is_a_clean_failure(self, tmp_path, capsys):
         assert main(["items", "-Root", str(tmp_path / "nope")]) == 1
         assert json.loads(capsys.readouterr().out.strip())["ok"] is False
+
+
+class TestNextNumberIsNotInvented:
+    """``nextNumber`` must describe the workspace, not a default of 1.
+
+    Under a measured ``title-only`` convention the number is meaningless, and
+    printing ``1`` invites a caller to invent one. It is suppressed -- but only
+    when nothing is actually numbered, so a genuinely numbered workspace keeps
+    its successor.
+    """
+
+    def test_title_only_items_report_no_next_number(self, tmp_path):
+        for name in ("Первый", "Второй", "Третий"):
+            make_item(tmp_path, name, number=None, date=None, title=name)
+        result = scan.scan(str(tmp_path))
+        assert result.naming["convention"] == "title-only"
+        assert result.next_number is None
+
+    def test_numbered_items_keep_their_successor(self, tmp_path):
+        """A plainly-named but numbered workspace is NOT suppressed."""
+        for index, name in enumerate(("один", "два", "три"), start=1):
+            make_item(tmp_path, name, number=index, date=None, title=name)
+        assert scan.scan(str(tmp_path)).next_number == 4
+
+    def test_the_cli_omits_the_next_number_line(self, tmp_path, capsys):
+        for name in ("Первый", "Второй", "Третий"):
+            make_item(tmp_path, name, number=None, date=None, title=name)
+        assert main(["items", "-Root", str(tmp_path), "-Title", "Новый"]) == 0
+        stderr = capsys.readouterr().err
+        assert "next number" not in stderr
+
+
+class TestLogScanFallback:
+    """``-: - «title»`` reads as a broken record; the folder name is shown."""
+
+    def test_an_unnumbered_undated_item_logs_its_folder_name(self, tmp_path, capsys):
+        make_item(tmp_path, "Плейлист", number=None, date=None, title="Плейлист")
+        scan.log_scan(scan.scan(str(tmp_path)))
+        assert "Плейлист" in capsys.readouterr().err
+
+    def test_a_numbered_item_still_logs_its_number(self, tmp_path, capsys):
+        make_item(tmp_path, "item", number=7, date="2020-05-06", title="Заметки")
+        scan.log_scan(scan.scan(str(tmp_path)))
+        err = capsys.readouterr().err
+        assert "7:" in err
+        assert "Заметки" in err

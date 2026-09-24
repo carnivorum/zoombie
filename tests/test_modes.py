@@ -340,7 +340,7 @@ class TestRoleBehaviour:
         """The role must name the skills, not just say 'use the tools'."""
         for name in ("zoombie-transcribe-video", "zoombie-transcribe-audio",
                      "zoombie-download-video", "zoombie-extract-audio",
-                     "zoombie-pdf-to-md", "zoombie-summarize", "zoombie postprocess"):
+                     "zoombie-images-to-md", "zoombie-summarize", "zoombie postprocess"):
             assert name in items, f"the role no longer points at {name}"
 
     def test_separates_the_two_document_shapes(self, items):

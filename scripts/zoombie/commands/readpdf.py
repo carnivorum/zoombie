@@ -127,6 +127,16 @@ def run(args) -> Outcome:
     # -ImageDir is an explicit directory; -ImagesOnly implies extraction too, so
     # that `readpdf -Source x.pdf -ImagesOnly` works with no second flag.
     want_images = bool(args.images or args.images_only or args.image_dir)
+    # Vision escalation is an EXPLICIT opt-in: the user names the directory the
+    # rendered scans should land in. It is per-page and only for pages with no
+    # text layer, so a normal document is unaffected. Read via getattr because a
+    # programmatic caller (and the existing unit tests) builds a Namespace with
+    # only the original flags.
+    vision_arg = getattr(args, "vision_dir", None)
+    dpi = getattr(args, "dpi", 200) or 200
+    vision_dir = paths.absolute(vision_arg) if vision_arg else None
+    if vision_dir:
+        paths.assert_fits(vision_dir, "The readpdf vision directory", slack=16)
     images_dir = None
     images_default_reason: str | None = None
     if want_images:
@@ -167,6 +177,7 @@ def run(args) -> Outcome:
 
     safe_markdown = os.path.join(work, "out.md")
     work_images = os.path.join(work, "images")
+    work_vision = os.path.join(work, "vision")
     if args.dry_run:
         safe_input = os.path.join(work, "input.pdf")
     else:
@@ -192,6 +203,8 @@ def run(args) -> Outcome:
         images_dir=work_images if want_images else None,
         min_px=args.min_px,
         min_pt=args.min_pt,
+        vision_dir=work_vision if vision_dir else None,
+        dpi=dpi,
     )
 
     if args.dry_run:
@@ -247,6 +260,19 @@ def run(args) -> Outcome:
             "defaultReason": images_default_reason,
         }
 
+    # Copy the rendered scans back. Only text-less pages were rendered, and only
+    # when -Vision was given and OCR did not run, so this stays empty on a normal
+    # text document.
+    if vision_dir and result.vision_pages:
+        paths.ensure_dir(vision_dir)
+        if paths.is_dir(work_vision):
+            paths.copy_tree(work_vision, vision_dir)
+        artifacts["vision"] = {
+            "path": vision_dir,
+            "count": len(result.vision_pages),
+            "pages": [dict(entry) for entry in result.vision_pages],
+        }
+
     if not args.keep_work:
         paths.remove_quietly(work, recursive=True)
 
@@ -259,6 +285,10 @@ def run(args) -> Outcome:
             "pages": result.pages,
             "ocrUsed": result.ocr_used,
             "keptScannedPages": result.kept_scanned_pages,
+            # Render-only escalation: the scans a vision reader still has to look
+            # at. Present only when -Vision was given and pages had no text layer.
+            "visionDir": result.vision_dir if result.vision_pages else None,
+            "visionPages": [dict(entry) for entry in result.vision_pages],
             "asciiSafe": True,
         },
     )

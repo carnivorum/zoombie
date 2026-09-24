@@ -7,10 +7,11 @@ path, which would create a stray directory.
 Every skill is namespaced ``zoombie-*``, so a name can never collide with a
 foreign skill and deployment simply overwrites.
 
-The repo sources under ``skills/`` share four boilerplate blocks (how to resolve
-the launcher, the JSON contract, the repo fallback and the shell note) through
-``skills/_shared/``. Deployment EXPANDS those includes, so the installed skill is
-self-contained and an agent never has to resolve an include at runtime.
+The repo sources under ``skills/`` share five boilerplate blocks (how to resolve
+the launcher, the JSON contract, the repo fallback, the shell note and the
+scratch-dir rule) through ``skills/_shared/``. Deployment EXPANDS those includes,
+so the installed skill is self-contained and an agent never has to resolve an
+include at runtime.
 """
 
 from __future__ import annotations
@@ -130,6 +131,35 @@ def read_marker(path: str) -> Marker:
     return result
 
 
+def prune(root: str, keep: set[str]) -> list[dict]:
+    """Remove deployed ``zoombie-*`` skills that no longer have a source.
+
+    A rename (``zoombie-pdf-to-md`` -> ``zoombie-images-to-md``) leaves the old
+    directory behind, and two skills then advertise the same job -- the agent
+    picks one arbitrarily. Removal is deliberately narrow so a foreign skill is
+    never touched:
+
+    * only directories whose name starts with ``zoombie-`` are candidates;
+    * only a directory whose ``SKILL.md`` carries OUR version marker is removed
+      (an unowned folder that merely starts with ``zoombie-`` is left alone);
+    * a name still present in ``keep`` is never removed.
+    """
+    removed: list[dict] = []
+    if not paths.is_dir(root):
+        return removed
+    for entry in paths.list_dir(root, dirs=True):
+        if entry.name in keep or entry.name == SHARED_FOLDER:
+            continue
+        if not entry.name.startswith("zoombie-"):
+            continue
+        skill_file = os.path.join(entry.path, "SKILL.md")
+        if not read_marker(skill_file).owned:
+            continue  # not ours: a foreign folder that happens to be named so
+        paths.remove(entry.path, recursive=True)
+        removed.append({"skill": entry.name, "action": "removed (stale)"})
+    return removed
+
+
 def deploy(source_root: str, version: str) -> list[dict]:
     """Deploy every ``<source_root>\\<name>\\SKILL.md`` to the global skills root.
 
@@ -148,10 +178,16 @@ def deploy(source_root: str, version: str) -> list[dict]:
         process.log("no skills folder to deploy; skipping", "warn")
         return results
 
-    for entry in paths.list_dir(source_root, dirs=True):
+    sources = [
+        entry for entry in paths.list_dir(source_root, dirs=True)
+        if paths.is_file(os.path.join(entry.path, "SKILL.md"))
+    ]
+    # Remove stale skills BEFORE writing, so a rename cannot leave both the old
+    # and the new skill installed at the end of the run.
+    results.extend(prune(root, {entry.name for entry in sources}))
+
+    for entry in sources:
         source = os.path.join(entry.path, "SKILL.md")
-        if not paths.is_file(source):
-            continue
         destination = os.path.join(root, entry.name, "SKILL.md")
         expanded = expand_includes(_read_text(source), shared)
 

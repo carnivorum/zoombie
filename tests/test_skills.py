@@ -36,7 +36,7 @@ EXPECTED_SKILLS = {
     "zoombie-extract-audio",
     "zoombie-transcribe-audio",
     "zoombie-transcribe-video",
-    "zoombie-pdf-to-md",
+    "zoombie-images-to-md",
     "zoombie-summarize",
 }
 
@@ -50,11 +50,17 @@ EXPECTED_SKILLS = {
 # another skill growing to this size - or any skill re-pasting a shared block,
 # which costs roughly 1.5 KB - fails rather than being paid for by every agent
 # that loads it.
-MAX_SKILL_BYTES = 11000
+# Raised from 11000 when the scratch-note block was shared: every skill now carries
+# its include marker, which is a few hundred bytes, and zoombie-summarize sits just
+# under the bound. The guard still catches a re-pasted BLOCK (roughly 1.5 KB) or a
+# skill that took on a second job.
+MAX_SKILL_BYTES = 11500
 
 # The canonical include blocks. Kept explicit so a rename is a deliberate edit
 # here, and so a deleted block is a failure rather than a silently missing include.
-EXPECTED_INCLUDES = {"cli-resolve", "json-contract", "repo-fallback", "shell-note"}
+EXPECTED_INCLUDES = {
+    "cli-resolve", "json-contract", "repo-fallback", "shell-note", "scratch-note",
+}
 
 _OPEN_RE = re.compile(r"<!--\s*zoombie:include\s+([A-Za-z0-9._-]+)\s*-->")
 _CLOSE_RE = re.compile(r"<!--\s*/zoombie:include\s*-->")
@@ -289,6 +295,44 @@ class TestSharedIncludes:
                 "<!-- zoombie:include cli-resolve -->\ntext with no close\n",
                 _shared_dir(),
             )
+
+
+class TestPrune:
+    """A rename must not leave two skills advertising the same job."""
+
+    def _deploy(self, root, name, version=SKILL_VERSION, owned=True):
+        directory = root / name
+        directory.mkdir()
+        marker = f"{skills_mod.MARKER_KEY}: {version}\n" if owned else ""
+        (directory / "SKILL.md").write_text(
+            f"---\nname: {name}\n{marker}---\nbody\n", encoding="utf-8"
+        )
+        return directory
+
+    def test_a_stale_owned_zoombie_skill_is_removed(self, tmp_path):
+        stale = self._deploy(tmp_path, "zoombie-pdf-to-md")
+        removed = skills_mod.prune(str(tmp_path), {"zoombie-images-to-md"})
+        assert [entry["skill"] for entry in removed] == ["zoombie-pdf-to-md"]
+        assert not stale.exists()
+
+    def test_a_kept_skill_is_left_alone(self, tmp_path):
+        kept = self._deploy(tmp_path, "zoombie-summarize")
+        skills_mod.prune(str(tmp_path), {"zoombie-summarize"})
+        assert kept.exists()
+
+    def test_a_foreign_folder_is_never_removed(self, tmp_path):
+        # Starts with 'zoombie-' but carries no marker: not ours.
+        foreign = self._deploy(tmp_path, "zoombie-custom", owned=False)
+        assert skills_mod.prune(str(tmp_path), set()) == []
+        assert foreign.exists()
+
+    def test_a_non_zoombie_folder_is_never_removed(self, tmp_path):
+        other = self._deploy(tmp_path, "someone-else")
+        assert skills_mod.prune(str(tmp_path), set()) == []
+        assert other.exists()
+
+    def test_a_missing_root_is_not_an_error(self, tmp_path):
+        assert skills_mod.prune(str(tmp_path / "absent"), set()) == []
 
 
 class TestSkillBudget:

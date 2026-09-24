@@ -55,6 +55,29 @@ class TestSkipped:
         # A row would link the folder; the skipped entry spells the name plainly.
         assert "](notes/)" not in table_part(markdown)
 
+    def test_a_folder_with_source_material_is_named_as_not_yet_summarised(self, tmp_path):
+        """A legacy/in-progress item must not read as an unrelated folder.
+
+        The real case: a curated pre-item-model folder holding a transcript and a
+        media file but no ``summary.md``. ``index`` reports it in its own section
+        rather than lumping it in with ``scripts``/``plans``.
+        """
+        make_item(tmp_path, "item", number=1, date="2020-05-06", title="A")
+        legacy = tmp_path / "Могилко"
+        legacy.mkdir()
+        (legacy / "video.mp4").write_bytes(b"m")
+        (legacy / "transcript.txt").write_text("text\n", encoding="utf-8")
+
+        markdown = library.render_markdown(
+            str(tmp_path), *library.scan_library_detail(str(tmp_path))
+        )
+        assert "## Not yet summarised" in markdown
+        assert "`Могилко`" in markdown
+        assert "no summary.md yet" in markdown
+        # It is NOT mislabelled as an unrelated plain folder.
+        skipped_section = markdown.split("## Not yet summarised", 1)[0]
+        assert "`Могилко`" not in skipped_section
+
 
 class TestTable:
     def test_number_date_and_title_come_from_item_json(self, tmp_path):

@@ -90,6 +90,11 @@ DECLARATION_TOKENS = (
 ANCHOR_RE = re.compile(r'<a\s+id="(s-\d+)"\s*></a>')
 # ``#s-N`` at the end of a link destination: the block-4 index target.
 FRAGMENT_ANCHOR_RE = re.compile(r"^#(s-\d+)$")
+# A GitHub-style line suffix on an otherwise valid destination, e.g.
+# ``Безруков/summary.md:1``. Our OWN skill docs mandate the ``file.ext:LINE``
+# link form, so the verifier must resolve the path and ignore the line number --
+# otherwise it flags the house style as 74 dead links and is unusable as a gate.
+LINE_SUFFIX_RE = re.compile(r":\d+$")
 
 
 def _line_of(text: str, offset: int) -> int:
@@ -114,9 +119,14 @@ def _resolve(base_dir: str, dest: str) -> str:
 
     ``unquote`` is what makes the check correct on our own output: the rewriter
     encodes a space as ``%20`` and leaves Cyrillic raw, so the on-disk name is
-    the *decoded* form. Fragments (``#s-1``) are dropped -- they are not paths.
+    the *decoded* form. Fragments (``#s-1``) are dropped -- they are not paths --
+    and a trailing ``:<digits>`` line suffix (``summary.md:1``) is dropped from
+    the PATH too. The line-suffixed form is what our own skill docs mandate, so
+    treating it as part of the filename flags the house style as broken; the
+    path is resolved and, when it exists, the link is valid.
     """
     path = unquote(dest.split("#", 1)[0]).replace("<", "").replace(">", "").strip()
+    path = LINE_SUFFIX_RE.sub("", path)
     if not path:
         return ""
     return os.path.normpath(os.path.join(base_dir, path))

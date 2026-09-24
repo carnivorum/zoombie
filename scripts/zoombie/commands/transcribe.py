@@ -17,6 +17,8 @@ def run(args) -> Outcome:
     if not paths.is_file(args.source):
         raise ZoombieError(f"Input not found: {args.source}")
 
+    # ``-Output`` names the ITEM folder; the artifacts go to ``<item>/.data/``.
+    item_dir = stt.item_dir_for(args.output, args.source)
     base = stt.resolve_output_base(args.source, args.output)
 
     # Refused BEFORE the environment is resolved and before any scratch dir
@@ -29,6 +31,7 @@ def run(args) -> Outcome:
     request = stt.Request(
         audio_path=args.source,
         output_base=base,
+        item_dir=item_dir,
         language=args.language,
         # Want_srt is the accepted no-op alias; no_srt is what actually governs.
         want_srt=args.srt,

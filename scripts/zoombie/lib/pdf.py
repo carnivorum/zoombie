@@ -97,6 +97,13 @@ class Options:
     sidecar: bool = True
     min_px: int = DEFAULT_MIN_PX
     min_pt: int = DEFAULT_MIN_PT
+    # Vision escalation for a page with NO text layer. When ``vision_dir`` is
+    # set, such a page is RENDERED to a PNG there instead of being OCR'd or
+    # dropped, so a vision-capable model can read it. A page WITH text is never
+    # rendered: text extraction is always preferred, so a normal document costs
+    # zero images. This is per-page escalation, never a whole-document mode.
+    vision_dir: str | None = None
+    dpi: int = 200
 
 
 @dataclass
@@ -115,6 +122,10 @@ class Result:
     image_count: int = 0
     images_placed: int = 0
     images_skipped: list[dict] = field(default_factory=list)
+    # Pages rendered for vision escalation (a scan with no text layer), as
+    # ``[{page, file}]``. Empty on every text-first run.
+    vision_dir: str | None = None
+    vision_pages: list[dict] = field(default_factory=list)
 
     def to_data(self) -> dict:
         return {
@@ -130,6 +141,8 @@ class Result:
             "imageCount": self.image_count,
             "imagesPlaced": self.images_placed,
             "imagesSkipped": [dict(entry) for entry in self.images_skipped],
+            "visionDir": self.vision_dir,
+            "visionPages": [dict(entry) for entry in self.vision_pages],
         }
 
 
@@ -196,6 +209,17 @@ def ocr_page(page, lang: str) -> str:
     pix = page.get_pixmap(dpi=200)
     image = Image.open(io.BytesIO(pix.tobytes("png")))
     return pytesseract.image_to_string(image, lang=lang).strip()
+
+
+def render_page_png(page, dpi: int = 200) -> tuple[bytes, int, int]:
+    """Render one page to PNG bytes; return ``(bytes, width, height)``.
+
+    Used ONLY for vision escalation of a page with no text layer. It is a plain
+    rasterization with no OCR and no image library beyond PyMuPDF itself, so the
+    page can be handed to a vision model as an ordinary image.
+    """
+    pix = page.get_pixmap(dpi=dpi)
+    return pix.tobytes("png"), pix.width, pix.height
 
 
 def _as_text(part: object) -> str:
@@ -651,6 +675,33 @@ def convert(options: Options) -> Result:
             images_skipped.extend(failed)
             if options.sidecar:
                 manifest = images_sidecar(images_dir, entries, options.input)
+
+        # Vision escalation. ``skipped_pages`` is exactly the set of pages with
+        # NO text layer that were not OCR'd, so rendering that set is the whole
+        # point: a page that yielded text was already handled by PyMuPDF4LLM and
+        # is never rasterized. When OCR ran, it won -- text-first, and a
+        # deterministic result beats a rendered page -- so vision is skipped and
+        # said so, rather than silently producing both.
+        vision_pages: list[dict] = []
+        if options.vision_dir and skipped_pages:
+            if ocr_used:
+                log("readpdf: OCR handled the scanned pages; vision escalation skipped")
+            else:
+                os.makedirs(options.vision_dir, exist_ok=True)
+                for page_number in skipped_pages:
+                    try:
+                        data, width, height = render_page_png(doc.load_page(page_number - 1), options.dpi)
+                    except Exception as exc:  # noqa: BLE001 - one page must not abort
+                        images_skipped.append(
+                            {"reason": "vision-error", "page": page_number, "error": str(exc)}
+                        )
+                        continue
+                    name = f"page-{page_number:03d}.png"
+                    with open(os.path.join(options.vision_dir, name), "wb") as handle:
+                        handle.write(data)
+                    vision_pages.append({"page": page_number, "file": name,
+                                         "width": width, "height": height})
+                log(f"readpdf: rendered {len(vision_pages)} scan page(s) for vision")
     finally:
         doc.close()
 
@@ -677,6 +728,8 @@ def convert(options: Options) -> Result:
         image_count=len(entries),
         images_placed=placed,
         images_skipped=images_skipped,
+        vision_dir=options.vision_dir if vision_pages else None,
+        vision_pages=vision_pages,
     )
 
 
@@ -700,6 +753,11 @@ def build_parser() -> argparse.ArgumentParser:
                         help=f"drop images below this pixel size (default: {DEFAULT_MIN_PX})")
     parser.add_argument("--min-pt", type=int, default=DEFAULT_MIN_PT,
                         help=f"drop images below this on-page size in points (default: {DEFAULT_MIN_PT})")
+    parser.add_argument(
+        "--vision-dir", default=None,
+        help="render text-less (scanned) pages to PNG there for a vision reader",
+    )
+    parser.add_argument("--dpi", type=int, default=200, help="render dpi for --vision-dir (default: 200)")
     parser.add_argument("--json", action="store_true", help="print one JSON result line on stdout")
     return parser
 
@@ -718,6 +776,8 @@ def main(argv: list[str] | None = None) -> int:
         images_dir=args.image_dir,
         min_px=args.min_px,
         min_pt=args.min_pt,
+        vision_dir=args.vision_dir,
+        dpi=args.dpi,
     )
 
     def emit(ok: bool, data: dict, error: str | None) -> None:

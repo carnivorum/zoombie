@@ -90,6 +90,22 @@ def _kind_of(file_name: str) -> str:
     return "video"
 
 
+def _holds_source_material(item_dir: str) -> bool:
+    """True when a non-item folder holds source material but no summary.
+
+    Such a folder is a legacy or in-progress item -- a curated library produced
+    before the item model, or a download awaiting its write-up -- and the index
+    should say so rather than describe it as an unrelated folder.
+    """
+    for entry in paths.list_dir(item_dir, files=True):
+        lower = entry.name.lower()
+        if lower.endswith(SOURCE_EXTENSIONS):
+            return True
+        if lower.endswith(".srt") or lower.endswith(".txt"):
+            return True
+    return False
+
+
 def _item_record(item_dir: str, name: str) -> dict:
     """One item, described in the shape the CLI publishes."""
     resolved = meta.fields(item_dir, name)
@@ -146,6 +162,12 @@ def _children(root: str) -> ScanResult:
                 {
                     "name": name,
                     "path": item_dir,
+                    # ``media`` distinguishes a folder that HOLDS source material
+                    # (a media file or a transcript) but no summary yet -- a
+                    # legacy or in-progress item -- from an unrelated folder. The
+                    # index uses it to say which, so a curated pre-item-model
+                    # folder is not lumped in with ``scripts``/``plans``.
+                    "kind": "media" if _holds_source_material(item_dir) else "folder",
                     "reason": "no summary.md and no .data/ directory",
                 }
             )
@@ -176,12 +198,30 @@ def _children(root: str) -> ScanResult:
 
     # The successor number considers existing items, not arbitrary siblings, so a
     # stray folder named "99 - notes" cannot push the next item to 100.
-    existing = [item["number"] for item in result.items]
-    result.naming["nextNumber"] = registry.next_number(existing)
+    result.naming["nextNumber"] = _successor_number(
+        result.items, result.naming.get("convention")
+    )
 
     result.items.sort(key=_sort_key)
     result.skipped.sort(key=lambda entry: entry["name"].lower())
     return result
+
+
+def _successor_number(items: list[dict], convention_id: str | None) -> int | None:
+    """The next item number, or ``None`` when numbering is not in use.
+
+    ``registry.next_number`` starts at 1 when nothing is numbered, and reporting
+    that ``1`` under a measured ``title-only`` convention is misleading: it
+    invites a caller to invent a number the workspace does not use. So the number
+    is suppressed when the convention is ``title-only`` AND no existing item
+    carries one. A workspace that IS numbered keeps its successor even when the
+    folders are plainly named, so a real number is never hidden.
+    """
+    existing = [item["number"] for item in items]
+    has_numbers = any(isinstance(value, int) for value in existing)
+    if convention_id == "title-only" and not has_numbers:
+        return None
+    return registry.next_number(existing)
 
 
 def _items_are_a_share(item_count: int, sample_count: int, *, share: float = 0.5) -> bool:
@@ -256,8 +296,8 @@ def scan(root: str, depth: int = 1) -> ScanResult:
 
     if depth <= 1:
         # One level: what ``_children`` computed IS the answer.
-        result.naming["nextNumber"] = registry.next_number(
-            [item["number"] for item in result.items]
+        result.naming["nextNumber"] = _successor_number(
+            result.items, result.naming.get("convention")
         )
         return result
 
@@ -288,8 +328,8 @@ def scan(root: str, depth: int = 1) -> ScanResult:
     # folder down would be handed 7 again. The confidence cap reads ``itemCount``
     # too, so a stale value would also downgrade a genuinely strong verdict.
     result.naming["itemCount"] = len(result.items)
-    result.naming["nextNumber"] = registry.next_number(
-        [item["number"] for item in result.items]
+    result.naming["nextNumber"] = _successor_number(
+        result.items, result.naming.get("convention")
     )
     return result
 
@@ -297,9 +337,16 @@ def scan(root: str, depth: int = 1) -> ScanResult:
 def log_scan(result: ScanResult) -> None:
     """Human-readable progress on stderr; stdout stays the one JSON line."""
     for item in result.items:
+        # Under a title-only convention the number and date are absent, and
+        # ``-: - «title»`` reads as a broken record. Fall back to the folder
+        # name, which is the one identifier every item always has.
+        if item["number"] is None and item["date"] is None:
+            label = item["name"]
+        else:
+            number = item["number"] if item["number"] is not None else "-"
+            label = f"{number}: {item['date'] or '-'} {item['title']}"
         process.log(
-            f"  {item['number'] if item['number'] is not None else '-'}: "
-            f"{item['date'] or '-'} {item['title']} "
+            f"  {label} "
             f"summary={'yes' if item['summary'] else 'no'} "
             f"images={item['images']} "
             f"source={item['source']['file'] or '-'}"

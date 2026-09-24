@@ -1,6 +1,6 @@
 ---
 name: zoombie-extract-audio
-cvrm-zoombie-version: 4.6.0
+cvrm-zoombie-version: 4.8.0
 description: Extract the audio track from a video file into a whisper-ready WAV (or mp3/m4a/flac) using ffmpeg. Use when the user wants to pull audio out of a video or recording, prepare media for transcription, or convert to 16 kHz mono PCM. Always inspects the project first, proposes candidate output destinations, and confirms with the user before running ffmpeg or writing any file.
 ---
 
@@ -54,6 +54,9 @@ command.
 - Supported formats: `wav` (default), `mp3`, `m4a`, `flac`. Warn the user that
   whisper.cpp performs best with 16 kHz mono WAV.
 - Never overwrite without asking; pass `-Force` only with the user's consent.
+
+<!-- zoombie:include scratch-note -->
+<!-- /zoombie:include -->
 
 <!-- zoombie:include shell-note -->
 <!-- /zoombie:include -->

@@ -25,7 +25,12 @@ from __future__ import annotations
 # deploy time, and the role prompt is compressed.
 # 4.6.0: the cli-resolve block points a user without a launcher at the setup.md
 # flow (fetch and follow) rather than the raw bootstrap one-liner.
-SKILL_VERSION = "4.6.0"
+# 4.7.0: zoombie-pdf-to-md becomes zoombie-images-to-md (text-first; vision/OCR
+# only for a page or file with no text layer), zoombie-summarize asks before
+# extracting slides, and the new `slides`/`readimages` subcommands ship.
+# 4.8.0: every skill carries the shared scratch-note block: temporary files an
+# agent writes go under the workspace /.tmp/, never C:\Temp or the workspace root.
+SKILL_VERSION = "4.8.0"
 
 # The version marker written into every SKILL.md we own, to prove ownership.
 MARKER_KEY = "cvrm-zoombie-version"

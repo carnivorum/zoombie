@@ -90,6 +90,7 @@ scripts/
       doctor.py  download.py  extract.py  readpdf.py
       transcribe.py  pipeline.py  clean.py
       postprocess.py  verify.py  library.py (zoombie index)
+      slides.py (video -> slide frames)  readimages.py (images -> Markdown)
     lib/
       paths.py      env root, ASCII guard, path budget, extended prefix, safe-work copy
       manifest.py   env.json read/write
@@ -99,7 +100,9 @@ scripts/
       whisper.py    capabilities, device proof, timings, hang-tolerant runner
       cublas.py     pinned cuBLAS redist records + runtime readiness
       stt.py        shared transcribe orchestration (transcribe + pipeline)
-      pdf.py        PDF -> Markdown (PyMuPDF4LLM + optional Tesseract OCR)
+      pdf.py        PDF -> Markdown (PyMuPDF4LLM + optional Tesseract OCR / vision)
+      slides.py     video -> slide frames (exact timestamps or perceptual dedup)
+      ocr.py        Tesseract over a standalone image file
       textnorm.py   text normalization: norm/normalize_with_map, hhmmss, link encoding
       srt.py        SRT parsing + the word-window timing lookup for headings
       markdown.py   range-based, idempotent edits of a generated summary.md
@@ -119,7 +122,7 @@ skills/
   zoombie-extract-audio/SKILL.md      thin wrapper -> zoombie extract
   zoombie-transcribe-audio/SKILL.md   thin wrapper -> zoombie transcribe
   zoombie-transcribe-video/SKILL.md   thin wrapper -> zoombie pipeline
-  zoombie-pdf-to-md/SKILL.md          thin wrapper -> zoombie readpdf
+  zoombie-images-to-md/SKILL.md       thin wrapper -> zoombie readpdf / readimages
   zoombie-summarize/SKILL.md          writes summary.md -> zoombie postprocess / index
 ```
 
@@ -296,9 +299,11 @@ $zoombie = @(
 & $zoombie doctor                                         # report tool status
 & $zoombie download -Source "<url>" -DownloadDir "<dir>" [-AudioOnly] [-Format wav]
 & $zoombie extract  -Source "<video>" -Output "<out>" [-Format wav|mp3|m4a|flac]
-& $zoombie transcribe -Source "<audio>" -Output "<basename>" [-Language auto] [-NoSrt] [-NoGpu] [-NoFlashAttn] [-Threads N] [-AllowCpuFallback] [-StrictGpu]
-& $zoombie readpdf  -Source "<pdf>" -Output "<basename>" [-Ocr] [-Images] [-ImagesOnly] [-ImageDir "<dir>"] [-MinPx N] [-MinPt N] [-Pages "1-5,8"]
-& $zoombie pipeline -Source "<url-or-file>" -Output "<basename>" [-DownloadDir "<dir>"] [-NoSrt]
+& $zoombie transcribe -Source "<audio>" -Output "<item-folder>" [-Language auto] [-NoSrt] [-NoGpu] [-NoFlashAttn] [-Threads N] [-AllowCpuFallback] [-StrictGpu]
+& $zoombie readpdf  -Source "<pdf>" -Output "<basename>" [-Ocr | -Vision "<dir>"] [-Images] [-ImagesOnly] [-ImageDir "<dir>"] [-MinPx N] [-MinPt N] [-Pages "1-5,8"]
+& $zoombie readimages -Source "<image-or-dir>" -Output "<basename>" [-Ocr] [-Lang eng] [-ImageDir "<dir>"]
+& $zoombie slides -Source "<video>" -Output "<item-dir>" [-Times "00:01:00,00:05:30"] [-TimesFile "<path>"] [-Srt "<file>"] [-Scale N] [-MinSlideSec S] [-HashDistance N]
+& $zoombie pipeline -Source "<url-or-file>" -Output "<item-folder>" [-DownloadDir "<dir>"] [-NoSrt]
 & $zoombie postprocess -Md "<summary.md>" [-Srt "<file>"] [-ImageDir "<dir>"] [-Apply]   # anchors, timestamps, index, images
 & $zoombie verify   -Dir "<library-root>" [-Recurse] [-Json]                               # exit 1 on problems
 & $zoombie index    -Dir "<library-root>" [-Output "<path>"] [-Json] [-Apply]             # regenerate README.md
@@ -313,17 +318,24 @@ Two commands are **dry run by default** and write ONLY with `-Apply`, because a
 skill calls them and must never be able to corrupt a document by accident:
 `postprocess` and `index`.
 
-### Transcription output: SRT by default
+### Transcription output: into the item's `.data/`
+
+`-Output` on `transcribe` and `pipeline` names the **item folder**, not a
+basename. The artifacts always land in that folder's `.data/` subdirectory —
+`transcript.txt`, `transcript.srt` and `source.json` — which is the documented
+item layout. Nothing derived is written at the item root, and (for `pipeline`) the
+retained media sits at the item root beside `summary.md`. Omitting `-Output`
+defaults the item to the source file's own folder.
 
 `transcribe` and `pipeline` emit subtitles **by default**:
 
 | Flag | Effect |
 |------|--------|
-| *(none)* | a `<base>.srt` is written beside the transcript |
+| *(none)* | `.data/transcript.srt` is written beside the transcript |
 | `-NoSrt` | suppress the `.srt` (the timings are then lost) |
 | `-Srt` | **legacy no-op alias**, kept so existing callers keep working — it can never remove the default |
 
-Every run also writes a `<base>.source.json` origin sidecar recording where the
+Every run also writes a `.data/source.json` origin sidecar recording where the
 input came from. `pipeline` exposes no `-Format`: its audio is always a 16 kHz
 mono WAV, which is the only thing whisper.cpp consumes. `-Format` lives on
 `download` and `extract`, where it is honoured.
@@ -339,11 +351,44 @@ mono WAV, which is the only thing whisper.cpp consumes. `-Format` lives on
 | `-ImageDir <dir>` | explicit image directory (default `<base>.images`); implies extraction |
 | `-MinPx N` | drop images below this pixel size |
 | `-MinPt N` | drop images below this on-page size in points |
+| `-Vision <dir>` | render pages with **no text layer** to PNG in `<dir>` for a vision reader (text pages are never rendered; ignored when `-Ocr` is given) |
+| `-Dpi N` | render dpi for `-Vision` (default 200) |
 
 When images are extracted, `manifest.json` and `README.md` are written **into the
 image directory** (`img\` when the summarize workflow relocates it). The manifest
 records placement metadata; `postprocess` reads it to re-insert the images, and
 `verify` reports `missing-manifest` / `missing-readme` when either file is absent.
+
+**Reading policy: text first, vision/OCR only for a page with no text layer.** A
+PDF with extractable text is read by PyMuPDF4LLM and never rasterized, so it costs
+zero image tokens. A page with no text layer is escalated per page — `-Ocr` for a
+deterministic Tesseract result, or `-Vision <dir>` to render it for the model. A
+run that leaves scans unresolved reports them in `data.keptScannedPages`, so a
+skipped scan is never silent.
+
+### `slides`: a video's slide frames, with a placement manifest
+
+`slides` extracts the slide images out of a video and writes the same kind of
+sidecar `readpdf` does, so `postprocess` inlines them into `summary.md` block 6.
+Each slide's `anchor_text` is the narration spoken during its interval, read from
+the sibling SRT — that is the join between the audio and the video.
+
+| Mode | Flag | Effect |
+|------|------|--------|
+| exact timestamps | `-Times "00:01:00,00:05:30"` / `-TimesFile <path>` | one frame per timestamp, no detection and no dedup — the minimal set |
+| auto-detect | *(default)* | sample, dedup with a perceptual hash (dHash + Hamming), keep the last frame of each stable run |
+
+`data` reports `mode`, `candidateFrames`, `keptFrames` and `intervals`, so the
+dedup ratio is measurable per run rather than assumed. `-HashDistance` and
+`-MinSlideSec` are the two thresholds; a higher distance and a longer minimum both
+lower the kept count.
+
+### `readimages`: an image or a folder of images
+
+`readimages` is the image-input half of the same capability. Without `-Ocr` it
+writes the Markdown image links plus the sidecar and leaves the reading to the
+model (`data.visionOnly: true`); with `-Ocr` it runs Tesseract and renders the text
+under each image. It never guesses text.
 
 ## Performance: proving the GPU is really used
 
@@ -434,6 +479,20 @@ The install also stops trusting a sticky `env.json`: the backend recorded there
 is compared with the **current** hardware probe, and a machine that gained or
 lost a GPU gets the matching build reinstalled instead of keeping the old one.
 
+One exception, which is what keeps a non-NVIDIA machine from re-downloading on
+every run: when no asset exists for the detected backend, the CPU build is a
+recorded **substitution** (`whisper.backendSubstituted` + `whisper.requestedBackend`).
+The next run sees the same substitution holds and keeps the build, rather than
+treating "cpu installed, vulkan detected" as a mismatch and downloading again.
+
+The chooser is capability **and benefit**: `cuda` for an NVIDIA GPU; `vulkan` only
+for a discrete GPU with enough dedicated VRAM and a current driver; `cpu`
+otherwise — including integrated GPUs (Iris/UHD, AMD iGPU), which share the system
+memory bus and would contend with the CPU for bandwidth. The reason is recorded in
+plain language at `whisper.backendReason`, and `gpuPolicy.gpuIgnored` is true when
+a GPU is present but the CPU will actually run. Set `ZOOMBIE_ALLOW_IGPU_VULKAN=1`
+to force Vulkan on an integrated GPU.
+
 To check the state at any time:
 
 ```bat
@@ -452,11 +511,11 @@ if not exist "%ZOOMBIE_BIN%" set "ZOOMBIE_BIN=%PUBLIC%\zoombie-env\bin\zoombie\z
 The six skills in [`skills/`](skills/) are the canonical sources. They only
 inspect the project, propose paths, collect the user's confirmation, and then
 call the CLI. They are namespaced `zoombie-*` so their names cannot collide with a
-foreign skill, and they carry `cvrm-zoombie-version: 4.5.0`, which the installer
+foreign skill, and they carry `cvrm-zoombie-version: 4.8.0`, which the installer
 compares to decide `up to date` vs `updated`.
 
-Four blocks repeat across all six - how to resolve the launcher, the JSON
-contract, the repo fallback and the shell note - so they live once in
+Five blocks repeat across all six - how to resolve the launcher, the JSON
+contract, the repo fallback, the shell note and the scratch-dir rule - so they live once in
 [`skills/_shared/`](skills/_shared/) and a source marks the include site with
 `<!-- zoombie:include <name> -->`. **Deployment expands those markers**, so the
 installed skill is self-contained and an agent never resolves an include at
@@ -469,15 +528,16 @@ shared block redeploys without a version bump.
 | `zoombie-extract-audio` | a whisper-ready WAV via `zoombie extract` |
 | `zoombie-transcribe-audio` | a transcript (+ SRT) via `zoombie transcribe` |
 | `zoombie-transcribe-video` | the whole chain via `zoombie pipeline` |
-| `zoombie-pdf-to-md` | Markdown (+ images) via `zoombie readpdf` |
+| `zoombie-images-to-md` | Markdown (+ images) via `zoombie readpdf` / `zoombie readimages` |
 | `zoombie-summarize` | a 6-block `summary.md` in an item folder |
 
-`zoombie-pdf-to-md` converts a PDF to Markdown. Text PDFs need nothing extra;
-scanned PDFs use an opt-in Tesseract OCR fallback (`-Ocr`). It reuses the Python
-this repo already requires (the `pymupdf4llm`/`pytesseract` dependencies are
-installed into it with `pip --user`), and the source PDF is copied into an ASCII
-scratch dir first, so the Cyrillic-path invariant holds for PyMuPDF exactly as it
-does for whisper.cpp.
+`zoombie-images-to-md` converts a PDF, a loose image, or a folder of images to
+Markdown. **A text PDF is read directly and costs nothing** — only a page with no
+text layer is escalated, to `-Ocr` (deterministic Tesseract) or to `-Vision` (a
+rendered page the model reads). It reuses the Python this repo already requires
+(the `pymupdf4llm`/`pytesseract` dependencies are installed into it with
+`pip --user`), and the source is copied into an ASCII scratch dir first, so the
+Cyrillic-path invariant holds for PyMuPDF exactly as it does for whisper.cpp.
 
 `zoombie-summarize` turns a transcript, a PDF-derived Markdown, or arbitrary text
 into a 6-block `summary.md` inside an **item**. An item is a folder whose name is
@@ -558,7 +618,7 @@ holds none.
   path and always pulls the published repo.
 - Bump `SKILL_VERSION` in [`__init__.py`](scripts/zoombie/__init__.py) when skill
   content changes, so deployment can tell an installed skill is out of date. It is
-  currently `4.5.0`; every `SKILL.md` carries the same value in
+  currently `4.8.0`; every `SKILL.md` carries the same value in
   `cvrm-zoombie-version`, inside the first 12 lines — `read_marker` reads only the
   front matter, so a marker that drifts below it reads as unowned.
 - **A comment must earn its place.** Keep one that prevents a realistic future

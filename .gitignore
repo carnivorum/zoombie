@@ -31,6 +31,9 @@ downloads/
 __pycache__/
 *.py[cod]
 
-# Scratch
-.zombie.tmp/
+# Scratch. .tmp/ is the agent-facing convention every skill states: anything
+# temporary an agent writes inside the workspace goes there, so a failed run
+# cannot pollute the tree. work/ is the toolchain's own scratch, ignored in case
+# -WorkRoot points inside the repo.
+.tmp/
 work/

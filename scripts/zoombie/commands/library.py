@@ -141,17 +141,40 @@ def render_markdown(root: str, items: list[dict], skipped: list[dict],
     parts.append(render_table(root, items) if items else "_No items found._")
 
     if skipped:
-        parts.extend(
-            [
-                "",
-                "## Skipped",
-                "",
-                "Folders that hold neither a `summary.md` nor a `.data/` directory:",
-                "",
-            ]
-        )
-        for entry in skipped:
-            parts.append(f"- `{_cell(entry['name'])}` -- {entry['reason']}")
+        # A folder that HOLDS source material but no summary is a legacy or
+        # in-progress item, and saying so is what keeps a curated pre-item-model
+        # library visible in its own index instead of reading as scratch.
+        not_summarised = [entry for entry in skipped if entry.get("kind") == "media"]
+        plain = [entry for entry in skipped if entry.get("kind") != "media"]
+
+        if plain:
+            parts.extend(
+                [
+                    "",
+                    "## Skipped",
+                    "",
+                    "Folders that hold neither a `summary.md` nor a `.data/` directory:",
+                    "",
+                ]
+            )
+            for entry in plain:
+                parts.append(f"- `{_cell(entry['name'])}` -- {entry['reason']}")
+
+        if not_summarised:
+            parts.extend(
+                [
+                    "",
+                    "## Not yet summarised",
+                    "",
+                    "Folders that hold source material but no `summary.md` yet:",
+                    "",
+                ]
+            )
+            for entry in not_summarised:
+                parts.append(
+                    f"- `{_cell(entry['name'])}` -- source material present, "
+                    "no summary.md yet"
+                )
 
     # Exactly one trailing newline, the same discipline postprocess enforces.
     return "\n".join(parts).rstrip("\n") + "\n"
