@@ -23,7 +23,9 @@ from __future__ import annotations
 #
 # 4.5.0: skills share their boilerplate through skills/_shared/, expanded at
 # deploy time, and the role prompt is compressed.
-SKILL_VERSION = "4.5.0"
+# 4.6.0: the cli-resolve block points a user without a launcher at the setup.md
+# flow (fetch and follow) rather than the raw bootstrap one-liner.
+SKILL_VERSION = "4.6.0"
 
 # The version marker written into every SKILL.md we own, to prove ownership.
 MARKER_KEY = "cvrm-zoombie-version"

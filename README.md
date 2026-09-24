@@ -6,6 +6,26 @@ audio → transcribe with whisper.cpp (CUDA/Vulkan/CPU), plus PDF → Markdown.
 Everything fragile lives in tested Python, not in prose an agent re-interprets.
 The skills are thin wrappers that call one CLI.
 
+## Install on a fresh machine
+
+Paste this into a fresh Zoo task. Zoo fetches the setup instructions from this
+repo and then follows them: it detects what is present, tells you what the real
+run will download, waits for your confirmation, and installs and self-tests.
+
+```text
+Fetch the zoombie setup instructions and follow them exactly.
+
+    curl.exe -L -o "%TEMP%\zoombie-setup.md" https://raw.githubusercontent.com/carnivorum/zoombie/main/setup.md
+
+Then read %TEMP%\zoombie-setup.md and carry out every step in it, working step by
+step with a todo checklist. Detect before installing. Ask me before the real
+download. Never claim success without the self-test passing.
+```
+
+Nothing else is needed -- no prior setup, no saved file, no shell wrapper.
+Re-running the same paste installs or updates to the latest. [`setup.md`](setup.md)
+is the agent-facing procedure itself; the sections below explain the design.
+
 ## Why it is built this way
 
 - **Determinism.** Install and media commands live in [`scripts/`](scripts/), so
@@ -106,7 +126,7 @@ skills/
 The installed toolchain lives outside the repo, at an ASCII path:
 
 ```
-%USERPROFILE%\zoombie-env\
+%USERPROFILE%\zoombie-env\        (or %PUBLIC%\zoombie-env\ when the profile is not ASCII)
   bin\ffmpeg.exe, ffprobe.exe
   bin\whisper\whisper-cli.exe (+ CUDA/Vulkan DLLs beside it, incl. the cuBLAS
                runtime cublas64_<major>.dll/cublasLt64_<major>.dll, provisioned
@@ -136,7 +156,10 @@ that cannot fit them (limit 240 characters, with margin), naming the numbers and
 suggesting a shorter `-Root`. `%USERPROFILE%\zoombie-env` is short by
 construction; this only bites when the root is overridden deep in the tree.
 
-Skills are deployed to the global root `%USERPROFILE%\.roo\skills\`.
+Skills are deployed to the global root `%USERPROFILE%\.roo\skills\`. That path
+stays under the profile even when the toolchain root moves to `%PUBLIC%`: it is
+owned by the editor and is never opened by a native tool, so the ASCII rule that
+governs the toolchain root does not apply to it.
 
 The **Zoombie role** is deployed as a Zoo Code custom mode, into the global
 `custom_modes.yaml` under the extension's settings folder. It is a universal
@@ -168,8 +191,14 @@ python -m zoombie.selftest
 Run those from the `scripts\` directory (or with `PYTHONPATH=scripts`), so
 `python -m zoombie...` resolves the package.
 
+**End users** do not clone the repo. Paste the block from
+[Install on a fresh machine](#install-on-a-fresh-machine) into a Zoo task: Zoo
+fetches [`setup.md`](setup.md) and runs the bootstrap for you (detect, confirm,
+apply, self-test). The two commands below are the manual equivalent, for a
+machine that already has this checkout:
+
 ```bat
-REM END USERS: one command installs or updates to the LATEST
+REM END USERS (manual): one command installs or updates to the LATEST
 scripts\bootstrap.cmd
 scripts\bootstrap.cmd -Check
 ```
@@ -182,12 +211,45 @@ repository archive from GitHub, and hands off to the Python installer. So any
 start of setup means *install or update to the latest* — there is no cached copy
 to go stale and no gate that can skip the update.
 
-That makes the distribution unit a single line. From any shell, in any working
-directory, on a machine with nothing installed:
+The distribution unit is a short instruction, not a file. Paste this into a Zoo
+task on any machine, from any shell and any working directory:
+
+```text
+Fetch the zoombie setup instructions and follow them exactly.
+
+    curl.exe -L -o "%TEMP%\zoombie-setup.md" https://raw.githubusercontent.com/carnivorum/zoombie/main/setup.md
+
+Then read %TEMP%\zoombie-setup.md and carry out every step in it, working step by
+step with a todo checklist. Detect before installing. Ask me before the real
+download. Never claim success without the self-test passing.
+```
+
+Zoo downloads [`setup.md`](setup.md) and follows it: detect -> confirm -> apply ->
+self-test -> report. `setup.md` in turn runs [`scripts/bootstrap.cmd`](scripts/bootstrap.cmd),
+which finds (or installs) a Python interpreter, fetches the CURRENT repository
+archive from GitHub, and hands off to the Python installer. So any start of setup
+means *install or update to the latest* -- there is no cached copy to go stale and
+no gate that can skip the update.
+
+The bootstrap underneath is also runnable by hand, which is the fallback when no
+agent is driving and for troubleshooting. From PowerShell:
 
 ```powershell
 irm https://raw.githubusercontent.com/carnivorum/zoombie/main/scripts/bootstrap.ps1 | iex
 ```
+
+or, needing no PowerShell at all, from `cmd.exe`:
+
+```bat
+curl.exe -L -o "%TEMP%\bootstrap.cmd" https://raw.githubusercontent.com/carnivorum/zoombie/main/scripts/bootstrap.cmd
+"%TEMP%\bootstrap.cmd"
+```
+
+Running the bootstrap directly skips the guardrails: it never prompts, it runs no
+`-Check` first and no self-test afterwards, so prefer the `setup.md` flow. Both
+entry points are location-independent, so neither cares where it is saved or run
+from, and re-running either installs or updates to the latest (the install is
+idempotent, so only what changed does work).
 
 `bootstrap.ps1` is a shim: it downloads `bootstrap.cmd` to a temp directory and
 runs it. Every option (`-Check`, `-DryRun`, `-Model`, `-Root`, `-Force`) has an
@@ -196,31 +258,20 @@ environment-variable form (`ZOOMBIE_CHECK`, `ZOOMBIE_DRYRUN`, `ZOOMBIE_MODEL`,
 them. Run as a file it returns the installer's exit code; run inline it throws
 rather than exiting, so it never closes the caller's shell.
 
-The `cmd.exe` equivalent needs no PowerShell at all:
-
-```bat
-curl.exe -L -o "%TEMP%\bootstrap.cmd" https://raw.githubusercontent.com/carnivorum/zoombie/main/scripts/bootstrap.cmd
-"%TEMP%\bootstrap.cmd"
-```
-
-Or just paste [`setup.md`](setup.md) into a Zoo task — its Step 0 is exactly this.
-Re-running the same command re-fetches the latest repo and updates in place (the
-install is idempotent, so only what changed does work).
-
 What travels in the repo vs. what each machine rebuilds:
 
 | Thing | Travels? | Why |
 |-------|----------|-----|
 | `scripts/`, `skills/`, `modes/`, `setup.md` | yes | the implementation and the sources; the bootstrap fetches these itself |
-| `%USERPROFILE%\zoombie-env\` | no | machine-local and large (the model alone can be ~1.5 GB); re-fetched so it matches each machine's GPU backend |
+| `%USERPROFILE%\zoombie-env\` (or `%PUBLIC%\zoombie-env\`) | no | machine-local and large (the model alone can be ~1.5 GB); re-fetched so it matches each machine's GPU backend, and re-homed to `%PUBLIC%` when the profile is not ASCII |
 | `%USERPROFILE%\.roo\skills\` | no | deployed copies, written from `skills/` by the installer |
 | `%APPDATA%\Code\User\globalStorage\zoocodeorganization.zoo-code\settings\custom_modes.yaml` | no | the Zoombie role is **merged** into it (only our entry is replaced; foreign modes are preserved), so a hand-written mode there is never lost |
 
 On a machine that is **already configured**, nothing further is needed: the
-deployed launcher at `%USERPROFILE%\zoombie-env\bin\zoombie\zoombie.cmd` is
-self-contained (it carries its own package and `pdf\`), and the six `zoombie-*`
-skills live in the global root, so "transcribe this video" and "convert this PDF"
-work from any workspace.
+deployed launcher under the ASCII root (`%USERPROFILE%\zoombie-env\`, or
+`%PUBLIC%\zoombie-env\` on a non-ASCII profile) is self-contained -- it carries
+its own package and `pdf\` -- and the six `zoombie-*` skills live in the global
+root, so "transcribe this video" and "convert this PDF" work from any workspace.
 
 The bootstrap honors environment overrides, so a fork or branch can be used
 without editing anything:
@@ -236,7 +287,11 @@ set ZOOMBIE_REPO_REF=dev                REM default: main
 `{ ok, action, data, error, timestamp }`. Human-readable progress goes to stderr.
 
 ```powershell
-$zoombie = "$env:USERPROFILE\zoombie-env\bin\zoombie\zoombie.cmd"
+# the toolchain root moves to %PUBLIC% when the profile path is not ASCII
+$zoombie = @(
+    "$env:USERPROFILE\zoombie-env\bin\zoombie\zoombie.cmd",
+    "$env:PUBLIC\zoombie-env\bin\zoombie\zoombie.cmd"
+) | Where-Object { Test-Path $_ } | Select-Object -First 1
 
 & $zoombie doctor                                         # report tool status
 & $zoombie download -Source "<url>" -DownloadDir "<dir>" [-AudioOnly] [-Format wav]
@@ -386,7 +441,10 @@ REM names the exact missing DLLs when a CUDA install cannot initialise
 python -m zoombie.install -Check
 
 REM backendConfigured vs backendObserved, with a warning on mismatch
-"%USERPROFILE%\zoombie-env\bin\zoombie\zoombie.cmd" doctor
+REM the launcher is under %PUBLIC% on a non-ASCII profile; probe both
+set "ZOOMBIE_BIN=%USERPROFILE%\zoombie-env\bin\zoombie\zoombie.cmd"
+if not exist "%ZOOMBIE_BIN%" set "ZOOMBIE_BIN=%PUBLIC%\zoombie-env\bin\zoombie\zoombie.cmd"
+"%ZOOMBIE_BIN%" doctor
 ```
 
 ## Skills

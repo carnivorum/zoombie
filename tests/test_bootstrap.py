@@ -1,8 +1,10 @@
 """Repo-level invariants for the setup entry points.
 
-The distribution story is a one-liner that downloads ``scripts/bootstrap.ps1``
-and runs it (or ``scripts/bootstrap.cmd`` directly). Two properties make that
-safe, and neither is visible from reading a single file:
+The distribution story is a short instruction the user pastes into a Zoo task:
+Zoo fetches ``setup.md`` and follows it, and ``setup.md`` in turn runs
+``scripts/bootstrap.ps1`` (a shim over ``scripts/bootstrap.cmd``). Running the
+batch file directly is the manual fallback. Two properties make that safe, and
+neither is visible from reading a single file:
 
 * **Agreement.** ``bootstrap.ps1`` is a shim over ``bootstrap.cmd``: it must
   advertise the same options and embed the same default repo slug and ref. If
@@ -207,6 +209,29 @@ class TestReferences:
         setup = _read(os.path.join(REPO_ROOT, "setup.md"))
         assert "bootstrap.ps1" in setup, (
             "setup.md Step 0 should offer the one-line PowerShell entry point"
+        )
+
+    def test_readme_leads_with_the_setup_fetch_flow(self):
+        """The README instruction must tell Zoo to fetch setup.md, not paste it.
+
+        The entry point is a short instruction whose whole job is to get
+        ``setup.md`` in front of the agent. If the fetch URL or the target file
+        name drifts, the paste silently installs nothing.
+        """
+        readme = _read(os.path.join(REPO_ROOT, "README.md"))
+        assert (
+            "raw.githubusercontent.com/carnivorum/zoombie/main/setup.md" in readme
+        ), "README must give the exact URL used to fetch setup.md"
+        assert '"%TEMP%\\zoombie-setup.md"' in readme, (
+            "README must download setup.md to a known temp path the agent can read"
+        )
+
+    def test_setup_md_describes_itself_as_agent_instructions(self):
+        """setup.md is fetched and followed, not pasted in full by a human."""
+        setup = _read(os.path.join(REPO_ROOT, "setup.md"))
+        assert "This file IS the procedure" in setup, (
+            "setup.md must state that an agent fetches it and follows it, so a "
+            "reader does not think it is pasted in full"
         )
 
     def test_no_live_reference_to_the_removed_powershell_implementation(self):

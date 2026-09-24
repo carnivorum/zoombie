@@ -1,10 +1,17 @@
 # Zoo PC Setup — Speech-to-Text Toolchain
 
 > **How to use this file**
-> Paste everything below the horizontal rule into a fresh Zoo task on a
-> Windows 10/11 machine. No prior setup is needed: the first step fetches a
-> bootstrap script, which then ensures a Python interpreter, fetches the rest of
-> the repo, and runs the install.
+> This file IS the procedure. It is not pasted in full by a human; a Zoo agent
+> fetches it and follows it, from the short install instruction in
+> [`README.md`](README.md) ("Install on a fresh machine"):
+>
+> ```text
+> curl.exe -L -o "%TEMP%\zoombie-setup.md" https://raw.githubusercontent.com/carnivorum/zoombie/main/setup.md
+> ```
+>
+> Then "read that file and carry out every step in it". No prior setup is needed:
+> Step 0 fetches a bootstrap script, which ensures a Python interpreter, fetches
+> the rest of the repo, and runs the install.
 >
 > Target OS: **Windows 10/11**. Shell: **PowerShell, cmd.exe, or any process
 > spawn** — PowerShell users get a single line, and the batch file beneath it
@@ -14,7 +21,7 @@
 > which hands off to the Python installer in [`scripts/zoombie/install/`](scripts/zoombie/install/).
 > [`scripts/bootstrap.ps1`](scripts/bootstrap.ps1) is a thin shim that downloads and
 > runs that batch file, so a PowerShell user never has to save a `.cmd` by hand.
-> This prompt's job is to run it, deploy the skills, verify, and report.
+> This procedure's job is to run it, deploy the skills, verify, and report.
 
 ---
 
@@ -72,7 +79,8 @@ Hard rules:
 whisper.cpp misbehaves when a path it receives contains non-ASCII (Cyrillic)
 characters. This setup removes the problem structurally:
 
-- The toolchain lives in a strictly ASCII root, `%USERPROFILE%\zoombie-env`.
+- The toolchain lives in a strictly ASCII root, normally
+  `%USERPROFILE%\zoombie-env` (see below for the non-ASCII-profile fallback).
 - The CLI copies every input into an ASCII scratch dir, runs whisper there, and
   copies the artifacts back to the user's real (possibly Cyrillic) destination.
 - No tool is invoked by PATH; every tool is called by an absolute path resolved
@@ -219,7 +227,9 @@ Remove-Item Env:\ZOOMBIE_CHECK, Env:\ZOOMBIE_DRYRUN -ErrorAction SilentlyContinu
 irm https://raw.githubusercontent.com/carnivorum/zoombie/main/scripts/bootstrap.ps1 | iex
 ```
 
-What it does (all idempotent — anything present is skipped):
+What it does (all idempotent — anything present is skipped). Paths are relative
+to the toolchain root, which is `%USERPROFILE%\zoombie-env` on an ASCII profile
+and `%PUBLIC%\zoombie-env` when the profile path is not ASCII:
 
 | Item | Where | Notes |
 |------|-------|-------|
@@ -232,7 +242,7 @@ What it does (all idempotent — anything present is skipped):
 | pip shims | `%APPDATA%\Python\<ver>\Scripts` | any launcher this install creates is removed again; pre-existing tools are left alone |
 | Tesseract | system-wide | *optional*; detection only, needed for `readpdf -Ocr` |
 | the CLI | `zoombie-env\bin\zoombie\` | `zoombie.cmd` + the packaged `zoombie\` package and `pdf\` helper, at a stable ASCII path |
-| skills | `%USERPROFILE%\.roo\skills\` | deployed from [`skills/`](skills/) |
+| skills | `%USERPROFILE%\.roo\skills\` | deployed from [`skills/`](skills/); stays under the profile even when the root is under `%PUBLIC%`, because the editor owns this path and no native tool opens it |
 | the Zoombie role | `%APPDATA%\Code\User\globalStorage\zoocodeorganization.zoo-code\settings\custom_modes.yaml` | **merged**, not overwritten, from [`modes/`](modes/): only our entry is replaced, so a hand-written mode in that file survives |
 | manifest | `zoombie-env\env.json` | resolved absolute paths + versions + hardware |
 
@@ -255,7 +265,10 @@ user first; `-Model large-v3-turbo` avoids re-fetching a smaller default.
 The installer deploys [`skills/`](skills/) to the **global** root
 `%USERPROFILE%\.roo\skills\`, so the skills work in every project. This root is
 the absolute path built from `%USERPROFILE%` — never a relative `..\..` path,
-which would create a stray directory.
+which would create a stray directory. It is the ONE path that stays under the
+profile even when the toolchain root moves to `%PUBLIC%`: the editor owns it and
+no native tool opens it, so the ASCII rule that governs `zoombie-env` does not
+apply to it. Do not relocate it.
 
 Versioning:
 
@@ -359,7 +372,8 @@ python -m zoombie.selftest
 
 > The self-test locates the **deployed** launcher, so it exercises what the skills
 > actually call. It can also be run from the deployed package directory
-> `%USERPROFILE%\zoombie-env\bin\zoombie`, where the package sits beside it.
+> `%USERPROFILE%\zoombie-env\bin\zoombie` (or `%PUBLIC%\zoombie-env\bin\zoombie`
+> on a non-ASCII profile), where the package sits beside it.
 
 The self-test:
 
@@ -411,7 +425,10 @@ deployed launcher against a URL the user approves (outputs go to user-approved
 locations, not a temp dir):
 
 ```bat
-"%USERPROFILE%\zoombie-env\bin\zoombie\zoombie.cmd" pipeline -Source "<url>" -Output "<confirmed-basename>"
+REM the root is %PUBLIC%\zoombie-env on a non-ASCII profile; probe both
+set "ZOOMBIE_BIN=%USERPROFILE%\zoombie-env\bin\zoombie\zoombie.cmd"
+if not exist "%ZOOMBIE_BIN%" set "ZOOMBIE_BIN=%PUBLIC%\zoombie-env\bin\zoombie\zoombie.cmd"
+"%ZOOMBIE_BIN%" pipeline -Source "<url>" -Output "<confirmed-basename>"
 ```
 
 ---
@@ -455,7 +472,7 @@ cause and the fix rather than overstating the result.
 [ ] Shell resolved (cmd.exe, PowerShell, or any process spawn — batch needs no wrapper)
 [ ] `bootstrap.cmd -Check` run and its findings reported
 [ ] User confirmed the download, then `bootstrap.cmd` applied
-[ ] Toolchain installed under the ASCII root %USERPROFILE%\zoombie-env
+[ ] Toolchain installed under the ASCII root %USERPROFILE%\zoombie-env (or %PUBLIC%\zoombie-env on a non-ASCII profile)
 [ ] Backend selected from hardware (cuda > vulkan > cpu) and explained
 [ ] Installed backend matches the CURRENT hardware (`backendDetected`), not a sticky value from an earlier run
 [ ] Model downloaded and recorded in env.json
