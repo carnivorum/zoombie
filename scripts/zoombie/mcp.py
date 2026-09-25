@@ -102,6 +102,7 @@ TOOL_COMMANDS: dict[str, str] = {
     "items": "items",
     "migrate": "migrate",
     "modes": "modes",
+    "mcp": "mcp",
 }
 
 # The stages that may block for a long time are the ones ``start``/``status``/
@@ -140,6 +141,7 @@ KNOWN_OPTIONS: dict[str, dict] = {
     "items": {"root": "str", "depth": "int", "recurse": "bool", "json": "bool", "title": "str", "date": "str"},
     "migrate": {"dir": "str", "json": "bool"},
     "modes": {"target": "str", "check": "bool"},
+    "mcp": {"target": "str", "check": "bool"},
     "clean": {"work_root": "str"},
     "download": {"download_dir": "str", "format": "str"},
     "extract": {"format": "str"},
@@ -594,6 +596,7 @@ def tool_schemas() -> list[dict]:
         schema("items", "Scan a workspace for items and report them compactly.", {"root": {"type": "string"}, "depth": {"type": "integer"}, "recurse": {"type": "boolean"}, "json": {"type": "boolean"}}, []),
         schema("migrate", "Move a library onto the .data/ item layout (dry run unless apply=true).", {"dir": {"type": "string"}, "json": {"type": "boolean"}, "apply": {"type": "boolean"}}, ["dir"]),
         schema("modes", "Deploy the Zoombie role into the global custom modes (dry run unless apply=true).", {"target": {"type": "string"}, "check": {"type": "boolean"}, "apply": {"type": "boolean"}, "force": {"type": "boolean"}}, []),
+        schema("mcp", "Register the zoombie MCP server in the client's global MCP settings (dry run unless apply=true).", {"target": {"type": "string"}, "check": {"type": "boolean"}, "apply": {"type": "boolean"}, "force": {"type": "boolean"}}, []),
     ]
     return tools_out
 

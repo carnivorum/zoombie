@@ -41,6 +41,14 @@ is the agent-facing procedure itself; the sections below explain the design.
 - **One shared library, split by concern.** `zoombie/lib/` holds the shared
   helpers and `zoombie/commands/` holds one module per subcommand, so a skill's
   path is short and legible: `cli → commands/<name>.py → lib/<concern>.py`.
+- **Two transports, one set of commands — MCP first.** Setup **globally** registers
+  the `zoombie` MCP server (`python -m zoombie.mcp`, JSON-RPC over stdio) in the
+  client's own `mcp_settings.json`, verifying the entry is present
+  (`manifest.mcp.registered`); the merge replaces only our entry, so other MCP
+  servers are preserved. The **skills prefer the MCP tools** and fall back to the
+  `zoombie.cmd` launcher, because the MCP path calls the commands **in process** —
+  no `cmd.exe`, no console code page — so a Cyrillic `-Output` never round-trips
+  through a shell. Re-register any time with `python -m zoombie mcp -Apply`.
 - **No install-path reliance.** All tools are fetched into one ASCII root and
   invoked by absolute path resolved from a manifest. PATH is only a fallback,
   refreshed from the registry, so "tool not found" false negatives are gone.
@@ -86,11 +94,13 @@ scripts/
     __main__.py                 python -m zoombie
     cli.py                      argparse + dispatch + the one-JSON-line contract
     selftest.py                 end-to-end test incl. the Cyrillic-path regression
+    mcp.py                      the MCP facade over the same command modules
     commands/
       doctor.py  download.py  extract.py  readpdf.py
       transcribe.py  pipeline.py  clean.py
       postprocess.py  verify.py  library.py (zoombie index)
       slides.py (video -> slide frames)  readimages.py (images -> Markdown)
+      unpack.py (installer/archive -> files)  modes.py  mcp.py (register tooling)
     lib/
       paths.py      env root, ASCII guard, path budget, extended prefix, safe-work copy
       manifest.py   env.json read/write
@@ -110,6 +120,8 @@ scripts/
       download.py   HTTP download with resume
       archive.py    zip extraction, long-path aware
       skills.py     skill marker + deployment
+      modes.py      merge the Zoombie role into custom_modes.yaml
+      mcpsettings.py  merge the MCP server into mcp_settings.json
       errors.py     user-facing exception types
     install/
       __main__.py   python -m zoombie.install
@@ -269,6 +281,7 @@ What travels in the repo vs. what each machine rebuilds:
 | `%USERPROFILE%\zoombie-env\` (or `%PUBLIC%\zoombie-env\`) | no | machine-local and large (the model alone can be ~1.5 GB); re-fetched so it matches each machine's GPU backend, and re-homed to `%PUBLIC%` when the profile is not ASCII |
 | `%USERPROFILE%\.roo\skills\` | no | deployed copies, written from `skills/` by the installer |
 | `%APPDATA%\Code\User\globalStorage\zoocodeorganization.zoo-code\settings\custom_modes.yaml` | no | the Zoombie role is **merged** into it (only our entry is replaced; foreign modes are preserved), so a hand-written mode there is never lost |
+| `%APPDATA%\Code\User\globalStorage\zoocodeorganization.zoo-code\settings\mcp_settings.json` | no | the `zoombie` MCP server is **merged** into it (only our entry is replaced; other MCP servers are preserved), so the server appears in the client without a manual config |
 
 On a machine that is **already configured**, nothing further is needed: the
 deployed launcher under the ASCII root (`%USERPROFILE%\zoombie-env\`, or

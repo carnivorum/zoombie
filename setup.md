@@ -251,6 +251,7 @@ and `%PUBLIC%\zoombie-env` when the profile path is not ASCII:
 | the CLI | `zoombie-env\bin\zoombie\` | `zoombie.cmd` + the packaged `zoombie\` package and `pdf\` helper, at a stable ASCII path |
 | skills | `%USERPROFILE%\.roo\skills\` | deployed from [`skills/`](skills/); stays under the profile even when the root is under `%PUBLIC%`, because the editor owns this path and no native tool opens it |
 | the Zoombie role | `%APPDATA%\Code\User\globalStorage\zoocodeorganization.zoo-code\settings\custom_modes.yaml` | **merged**, not overwritten, from [`modes/`](modes/): only our entry is replaced, so a hand-written mode in that file survives |
+| the MCP server | `%APPDATA%\Code\User\globalStorage\zoocodeorganization.zoo-code\settings\mcp_settings.json` | **merged**, not overwritten: registers the `zoombie` server (`python -m zoombie.mcp`) as `mcpServers.zoombie`, so the tools appear in the client without a manual config. Other MCP servers survive. Re-run any time with `python -m zoombie mcp -Apply` |
 | manifest | `zoombie-env\env.json` | resolved absolute paths + versions + hardware |
 
 Useful options (passed straight through `bootstrap.cmd` to the installer). Each
@@ -329,6 +330,57 @@ python -m zoombie modes -Apply     REM write it
 The target can be redirected with `ZOOMBIE_MODES_PATH`. If the file is not where
 the extension keeps it, or a workspace has its own `.roomodes`, that override is
 how to point the deploy at the right file.
+
+### The MCP server (global)
+
+The same install registers the **MCP server** — the toolchain's other transport —
+**globally**. `python -m zoombie.mcp` speaks JSON-RPC over stdio and calls the SAME
+command modules **in process**, so there is no `cmd.exe` and no console code page, and
+a Cyrillic `-Output` never round-trips through a shell. Setup merges one entry,
+`mcpServers.zoombie`, into the extension's global `mcp_settings.json`; every other
+server in that file is preserved (the same shared-ownership rule as the role).
+
+**Global is the target, and it is verified.** Setup writes only the global file and
+then confirms the entry is present, reporting `data.manifest.mcp.registered: true`
+and logging `mcp server 'zoombie' registered globally`. The **skills prefer the MCP
+tools** with the `zoombie.cmd` CLI as the fallback, so a machine-wide registration is
+what makes new projects work with no per-project setup. A warning —
+`entry not confirmed in <path>` — means the global file could not be written; fix it
+and re-run `python -m zoombie mcp -Apply`.
+
+Re-run just this step after a manual edit, without a full setup:
+
+```bat
+cd scripts
+python -m zoombie mcp -Check     REM report the planned action only
+python -m zoombie mcp            REM dry run (the default)
+python -m zoombie mcp -Apply     REM write it
+```
+
+The target can be redirected with `ZOOMBIE_MCP_SETTINGS_PATH`. Verify Zoo sees the
+`zoombie` server in the MCP panel; if it is listed but not connected, check that
+the entry's `command` is an existing Python and that the `-m zoombie.mcp` module
+runs:
+
+```bat
+"%USERPROFILE%\zoombie-env\bin\zoombie\python.exe" -c "import zoombie.mcp"
+```
+
+**Optional: project scope.** The global merge above is all that is normally needed.
+Only if a client insists on a project-scoped server, register the SAME entry in the
+workspace's `.roo/mcp.json` (the file the extension reads for *project* servers) —
+this is a manual fallback, not part of the install:
+
+```json
+{ "mcpServers": { "zoombie": {
+  "command": "%USERPROFILE%\\zoombie-env\\bin\\zoombie\\python.exe",
+  "args": ["-m", "zoombie.mcp"],
+  "env": { "PYTHONPATH": "%USERPROFILE%\\zoombie-env\\bin\\zoombie", "PYTHONUTF8": "1" }
+} } }
+```
+
+Ask the agent to fill the absolute interpreter path, since `%USERPROFILE%` is not
+expanded inside the JSON.
 
 ### The item model
 
@@ -507,8 +559,10 @@ cause and the fix rather than overstating the result.
 [ ] Installed backend matches the CURRENT hardware (`backendDetected`), OR differs for a recorded reason: `whisper.backendSubstituted` is true when no asset exists for the detected backend and the CPU build was used instead
 [ ] Model downloaded and recorded in env.json
 [ ] CLI deployed to zoombie-env\bin\zoombie\zoombie.cmd, and the launcher works from ANY working directory
-[ ] Six zoombie-* skills deployed to %USERPROFILE%\.roo\skills\ with cvrm-zoombie-version 4.8.0
+[ ] Six zoombie-* skills deployed to %USERPROFILE%\.roo\skills\ with cvrm-zoombie-version 4.9.0
 [ ] The Zoombie role merged into the global custom_modes.yaml, only our entry replaced, and any hand-written mode in that file still intact
+[ ] The `zoombie` MCP server merged into the global mcp_settings.json (`mcpServers.zoombie`), only our entry replaced, and any other MCP server in that file still intact
+[ ] The MCP server is usable: `python -m zoombie.mcp --version` prints to stderr from the deployed package
 [ ] A `.md` artifact can be written in the Zoombie role and a `.py` file is refused by its edit restriction
 [ ] No stray .roo\skills directory outside %USERPROFILE%
 [ ] A skill invocation routes through zoombie.cmd (not raw ffmpeg/whisper/python commands)

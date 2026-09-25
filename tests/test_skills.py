@@ -54,7 +54,10 @@ EXPECTED_SKILLS = {
 # its include marker, which is a few hundred bytes, and zoombie-summarize sits just
 # under the bound. The guard still catches a re-pasted BLOCK (roughly 1.5 KB) or a
 # skill that took on a second job.
-MAX_SKILL_BYTES = 11500
+# Raised from 11500 when the shared cli-resolve block gained the MCP-first note
+# (the MCP facade is now registered at setup): every skill expands it, so the
+# bound moves with the shared text, not with any one skill.
+MAX_SKILL_BYTES = 12000
 
 # The canonical include blocks. Kept explicit so a rename is a deliberate edit
 # here, and so a deleted block is a failure rather than a silently missing include.
@@ -333,6 +336,44 @@ class TestPrune:
 
     def test_a_missing_root_is_not_an_error(self, tmp_path):
         assert skills_mod.prune(str(tmp_path / "absent"), set()) == []
+
+
+class TestMcpFirst:
+    """The shared transport block must make MCP the first choice, CLI the fallback.
+
+    Every skill includes this block, so the ordering here is the policy: an agent
+    that reads it should reach for the MCP tools and only fall back to the launcher.
+    """
+
+    def _block(self) -> str:
+        return _read(os.path.join(_shared_dir(), "cli-resolve.md"))
+
+    def test_every_skill_includes_the_transport_block(self):
+        for path in _skill_paths():
+            assert "zoombie:include cli-resolve" in _read(path), (
+                f"{os.path.basename(os.path.dirname(path))} does not include the "
+                "transport-resolution block"
+            )
+
+    def test_the_block_recommends_mcp_before_the_cli(self):
+        body = self._block()
+        assert "MCP" in body, "the transport block must mention MCP"
+        # The MCP recommendation must come BEFORE the CLI resolution snippet.
+        assert body.index("MCP") < body.index("zoombie.cmd"), (
+            "MCP must be presented first, with the CLI as the fallback"
+        )
+
+    def test_the_block_names_the_cli_as_the_fallback(self):
+        assert "fallback" in self._block().lower()
+
+    def test_the_expanded_skill_carries_the_mcp_first_rule(self):
+        """What is DEPLOYED must carry the rule, not only the repo source."""
+        for path in _skill_paths():
+            expanded = skills_mod.expand_includes(_read(path), _shared_dir())
+            assert "MCP" in expanded, (
+                f"{os.path.basename(os.path.dirname(path))} does not reach the MCP "
+                "tools after expansion"
+            )
 
 
 class TestSkillBudget:

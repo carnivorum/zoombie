@@ -23,6 +23,7 @@ from ..lib import (
     download,
     env as env_mod,
     manifest,
+    mcpsettings,
     modes as modes_mod,
     paths,
     process,
@@ -908,3 +909,43 @@ def deploy_modes(modes: Modes) -> list[dict]:
     for record in results:
         record["roleVersion"] = ROLE_VERSION
     return results
+
+
+def deploy_mcp(modes: Modes) -> dict:
+    """Register the MCP facade in the client's global MCP settings.
+
+    The MCP server is a second transport over the SAME commands, so wiring it up is
+    part of a normal install rather than an optional extra. The client owns the
+    target file (it may hold other servers), so this is a merge: only our entry is
+    replaced and every foreign server is preserved. In ``-Check``/``-DryRun`` the
+    plan is computed -- so the reported action is truthful -- but nothing is written.
+
+    A failure here is reported, never raised: the CLI is already installed and
+    verified, and a missing Python or an unreadable settings file must not abort
+    setup. The caller records the outcome on the manifest.
+    """
+    if not modes.may_write:
+        record = mcpsettings.deploy(dry_run=True)
+        process.log(
+            f"mcp server '{record['name']}' (global): {record['action']} -> "
+            f"{record['path']}",
+            "step",
+        )
+        return record
+
+    record = mcpsettings.deploy_safe()
+    if record["action"] == "failed":
+        process.log(f"mcp server: {record.get('note')}", "warn")
+    elif record.get("registered"):
+        # Confirmed against the FILE, not the action: "installed globally" is a
+        # checked fact here, which is what the skills' MCP-first rule relies on.
+        process.log(
+            f"mcp server 'zoombie' registered globally -> {record['path']}"
+        )
+        modes.note(f"mcp server (global): {record['action']}")
+    else:
+        process.log(
+            f"mcp server entry not confirmed in {record['path']} (global settings)",
+            "warn",
+        )
+    return record

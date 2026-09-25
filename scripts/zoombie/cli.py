@@ -579,6 +579,30 @@ def build_parser() -> argparse.ArgumentParser:
         help="rewrite even when the content already matches",
     )
 
+    # --- mcp --------------------------------------------------------------
+    # Registers the MCP facade (``python -m zoombie.mcp``) in the client's global
+    # mcp_settings.json, so the server is available without a full setup and a
+    # prompt-only change ships on its own. Dry run by default for the same reason
+    # as modes: this edits a file the USER owns (and may hold other servers).
+    mcp = subparsers.add_parser(
+        "mcp", help="register the MCP server in the global Zoo Code MCP settings"
+    )
+    mcp.add_argument(
+        "-Target", "--target", dest="target", default=None,
+        help="explicit mcp_settings.json (default: the global one)",
+    )
+    mcp.add_argument(
+        "-Check", "--check", action="store_true",
+        help="report the planned action without writing",
+    )
+    mcp.add_argument(
+        "-Apply", "--apply", action="store_true", help="write the change (default: dry run)"
+    )
+    mcp.add_argument(
+        "-Force", "--force", action="store_true",
+        help="rewrite even when the entry already matches",
+    )
+
     return parser
 
 
@@ -632,6 +656,9 @@ def _dispatch(args: argparse.Namespace) -> Outcome:
     if args.command == "modes":
         from .commands import modes
         return modes.run(args)
+    if args.command == "mcp":
+        from .commands import mcp as mcp_cmd
+        return mcp_cmd.run(args)
     raise ZoombieError(f"unknown command: {args.command}")
 
 

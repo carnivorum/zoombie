@@ -1,6 +1,6 @@
 ---
 name: zoombie-transcribe-video
-cvrm-zoombie-version: 4.8.0
+cvrm-zoombie-version: 4.9.0
 description: End-to-end pipeline that turns a video file or a video URL into SOURCE material - a TXT transcript, an SRT subtitle track and a .source.json origin sidecar - by chaining the zoombie download, extract and transcribe stages in one CLI call. Use when the user says things like transcribe this video, transcribe this link, or give me a transcript of this recording. It deliberately writes no summary and no readable document; zoombie-summarize produces those. Collects every output-path confirmation up front in one pass.
 ---
 

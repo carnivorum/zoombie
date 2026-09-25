@@ -30,7 +30,10 @@ from __future__ import annotations
 # extracting slides, and the new `slides`/`readimages` subcommands ship.
 # 4.8.0: every skill carries the shared scratch-note block: temporary files an
 # agent writes go under the workspace /.tmp/, never C:\Temp or the workspace root.
-SKILL_VERSION = "4.8.0"
+# 4.9.0: the MCP facade is registered in the client's own MCP settings at setup
+# (lib/mcpsettings + the `mcp` command), so the servers the skills already call are
+# reachable in process; the shared cli-resolve block points at the MCP tools first.
+SKILL_VERSION = "4.9.0"
 
 # The version marker written into every SKILL.md we own, to prove ownership.
 MARKER_KEY = "cvrm-zoombie-version"

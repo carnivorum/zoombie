@@ -199,6 +199,13 @@ def _install(modes: components.Modes, args, root: str, result: dict) -> tuple[bo
     process.log("deploying the Zoombie role to the global custom modes", "step")
     mode_results = components.deploy_modes(modes)
 
+    # Register the MCP facade in the client's own MCP settings. The server is a
+    # second transport over the SAME commands, so this is part of a normal install:
+    # without it the facade exists but the client never spawns it, which is the
+    # exact gap this closes.
+    process.log("registering the MCP server in the global MCP settings", "step")
+    mcp_info = components.deploy_mcp(modes)
+
     # The 7-Zip extractor is the shared capability that reads an installer as data,
     # so it is a component in its OWN right rather than a side effect of whichever
     # consumer needs it first. Provisioned before Tesseract, which is the consumer
@@ -232,7 +239,7 @@ def _install(modes: components.Modes, args, root: str, result: dict) -> tuple[bo
         ytdlp_info=ytdlp_info, whisper_info=whisper_info, backend_probe=backend_probe,
         cuda_runtime=cuda_runtime, model_info=model_info, pdf_info=pdf_info,
         tesseract_info=tesseract_info, extractor_info=extractor_info,
-        selftest_info=selftest_info, mode_results=mode_results, hw=hw,
+        selftest_info=selftest_info, mode_results=mode_results, mcp_info=mcp_info, hw=hw,
     )
     if modes.may_write:
         manifest.save(built)
@@ -261,6 +268,11 @@ def _install(modes: components.Modes, args, root: str, result: dict) -> tuple[bo
     # in -Check/-DryRun the component reports optimistically ("would provision").
     if not paths.is_file(unpack.extractor_path()):
         missing.append("extractor")
+    # The MCP settings file is the client's, and a failure to merge our entry is
+    # reported (never raised) by the component -- so it is surfaced here as a note
+    # rather than a hard failure. The CLI is already installed and verified.
+    if modes.check and mcp_info.get("action") == "failed":
+        missing.append("mcp-settings")
     # Tesseract is now toolchain-owned, so a missing engine is a real gap rather
     # than an "optional" note -- the same standard ffmpeg and whisper are held to.
     # Checked against the FILESYSTEM, not the component's return value: in -Check /
@@ -353,7 +365,7 @@ def _install(modes: components.Modes, args, root: str, result: dict) -> tuple[bo
 def _build_manifest(
     *, root, python, python_version, ytdlp_info, whisper_info, backend_probe,
     cuda_runtime, model_info, pdf_info, tesseract_info, extractor_info,
-    selftest_info, mode_results, hw,
+    selftest_info, mode_results, mcp_info, hw,
 ) -> dict:
     """Assemble env.json.
 
@@ -472,6 +484,22 @@ def _build_manifest(
         "modes": {
             "path": mode_results[0]["path"] if mode_results else None,
             "entries": mode_results,
+        },
+        # The registered MCP server: the client's settings path we merged into, the
+        # command it will spawn, and the action the merge took. Recorded so a
+        # deployed transport can be identified after the fact.
+        "mcp": {
+            "name": mcp_info.get("name"),
+            "scope": "global",
+            "action": mcp_info.get("action"),
+            "path": mcp_info.get("path"),
+            "command": mcp_info.get("command"),
+            "package": mcp_info.get("package"),
+            "pythonFound": bool(mcp_info.get("pythonFound")),
+            # Confirmed against the settings file, so the manifest records the
+            # GLOBAL registration as a fact the skills' MCP-first rule can rely on.
+            "registered": bool(mcp_info.get("registered")),
+            "note": mcp_info.get("note"),
         },
         "hardware": hw.to_dict(),
     }
