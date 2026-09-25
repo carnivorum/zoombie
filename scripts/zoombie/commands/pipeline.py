@@ -13,7 +13,7 @@ import re
 import unicodedata
 
 from ..cli import Outcome
-from ..lib import env as env_mod, paths, process, stt, ytdlp
+from ..lib import env as env_mod, paths, process, scratch, stt, ytdlp
 from ..lib.errors import StepFailedError, ZoombieError
 
 URL_PATTERN = re.compile(r"^https?://", re.IGNORECASE)
@@ -22,6 +22,23 @@ URL_PATTERN = re.compile(r"^https?://", re.IGNORECASE)
 # them, but a fullwidth ``？`` (U+FF1F) is NOT the ASCII ``?`` and slips through,
 # so the name is re-checked here after fullwidth folding.
 _ILLEGAL_NAME_CHARS = '<>:"/\\|?*'
+
+# A retention larger than this is a logged SKIP, not a copy: the origin can
+# re-produce the media, but a surprise multi-GB duplicate cannot be un-copied once
+# the disk is full. Same best-effort discipline as the over-budget path check. The
+# guard is a safety net for the URL-download path -- a local -Source is never
+# copied at all (see :func:`_retain_source`).
+MAX_RETAIN_BYTES = 2 * 1024 * 1024 * 1024
+
+
+def _same_file(a: str, b: str) -> bool:
+    """True when two paths name the same file, resolving case and ``./``."""
+    return os.path.normcase(paths.absolute(a)) == os.path.normcase(paths.absolute(b))
+
+
+def _retention_destination(video_path: str, item_dir: str) -> str:
+    """Where the media WOULD be retained: the item root under a sanitized name."""
+    return os.path.join(item_dir, _sanitize_media_name(os.path.basename(video_path)))
 
 
 def _sanitize_media_name(name: str, *, max_len: int = 150) -> str:
@@ -57,7 +74,9 @@ def _sanitize_media_name(name: str, *, max_len: int = 150) -> str:
     return f"{cleaned}.{safe_extension}" if safe_extension else cleaned
 
 
-def _retain_source(video_path: str, item_dir: str) -> str | None:
+def _retain_source(
+    video_path: str, item_dir: str, *, local_source: bool = False
+) -> str | None:
     """Copy the source media to the item root; return where, or ``None``.
 
     The item contract says the source sits at the item root next to ``summary.md``
@@ -66,19 +85,24 @@ def _retain_source(video_path: str, item_dir: str) -> str | None:
     still cleaned up afterwards, and a failure to copy must not lose the original
     while the transcription is already written.
 
+    Only media the pipeline ITSELF produced (the URL-download path) is copied in.
+    A user-supplied local ``-Source`` is NEVER duplicated: the user already owns the
+    file where they put it, the sidecar records its path (``url`` falls back to
+    ``audio_path``), and duplicating 1.8 GB into a throwaway item is pure waste --
+    the defect this parameter fixes. The same-file short-circuit below still runs
+    first, so media that already sits in the item records ``sourceKept: true``.
+
     Best effort by design. A media file name is content-controlled -- a video
     title may be long, non-ASCII, or both -- so the destination can exceed the
     Windows budget, and that must be a logged skip rather than a failed run whose
-    transcript is already on disk. The caller records what happened in
-    ``sourceKept``, so the absence is visible in the sidecar instead of silent.
+    transcript is already on disk. An oversized retention (over ``MAX_RETAIN_BYTES``)
+    is likewise a logged skip. The caller records what happened in ``sourceKept``,
+    so the absence is visible in the sidecar instead of silent.
     """
     if not paths.is_file(video_path):
         return None
 
-    destination = os.path.join(
-        item_dir,
-        _sanitize_media_name(os.path.basename(video_path)),
-    )
+    destination = _retention_destination(video_path, item_dir)
 
     # Same-file is RETENTION, not a failure. When -DownloadDir equals the item
     # folder -- the natural layout -- the source already sits where it belongs,
@@ -87,11 +111,17 @@ def _retain_source(video_path: str, item_dir: str) -> str | None:
     # ``sourceKept:false`` / ``sourceFile:null`` the sidecar exists to prevent.
     # The paths are RESOLVED before comparing, so a case-only or ``./``-prefix
     # difference still counts as the same file.
-    if os.path.normcase(paths.absolute(video_path)) == os.path.normcase(
-        paths.absolute(destination)
-    ):
+    if _same_file(video_path, destination):
         process.log(f"  source retained: {destination}")
         return destination
+
+    # A local -Source is the user's own file; do not duplicate it into the item.
+    if local_source:
+        process.log(
+            f"  source not retained beside the transcript: {video_path} is a local "
+            f"file the user already owns; {destination} was not created"
+        )
+        return None
 
     try:
         # Room for the extension and the Windows path budget; the NAME is not ours
@@ -99,6 +129,19 @@ def _retain_source(video_path: str, item_dir: str) -> str | None:
         paths.assert_fits(destination, "The retained source path")
     except Exception as exc:  # noqa: BLE001 - any budget/length refusal is a skip
         process.log(f"  source not retained beside the transcript: {exc}", "warn")
+        return None
+
+    try:
+        size = paths.file_size(video_path)
+    except OSError:
+        size = None
+    if size is not None and size > MAX_RETAIN_BYTES:
+        process.log(
+            f"  source not retained beside the transcript: {size} bytes exceeds the "
+            f"{MAX_RETAIN_BYTES}-byte retention budget; re-download from the origin "
+            "to keep a copy",
+            "warn",
+        )
         return None
 
     try:
@@ -200,6 +243,11 @@ def run(args) -> Outcome:
     # the retained media to the item root, so both are measured against the budget.
     item_dir = stt.item_dir_for(args.output, video_path)
     base = stt.resolve_output_base(video_path, args.output)
+    # Create ``<item>/.data/`` now, before the download/ffmpeg work: a bare
+    # transcribe/pipeline run then produces a RECOGNISED item, so ``items``/``index``
+    # see it and the documented "transcribe -> then summarize" order holds. See
+    # :func:`zoombie.lib.stt.ensure_item_dir` for why this is the choice made.
+    stt.ensure_item_dir(args.output, item_dir)
     paths.assert_fits(item_dir, "The pipeline item folder")
     # Room for ``.source.json`` (the longest appended suffix) plus the dot.
     paths.assert_fits(base, "The pipeline output path", slack=13)
@@ -208,19 +256,37 @@ def run(args) -> Outcome:
     paths.assert_fits(video_path, "The downloaded video path")
 
     if args.dry_run:
+        # The work dir was created a few lines up (that is where audio.wav WOULD
+        # go), so -DryRun removes it here and reports that it did: a dry run must
+        # leave no scratch under the toolchain root (plan §10).
+        dry_scratch = scratch.report(work, kept=False)
         if not is_url:
             return Outcome(
                 ok=True,
                 data={"dryRun": True, "stage": "extract+transcribe",
                       "video": video_path, "itemDir": item_dir,
-                      "outputBase": base, "work": work},
+                      "outputBase": base, "work": work, "scratch": dry_scratch},
             )
-        return Outcome(ok=True, data={"dryRun": True, "stage": "download", "url": args.source})
+        return Outcome(ok=True, data={"dryRun": True, "stage": "download",
+                                      "url": args.source, "scratch": dry_scratch})
 
     try:
         # Checked here -- after the download but BEFORE ffmpeg -- so a refusal
         # still runs the finally that removes the media we just fetched.
-        stt.guard_overwrite(base, args.force)
+        #
+        # The base comes from the SAME helper ``transcribe`` uses, so the guard
+        # here and the write there cannot name two different files. Reading
+        # ``base`` directly (as before) was the other half of the split: the guard
+        # passed against the resolved base while ``transcribe`` rewrote it.
+        # Guard the base the WRITER will use, window included -- the same
+        # ``request_output_base`` the transcribe command and the writer read,
+        # so a windowed pipeline run cannot guard one file and write another.
+        watched_base = stt.request_output_base(stt.Request(
+            audio_path=audio_out, output_base=base, item_dir=item_dir,
+            from_time=getattr(args, "from_time", None),
+            to_time=getattr(args, "to_time", None),
+        ))
+        stt.guard_overwrite(watched_base, args.force)
 
         ffmpeg = environment.require("ffmpeg", "ffmpeg")
         process.run_checked(
@@ -230,16 +296,37 @@ def run(args) -> Outcome:
             what="ffmpeg",
         )
 
-        # REQUIREMENT: the source media is kept, beside ``summary.md`` at the item
-        # root. This REVERSES the previous default, which deleted the download right
-        # after transcription and recorded ``sourceKept: false`` -- the very case the
-        # origin sidecar existed to survive.
+        # REQUIREMENT: media the pipeline PRODUCED is kept, beside ``summary.md`` at
+        # the item root. This REVERSES the previous default, which deleted the
+        # download right after transcription and recorded ``sourceKept: false`` --
+        # the very case the origin sidecar existed to survive.
+        #
+        # A user-supplied local ``-Source`` is NOT duplicated: the user already owns
+        # it, and copying 1.8 GB into a throwaway item is waste (the defect this
+        # fixes). ``local_source`` encodes that; the same-file short-circuit inside
+        # ``_retain_source`` still lets media already in the item record
+        # ``sourceKept: true``.
         #
         # Retention is best effort, logged either way: a destination that cannot fit
         # the Windows budget must not fail a run whose transcription succeeded, and the
         # sidecar records what actually happened, so an item whose media was not kept
         # stays well-formed.
-        kept_source = _retain_source(video_path, item_dir)
+        kept_source = _retain_source(video_path, item_dir, local_source=not is_url)
+        # The sidecar's ``sourceReason`` explains a DELIBERATE non-copy. A local
+        # -Source is deliberately not duplicated; when it already sat in the item the
+        # same-file short-circuit retained it, so there is no absence to explain.
+        source_reason: str | None = None
+        if (
+            kept_source is None
+            and not is_url
+            and paths.is_file(video_path)
+            and not _same_file(video_path, _retention_destination(video_path, item_dir))
+        ):
+            source_reason = (
+                "the input is a local file the user already owns where they put it, "
+                "so pipeline did not duplicate it into the item; the origin is "
+                "recorded as the source url (the input path)"
+            )
     
         request = stt.Request(
             audio_path=audio_out,
@@ -255,7 +342,18 @@ def run(args) -> Outcome:
             allow_cpu_fallback=args.allow_cpu_fallback,
             strict_gpu=args.strict_gpu,
             work_root=work_root,
-            keep_work=args.keep_work,
+            # -KeepScratch/-KeepWork reach the transcription stage too, so the same
+            # decision governs both this command's work dir and whisper's own.
+            keep_work=scratch.keep_requested(args),
+            # The pipeline's audio is an extracted scratch WAV deleted in the
+            # ``finally`` below, so the sidecar must not record it as the origin
+            # (a dead temp path). ``source_file`` names the retained media instead.
+            audio_is_scratch=True,
+            # The same -From/-To window ``transcribe`` accepts. For a local source
+            # the media is sliced after its one extraction; the artifacts get the
+            # window-qualified names and offset timestamps.
+            from_time=getattr(args, "from_time", None),
+            to_time=getattr(args, "to_time", None),
             # Parity with transcribe: -DryRun must reach the transcription stage
             # too, not just the pipeline's own early returns.
             dry_run=args.dry_run,
@@ -268,17 +366,33 @@ def run(args) -> Outcome:
             # from what happened, not from what was requested.
             source_kept=bool(kept_source),
             source_file=os.path.basename(kept_source) if kept_source else None,
+            # Why nothing was kept, when that was a deliberate choice (a local
+            # source is never duplicated). Same shape as ``urlReason``.
+            source_reason=source_reason,
         )
         report = stt.transcribe(environment, request)
     finally:
-        # Remove the DOWNLOAD FOLDER and the intermediate audio.wav. The media
-        # itself survives in the item when it was copied out, which is the change:
-        # only genuinely temporary material is cleaned up here. whisper's own
-        # scratch was already cleaned inside stt.transcribe, and the download dir
-        # goes even under -KeepWork, because -KeepWork now means "do not tidy the
-        # work dir", not "delete the video".
-        if owned_dl_dir:
-            paths.remove_quietly(owned_dl_dir, recursive=True)
-        paths.remove_quietly(work, recursive=True)
+        # CLI-owned cleanup (plan §10): remove the DOWNLOAD FOLDER and the
+        # intermediate audio.wav unless -KeepScratch/-KeepWork asked to retain this
+        # run's scratch. The media the run KEPT already survives in the item (that
+        # copy-back happens above, which is the ordering E requires), so removing
+        # this scratch invalidates nothing the result advertises. whisper's own
+        # work dir is cleaned inside stt.transcribe under the SAME decision.
+        kept = scratch.keep_requested(args)
+        work_block = scratch.report(work, kept=kept)
+        dl_block = scratch.report(owned_dl_dir, kept=kept) if owned_dl_dir else None
+        pipeline_scratch = {
+            "kept": kept,
+            "work": work_block,
+            "downloadDir": dl_block,
+            "leftover": bool(
+                work_block["leftover"] or (dl_block and dl_block["leftover"])
+            ),
+        }
 
-    return Outcome(ok=True, data=report.to_data())
+    data = report.to_data()
+    # Keep the transcription stage's own block (its whisper work dir) nested inside
+    # this command's, so both scratches of one pipeline run are reported.
+    pipeline_scratch["transcribe"] = data.get("scratch")
+    data["scratch"] = pipeline_scratch
+    return Outcome(ok=True, data=data)

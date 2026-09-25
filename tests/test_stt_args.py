@@ -16,7 +16,7 @@ import pytest
 from zoombie import cli
 from zoombie.commands import transcribe as transcribe_cmd
 from zoombie.lib import stt, whisper, ytdlp
-from zoombie.lib.errors import ZoombieError
+from zoombie.lib.errors import StepFailedError, ZoombieError
 
 
 def _args(**overrides):
@@ -37,6 +37,8 @@ def _args(**overrides):
         work_root=None,
         keep_work=False,
         dry_run=False,
+        from_time=None,
+        to_time=None,
     )
     base.update(overrides)
     return argparse.Namespace(**base)
@@ -115,9 +117,10 @@ class TestSidecar:
         with open(path, encoding="utf-8") as handle:
             payload = json.load(handle)
         assert set(payload) == {
-            "kind", "url", "title", "id", "durationSec", "language", "model",
-            "backend", "deviceUsed", "deviceVerified", "realtimeFactor",
+            "kind", "url", "urlReason", "title", "id", "durationSec", "language",
+            "model", "backend", "deviceUsed", "deviceVerified", "realtimeFactor",
             "toolchainVersion", "createdAt", "sourceKept", "sourceFile",
+            "sourceReason",
         }
         assert payload["url"] == "https://example.com/watch?v=abc123"
         assert payload["title"] == "A Talk"
@@ -133,6 +136,10 @@ class TestSidecar:
         # the source beside the transcript and sets both fields together.
         assert payload["sourceKept"] is False
         assert payload["sourceFile"] is None
+        # No deliberate non-copy was recorded for this request, so the reason is
+        # null (it is only set when the absence was a DECISION, e.g. a local
+        # -Source the pipeline refuses to duplicate).
+        assert payload["sourceReason"] is None
         assert payload["createdAt"].endswith("Z")
 
     def test_local_audio_falls_back_to_the_input_path(self, tmp_path):
@@ -204,7 +211,15 @@ class TestSidecar:
             stt.whisper, "probe_backend",
             lambda _e: whisper.BackendProbe(device="cpu"),
         )
-        monkeypatch.setattr(stt.whisper, "run_whisper", lambda *_a, **_k: whisper.RunResult())
+        def fake_run(_exe, argv, _stdout, _stderr):
+            # A run with NO .txt is now a hard failure, so this test must produce
+            # the deliverable it asserts the sidecar was written against.
+            out_base = argv[argv.index("-of") + 1]
+            with open(f"{out_base}.txt", "w", encoding="utf-8") as handle:
+                handle.write("hello\n")
+            return whisper.RunResult()
+
+        monkeypatch.setattr(stt.whisper, "run_whisper", fake_run)
         monkeypatch.setattr(stt.whisper, "read_log", lambda _p: ["whisper_init_from_file_with_params_no_state: loading model"])
         monkeypatch.setattr(
             stt.whisper, "device_info",
@@ -277,6 +292,161 @@ class TestItemLayout:
         base = stt.resolve_output_base(str(tmp_path / "audio.wav"), str(tmp_path / "item"))
         assert base == stt.transcript_base(str(tmp_path / "item"))
 
+    def test_both_item_dir_and_output_base_write_under_data(self, tmp_path, monkeypatch):
+        """Both fields set: the artifacts go to ``<item>/.data/``, not flat.
+
+        Regression for Defect 1. ``pipeline`` and ``transcribe`` pass a correctly
+        resolved ``output_base`` AND a non-empty ``item_dir``; the old precedence
+        ``item_dir or output_base`` let ``item_dir`` win and wrote every artifact
+        FLAT off the item folder. This drives the real ``transcribe`` with only the
+        whisper surface stubbed, so the WRITE PATH executes -- the previous tests
+        monkeypatched ``stt.transcribe`` away and never reached it.
+        """
+        source = tmp_path / "input.wav"
+        source.write_bytes(b"RIFF")
+        model = tmp_path / "ggml-small.bin"
+        model.write_bytes(b"m")
+        exe = tmp_path / "whisper-cli.exe"
+        exe.write_bytes(b"x")
+        item = tmp_path / "item"
+
+        class _Env:
+            backend = "cpu"
+            ffprobe = None
+            gpu_backend_configured = False
+
+            def __init__(self):
+                self.model = str(model)
+
+            def require(self, key, name):
+                return str(exe)
+
+        monkeypatch.setattr(stt.whisper, "capabilities", lambda _e: whisper.Capabilities())
+        monkeypatch.setattr(
+            stt.whisper, "probe_backend", lambda _e: whisper.BackendProbe(device="cpu")
+        )
+
+        def fake_run(_exe, argv, _stdout, _stderr):
+            # Emulate whisper writing ``<out_base>.txt`` beside the ``-of`` path.
+            out_base = argv[argv.index("-of") + 1]
+            with open(f"{out_base}.txt", "w", encoding="utf-8") as handle:
+                handle.write("hello\n")
+            return whisper.RunResult()
+
+        monkeypatch.setattr(stt.whisper, "run_whisper", fake_run)
+        monkeypatch.setattr(stt.whisper, "read_log", lambda _p: [])
+        monkeypatch.setattr(
+            stt.whisper, "device_info", lambda _l: whisper.DeviceInfo(device="cpu")
+        )
+        monkeypatch.setattr(stt.whisper, "timings", lambda _l: whisper.Timings())
+
+        base = stt.resolve_output_base(str(source), str(item))
+        request = stt.Request(
+            audio_path=str(source), output_base=base, item_dir=str(item),
+            no_gpu=True, no_srt=True, force=True, work_root=str(tmp_path / "work"),
+        )
+        report = stt.transcribe(_Env(), request)
+
+        written = tmp_path / "item" / ".data" / "transcript.txt"
+        assert written.is_file(), "the artifact must land under <item>/.data/"
+        flat = tmp_path / "item.txt"
+        assert not flat.exists(), "no artifact may be written flat off the item folder"
+        assert report.output_base == str(item / ".data" / "transcript")
+
+    def test_the_reported_output_base_resolves_inside_data(self, tmp_path):
+        """The contract assertion the failing run violated.
+
+        ``Report.to_data()`` emits both ``outputBase`` and ``itemDir``, and on the
+        failing run they were the SAME STRING -- which contradicts the contract that
+        ``outputBase`` must end with ``.data/transcript`` whenever ``itemDir`` is set.
+        The transcribe-video skill tells a caller to read both; comparing them is what
+        would have caught the split, so this test does exactly that comparison.
+        """
+        item = r"C:\ws\My Item"
+        base = stt.resolve_output_base(r"C:\media\audio.wav", item)
+        request = stt.Request(audio_path=r"C:\media\audio.wav", output_base=base,
+                              item_dir=item)
+        report = stt.Report(
+            output_base=stt.effective_output_base(request.output_base, request.item_dir),
+            item_dir=request.item_dir,
+        )
+        data = report.to_data()
+        assert data["itemDir"] == item
+        assert data["outputBase"] != data["itemDir"], (
+            "outputBase must not be the item folder itself; on the failing run it was"
+        )
+        assert os.path.normcase(data["outputBase"]).startswith(
+            os.path.normcase(os.path.join(item, ".data"))
+        )
+
+
+class TestEffectiveOutputBase:
+    def test_output_base_wins(self):
+        assert stt.effective_output_base(r"C:\i\.data\transcript", r"C:\i") == \
+            r"C:\i\.data\transcript"
+
+    def test_item_dir_is_the_fallback(self):
+        assert stt.effective_output_base("", r"C:\i") == r"C:\i"
+
+    def test_pipeline_and_writer_agree(self, tmp_path):
+        """The guard's base and the writer's base are the same expression."""
+        item = str(tmp_path / "item")
+        base = stt.resolve_output_base(str(tmp_path / "audio.wav"), item)
+        assert stt.effective_output_base(base, item) == stt.effective_output_base(base, item)
+
+
+class TestEnsureItemDir:
+    def test_output_named_item_gets_a_data_dir(self, tmp_path):
+        item = tmp_path / "item"
+        assert stt.ensure_item_dir(str(item), str(item)) is True
+        assert (item / ".data").is_dir()
+
+    def test_no_output_leaves_the_parent_alone(self, tmp_path):
+        """A bare transcribe must not litter the source's folder with .data/."""
+        item = tmp_path / "loose"
+        assert stt.ensure_item_dir(None, str(item)) is False
+        assert not (item / ".data").exists()
+
+    def test_created_data_dir_makes_the_folder_an_item(self, tmp_path):
+        from zoombie.item import paths as item_paths
+
+        item = tmp_path / "item"
+        assert not item_paths.is_item(str(item))
+        stt.ensure_item_dir(str(item), str(item))
+        assert item_paths.is_item(str(item))
+
+
+class TestScratchAudioHonesty:
+    """A dead scratch path must not be recorded as the sidecar's origin."""
+
+    def test_scratch_audio_url_is_null_with_a_reason(self, tmp_path):
+        work = tmp_path / "work" / "abc"
+        work.mkdir(parents=True)
+        scratch = work / "audio.wav"
+        payload = stt.source_metadata(
+            _request(source_url=None, audio_path=str(scratch), work_root=str(tmp_path / "work")),
+            _report(),
+        )
+        assert payload["url"] is None
+        assert payload["urlReason"] and "scratch" in payload["urlReason"]
+
+    def test_a_real_local_audio_file_is_still_recorded(self, tmp_path):
+        real = tmp_path / "talk.mp3"
+        payload = stt.source_metadata(
+            _request(source_url=None, audio_path=str(real)), _report()
+        )
+        assert payload["url"] == str(real)
+        assert payload["urlReason"] is None
+
+    def test_an_explicit_scratch_flag_reasons_even_outside_the_work_root(self, tmp_path):
+        scratch = tmp_path / "elsewhere" / "audio.wav"
+        payload = stt.source_metadata(
+            _request(source_url=None, audio_path=str(scratch), audio_is_scratch=True),
+            _report(),
+        )
+        assert payload["url"] is None
+        assert payload["urlReason"]
+
 
 class TestOverwriteGuard:
     def test_refuses_an_existing_transcript(self, tmp_path):
@@ -316,6 +486,33 @@ class TestTranscribeCommand:
             transcribe_cmd.run(
                 _args(source=str(source), output=str(tmp_path), force=False)
             )
+
+    def test_a_window_is_not_refused_by_the_full_transcript(self, tmp_path, monkeypatch):
+        """The guard checks the WINDOW-qualified base, not the full transcript."""
+        source = tmp_path / "input.wav"
+        source.write_bytes(b"RIFF")
+        (tmp_path / ".data").mkdir()
+        (tmp_path / ".data" / "transcript.txt").write_text("old\n", encoding="utf-8")
+
+        seen: dict = {}
+
+        def fake_transcribe(environment, request):
+            seen["request"] = request
+            return _report()
+
+        monkeypatch.setattr(
+            transcribe_cmd.env_mod, "resolve", lambda *_a, **_k: object()
+        )
+        monkeypatch.setattr(transcribe_cmd.stt, "transcribe", fake_transcribe)
+
+        # No -Force, and the FULL transcript exists: the window is a different
+        # file, so this must run rather than be refused.
+        outcome = transcribe_cmd.run(_args(
+            source=str(source), output=str(tmp_path),
+            from_time="00:47:00", to_time="00:55:00",
+        ))
+        assert outcome.ok is True
+        assert seen["request"].from_time == "00:47:00"
 
     def test_the_request_carries_the_item_folder(self, tmp_path, monkeypatch):
         source = tmp_path / "input.wav"
@@ -375,6 +572,157 @@ class TestTranscribeCommand:
         assert args.no_srt is False
         with pytest.raises(SystemExit):
             parser.parse_args(["pipeline", "-Source", "https://x/y", "-Format", "mp3"])
+
+
+class TestVideoInputRefusal:
+    """Defect 7: ``transcribe`` must refuse a video up front, naming ``pipeline``.
+
+    whisper.cpp reads WAV and little else, so a video used to fail DEEP inside
+    whisper -- exit 0, no transcript, a success report. The misuse is documented,
+    so the tool says so instead of failing opaquely.
+    """
+
+    def test_a_known_video_container_is_refused_with_the_remedy_named(self, tmp_path):
+        source = tmp_path / "clip.mp4"
+        source.write_bytes(b"not-really-mp4")
+        with pytest.raises(ZoombieError) as excinfo:
+            stt.transcribe(_env(tmp_path), stt.Request(
+                audio_path=str(source), output_base=str(tmp_path / "transcript"),
+                no_gpu=True, force=True,
+            ))
+        message = str(excinfo.value)
+        assert "pipeline" in message, "the refusal must name the command that converts"
+        assert ".mp4" in message
+
+    @pytest.mark.parametrize(
+        "name", ["a.mp4", "a.mkv", "a.webm", "a.mov", "a.avi", "a.m4v", "A.MP4"]
+    )
+    def test_every_video_container_is_refused(self, name):
+        with pytest.raises(ZoombieError, match="pipeline"):
+            stt.refuse_video_input(name)
+
+    @pytest.mark.parametrize(
+        "name", ["a.wav", "a.mp3", "a.m4a", "a.flac", "a.ogg", "a.opus", "a.aac"]
+    )
+    def test_audio_containers_are_not_refused(self, name):
+        # whisper MIGHT read these; the missing-.txt post-check is their backstop,
+        # so the up-front refusal must not reject them.
+        stt.refuse_video_input(name)
+
+
+class TestMissingTranscriptFailure:
+    """Defect 7: an exit-0 run with no ``.txt`` must fail, not report success.
+
+    The old run reported ``ok:true`` with no ``txt``, ``srt:null`` and a sidecar
+    written anyway -- the contradiction signature. These drive the REAL
+    ``transcribe`` with only the whisper surface stubbed, so the post-artifact
+    check actually executes.
+    """
+
+    def _base_and_request(self, tmp_path, source):
+        base = str(tmp_path / "transcript")
+        request = stt.Request(
+            audio_path=str(source), output_base=base, no_gpu=True, force=True,
+            work_root=str(tmp_path / "work"),
+        )
+        return base, request
+
+    def test_a_missing_txt_fails_and_names_the_audio_read_error(self, tmp_path, monkeypatch):
+        source = tmp_path / "input.wav"
+        source.write_bytes(b"RIFF")
+
+        def fake_run(_exe, _argv, _stdout, _stderr):
+            # Exit 0 and write NO artifact -- exactly the failing-run shape.
+            return whisper.RunResult(exit_code=0)
+
+        monkeypatch.setattr(stt.whisper, "run_whisper", fake_run)
+        monkeypatch.setattr(stt.whisper, "read_log", lambda _p: [
+            "whisper_backend_init_gpu: using CUDA0 backend",
+            "read_audio_data: failed to read audio data",
+            "error: failed to read audio file 'C:\\work\\input.wav'",
+        ])
+        monkeypatch.setattr(stt.whisper, "audio_read_failure",
+                            lambda lines: [ln for ln in lines if "failed to read" in ln])
+        monkeypatch.setattr(stt.whisper, "device_info",
+                            lambda _l: whisper.DeviceInfo(device="cpu"))
+        monkeypatch.setattr(stt.whisper, "timings", lambda _l: whisper.Timings())
+
+        base, request = self._base_and_request(tmp_path, source)
+        with pytest.raises(StepFailedError) as excinfo:
+            stt.transcribe(_env(tmp_path), request)
+        message = str(excinfo.value)
+        assert "no transcript" in message
+        assert "failed to read audio data" in message
+        # NO sidecar is written on a failed run: a sidecar describing a transcript
+        # that does not exist is the contradiction this fix removes.
+        assert not os.path.isfile(f"{base}.source.json")
+        assert not os.path.isfile(f"{base}.txt")
+
+    def test_srt_null_with_a_live_sidecar_is_impossible(self, tmp_path, monkeypatch):
+        """The contradiction signature: ``srt: null`` must never sit beside a sidecar.
+
+        On the failing run the report carried ``artifacts.srt == null`` AND a
+        non-null sidecar. Making the sidecar unreachable on a no-.txt run removes
+        the possibility outright.
+        """
+        source = tmp_path / "input.wav"
+        source.write_bytes(b"RIFF")
+        monkeypatch.setattr(stt.whisper, "run_whisper",
+                            lambda *_a, **_k: whisper.RunResult(exit_code=0))
+        monkeypatch.setattr(stt.whisper, "read_log", lambda _p: [])
+        monkeypatch.setattr(stt.whisper, "device_info",
+                            lambda _l: whisper.DeviceInfo(device="cpu"))
+        monkeypatch.setattr(stt.whisper, "timings", lambda _l: whisper.Timings())
+
+        base, request = self._base_and_request(tmp_path, source)
+        with pytest.raises(StepFailedError):
+            stt.transcribe(_env(tmp_path), request)
+        assert not os.path.isfile(f"{base}.source.json")
+
+    def test_pipeline_with_a_wav_is_unaffected_by_the_refusal(self, tmp_path, monkeypatch):
+        """``pipeline`` extracts a WAV, so the video refusal must not fire for it."""
+        audio = tmp_path / "audio.wav"
+        audio.write_bytes(b"RIFF")
+
+        def fake_run(_exe, argv, _stdout, _stderr):
+            out_base = argv[argv.index("-of") + 1]
+            with open(f"{out_base}.txt", "w", encoding="utf-8") as handle:
+                handle.write("hello\n")
+            return whisper.RunResult()
+
+        monkeypatch.setattr(stt.whisper, "run_whisper", fake_run)
+        monkeypatch.setattr(stt.whisper, "read_log", lambda _p: [])
+        monkeypatch.setattr(stt.whisper, "device_info",
+                            lambda _l: whisper.DeviceInfo(device="cpu"))
+        monkeypatch.setattr(stt.whisper, "timings", lambda _l: whisper.Timings())
+
+        base, request = self._base_and_request(tmp_path, audio)
+        report = stt.transcribe(_env(tmp_path), request)
+        assert os.path.isfile(f"{base}.txt")
+        assert report.artifacts.get("txt")
+
+
+def _env(tmp_path):
+    """A stand-in environment whose only reached method is ``require``."""
+    model = tmp_path / "ggml-small.bin"
+    if not model.exists():
+        model.write_bytes(b"m")
+    exe = tmp_path / "whisper-cli.exe"
+    if not exe.exists():
+        exe.write_bytes(b"x")
+
+    class _Env:
+        backend = "cpu"
+        ffprobe = None
+        gpu_backend_configured = False
+
+        def __init__(self):
+            self.model = str(model)
+
+        def require(self, key, name):
+            return str(exe)
+
+    return _Env()
 
 
 class TestNewestDownload:

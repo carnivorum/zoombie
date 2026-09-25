@@ -27,7 +27,9 @@ from ..lib import (
     paths,
     process,
     skills,
+    tesseract,
     tools,
+    unpack,
 )
 from ..install import hardware
 
@@ -516,6 +518,163 @@ def install_model(modes: Modes, model_name: str) -> dict:
 
 
 # ---------------------------------------------------------------------------
+# Archive extractor (provisioned: pinned URL + published sha256)
+# ---------------------------------------------------------------------------
+
+def install_extractors(modes: Modes) -> dict:
+    """Provision the pinned 7-Zip extractor as its OWN component.
+
+    The NSIS/7z reader is NOT a Tesseract detail: it is the shared capability any
+    installer-only upstream needs, so it is provisioned and recorded on its own
+    instead of being an implicit side effect of whichever component happens to
+    require it first. That also means it is repaired even when Tesseract is
+    already present, and that a machine with no Tesseract can still unpack.
+
+    Idempotent: a complete extractor (``7z.exe`` + ``7z.dll``) is left untouched
+    unless ``-Force``. Honours ``-Check``/``-DryRun`` by writing nothing.
+    """
+    bin_dir = paths.env_path("bin")
+    exe = unpack.extractor_path()
+    dll = os.path.join(bin_dir, "7z.dll")
+    result = {
+        "ok": False,
+        "path": exe,
+        "name": unpack.EXTRACTOR["name"],
+        "version": unpack.EXTRACTOR["version"],
+        "bootstrap": {
+            "name": unpack.EXTRACTOR_BOOTSTRAP["name"],
+            "version": unpack.EXTRACTOR_BOOTSTRAP["version"],
+        },
+        "note": None,
+    }
+
+    complete = paths.is_file(exe) and paths.is_file(dll)
+    if complete and not modes.force:
+        result["ok"] = True
+        process.log(f"extractor present: {exe} ({result['name']} {result['version']})")
+        return result
+
+    if not modes.may_write:
+        process.log(f"would provision 7-Zip {result['version']} extractor -> {bin_dir}", "step")
+        result["ok"] = True  # it reports what WOULD happen and writes nothing
+        return result
+
+    process.log(f"provisioning pinned 7-Zip {result['version']} extractor", "step")
+    unpack.install_extractor()
+
+    result["ok"] = paths.is_file(exe) and paths.is_file(dll)
+    if not result["ok"]:
+        result["note"] = "the extractor is still incomplete after provisioning"
+        process.log(f"extractor: {result['note']}", "warn")
+        return result
+    modes.note(f"provisioned 7-Zip {result['version']} extractor")
+    return result
+
+
+# ---------------------------------------------------------------------------
+# Tesseract OCR engine (provisioned: pinned URL + published sha256)
+# ---------------------------------------------------------------------------
+
+def install_tesseract(modes: Modes) -> dict:
+    """Provision the pinned Tesseract engine and its language data into the root.
+
+    The engine is the ONE component with no portable archive upstream, so it is
+    provisioned from the official NSIS installer by EXTRACTING its payload with a
+    pinned 7-Zip -- the installer is never run, so no elevation is needed and
+    nothing is written into a system location. Both downloads (the installer and
+    the extractor) are verified against their published sha256 before use, and the
+    traineddata is fetched separately from the official tessdata repo because the
+    installer ships none.
+
+    Idempotent: a complete engine + the expected languages is left untouched unless
+    ``-Force``. Honours ``-Check``/``-DryRun`` through :class:`Modes` (write nothing).
+    """
+    result = {
+        "ok": False, "engine": None, "engineVersion": None,
+        "languages": [], "expectedLanguages": list(tesseract.DEFAULT_LANGUAGES),
+        "note": None,
+    }
+    engine = tesseract.engine_path()
+
+    present_languages = tesseract.language_list()
+    complete = (
+        paths.is_file(engine)
+        and all(lang in present_languages for lang in tesseract.DEFAULT_LANGUAGES)
+    )
+    if complete and not modes.force:
+        result.update(
+            ok=True, engine=engine,
+            engineVersion=tesseract.engine_version(engine),
+            languages=present_languages,
+        )
+        process.log(
+            f"tesseract present: {engine} "
+            f"(v{result['engineVersion']}, langs: {', '.join(present_languages)})"
+        )
+        return result
+
+    if not modes.may_write:
+        process.log(
+            f"would provision Tesseract {tesseract.ENGINE['version']} -> "
+            f"{tesseract.engine_dir()}",
+            "step",
+        )
+        result.update(
+            ok=True,
+            engine=engine if paths.is_file(engine) else None,
+            engineVersion=tesseract.engine_version(engine) if paths.is_file(engine) else None,
+            languages=present_languages,
+        )
+        return result
+
+    tmp = paths.new_temp_dir("zoombie-tesseract-dl")
+    try:
+        # 1. The NSIS-capable extractor was provisioned as its OWN component before
+        # this one (see install_extractors). It is repaired on demand here too, so
+        # the engine never depends on the ORDER components are installed in.
+        extractor = tesseract.extractor_path()
+        if not paths.is_file(extractor) or modes.force:
+            tesseract.install_extractor()
+
+        # 2. The engine installer, verified before its payload is touched.
+        installer = os.path.join(tmp, "tesseract-setup.exe")
+        process.log(
+            f"downloading Tesseract {tesseract.ENGINE['version']} "
+            f"({round(tesseract.ENGINE['size'] / (1024 * 1024), 1)} MB)",
+            "step",
+        )
+        download.download(tesseract.ENGINE["url"], installer, force=True)
+        tesseract.verify_archive(installer, tesseract.ENGINE["sha256"])
+
+        # 3. Extract the payload (never execute it) into the ASCII engine dir.
+        process.log(f"extracting the engine payload -> {tesseract.engine_dir()}", "step")
+        info = tesseract.install_engine(installer, extractor)
+
+        # 4. Language data, same pinning discipline.
+        process.log("downloading pinned traineddata (eng, rus)", "step")
+        langs = tesseract.install_languages()
+    finally:
+        paths.remove_quietly(tmp, recursive=True)
+
+    result.update(
+        engine=info.get("engine"),
+        engineVersion=tesseract.engine_version(info.get("engine")),
+        languages=tesseract.language_list(),
+    )
+    if not paths.is_file(engine) or result["engineVersion"] is None:
+        result["note"] = "engine extracted but `tesseract --version` did not report a version"
+        process.log(f"tesseract: {result['note']}", "warn")
+        return result
+
+    result["ok"] = all(lang in result["languages"] for lang in tesseract.DEFAULT_LANGUAGES)
+    modes.note(
+        f"provisioned Tesseract {tesseract.ENGINE['version']} "
+        f"({', '.join(langs['languages'])})"
+    )
+    return result
+
+
+# ---------------------------------------------------------------------------
 # PDF toolchain
 # ---------------------------------------------------------------------------
 
@@ -530,18 +689,13 @@ def install_pdf_dependencies(modes: Modes, python: str | None, requirements: str
         "tesseract": None, "tesseractVersion": None, "note": None,
     }
 
-    # Tesseract is optional and system-wide; detect it either way so the report
-    # can say whether OCR will actually work.
-    tess = tools.resolve(
-        "tesseract",
-        candidates=[
-            os.path.join(os.environ.get("ProgramFiles", ""), "Tesseract-OCR", "tesseract.exe"),
-            os.path.join(os.environ.get("ProgramFiles(x86)", ""), "Tesseract-OCR", "tesseract.exe"),
-        ],
-    )
+    # Report the engine THIS toolchain resolves (toolchain engine -> system -> PATH)
+    # rather than only probing Program Files, so the report agrees with
+    # ``ocr.available()``. Provisioning happens in install_tesseract().
+    tess, _reason = tesseract.resolve_engine()
     if tess:
         result["tesseract"] = tess
-        result["tesseractVersion"] = tools.tool_version(tess, ["--version"])
+        result["tesseractVersion"] = tesseract.engine_version(tess)
 
     if not python:
         result["note"] = "Python not found. Install with: winget install Python.Python.3.12"

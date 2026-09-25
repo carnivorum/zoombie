@@ -153,7 +153,12 @@ class TestRunRecordsWhatHappened:
         outcome = pipeline.run(_args(tmp_path, source, output))
         return outcome, seen["request"]
 
-    def test_source_kept_is_true_when_the_copy_succeeded(self, tmp_path, monkeypatch):
+    def test_a_local_source_is_not_duplicated_into_the_item(self, tmp_path, monkeypatch):
+        """Defect 8: a local -Source the user owns is never copied into the item.
+
+        The old run copied a multi-GB already-owned file into a throwaway item. The
+        sidecar records the deliberate absence in ``sourceReason``.
+        """
         downloads = tmp_path / "downloads"
         downloads.mkdir()
         source = downloads / "video.mp4"
@@ -161,9 +166,34 @@ class TestRunRecordsWhatHappened:
 
         outcome, request = self._run(tmp_path, monkeypatch, source)
         assert outcome.ok is True
+        assert request.source_kept is False
+        assert request.source_file is None
+        assert request.source_reason, "a deliberate non-copy must record why"
+        assert not (tmp_path / "item" / "video.mp4").exists(), (
+            "a local source must not be duplicated into the item"
+        )
+        # The user's own file is untouched.
+        assert source.is_file()
+
+    def test_a_local_source_already_in_the_item_still_records_source_kept(
+        self, tmp_path, monkeypatch
+    ):
+        """The same-file short-circuit survives: media already in the item counts.
+
+        When the source sits at the item root already -- the natural layout -- there
+        is nothing to copy and no absence to explain, so ``sourceKept`` stays true
+        and ``sourceReason`` stays null.
+        """
+        item = tmp_path / "item"
+        item.mkdir()
+        source = item / "video.mp4"
+        source.write_bytes(b"media")
+
+        outcome, request = self._run(tmp_path, monkeypatch, source)
+        assert outcome.ok is True
         assert request.source_kept is True
         assert request.source_file == "video.mp4"
-        assert (tmp_path / "item" / "video.mp4").is_file()
+        assert request.source_reason is None
 
     def test_source_kept_is_false_when_the_copy_did_not(self, tmp_path, monkeypatch):
         """The field records what HAPPENED, not what was requested."""
@@ -171,6 +201,56 @@ class TestRunRecordsWhatHappened:
         assert outcome.ok is True
         assert request.source_kept is False
         assert request.source_file is None
+        # A missing file is a FAILURE of retention, not a deliberate non-copy, so
+        # no reason is recorded (a reason would misdescribe it as intent).
+        assert request.source_reason is None
+
+
+class TestRetainSourceDownloadedPath:
+    """The ``local_source=False`` path -- media the pipeline PRODUCED is copied."""
+
+    def test_a_downloaded_media_is_copied_to_the_item_root(self, tmp_path):
+        downloads = tmp_path / "downloads"
+        downloads.mkdir()
+        source = downloads / "video.mp4"
+        source.write_bytes(b"downloaded")
+        item = str(tmp_path / "item")
+
+        kept = pipeline._retain_source(str(source), item)
+        assert kept == str(tmp_path / "item" / "video.mp4")
+        assert (tmp_path / "item" / "video.mp4").read_bytes() == b"downloaded"
+
+    def test_a_local_source_is_never_copied(self, tmp_path):
+        downloads = tmp_path / "downloads"
+        downloads.mkdir()
+        source = downloads / "video.mp4"
+        source.write_bytes(b"owned")
+        item = tmp_path / "item"
+
+        kept = pipeline._retain_source(str(source), str(item), local_source=True)
+        assert kept is None
+        assert not (item / "video.mp4").exists()
+        assert source.is_file()
+
+    def test_an_oversized_retention_is_a_logged_skip(self, tmp_path, monkeypatch, capsys):
+        """A multi-GB duplication is a logged skip, never a copy.
+
+        The guard mirrors the over-budget path check: best effort, with the reason
+        on stderr. ``-Source`` local inputs never reach it (they are not copied at
+        all), so it protects the URL-download path.
+        """
+        source = tmp_path / "video.mp4"
+        source.write_bytes(b"x")
+        item = tmp_path / "item"
+
+        monkeypatch.setattr(
+            pipeline.paths, "file_size",
+            lambda _p: pipeline.MAX_RETAIN_BYTES + 1,
+        )
+        kept = pipeline._retain_source(str(source), str(item))
+        assert kept is None
+        assert not (item / "video.mp4").exists()
+        assert "exceeds" in capsys.readouterr().err
 
 
 class TestSidecarPlumbing:
@@ -184,3 +264,4 @@ class TestSidecarPlumbing:
         payload = stt.source_metadata(request, stt.Report(output_base=request.output_base))
         assert payload["sourceKept"] is True
         assert payload["sourceFile"] == "video.mp4"
+        assert payload["sourceReason"] is None

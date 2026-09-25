@@ -65,6 +65,11 @@ Hard rules:
    not ship the cuBLAS DLLs that `ggml-cuda.dll` needs. The required version is
    read from the asset name (e.g. `whisper-cublas-11.8.0-...` → cuBLAS 11), and a
    major with no pinned, hash-verified redist is refused rather than guessed.
+   **Tesseract is one of these proposed dependencies, not an optional aside**: it
+   is a pinned, toolchain-owned component (~25 MB engine + ~44 MB `eng`/`rus`
+   language data), so name it when you list what will be fetched and let the user
+   agree before the run. There is no portable upstream archive — the installer is
+   only ever *extracted*, never run, so no elevation is requested.
 4. **Never write media output without a confirmed destination.** Every skill
    inspects the project, proposes candidate paths, and asks before writing.
 5. **Never modify files that are not yours.** Do not edit the project's source,
@@ -242,7 +247,7 @@ and `%PUBLIC%\zoombie-env` when the profile path is not ASCII:
 | whisper model | `zoombie-env\models\` | size chosen from the detected hardware (~0.15–3 GB) |
 | PDF dependencies | the existing Python | `pymupdf4llm` + `pytesseract` via `pip install --user`; Python is already required |
 | pip shims | `%APPDATA%\Python\<ver>\Scripts` | any launcher this install creates is removed again; pre-existing tools are left alone |
-| Tesseract | system-wide | *optional*; detection only, needed for `readpdf -Ocr` / `readimages -Ocr` |
+| Tesseract + `eng`/`rus` traineddata | `zoombie-env\tesseract\` | **provisioned, pinned**. Upstream publishes *no portable archive* — the only Windows release asset is an NSIS installer. That installer is downloaded, its published sha256 verified, and its payload **extracted** (never executed) with a pinned 7-Zip into the ASCII root, so no elevation is needed and nothing lands in a system location. Language data is fetched separately from the official `tesseract-ocr/tessdata` repository, each file sha256-verified against a pinned commit. Needed for `readpdf -Ocr` / `readimages -Ocr` / the `slides` text gate |
 | the CLI | `zoombie-env\bin\zoombie\` | `zoombie.cmd` + the packaged `zoombie\` package and `pdf\` helper, at a stable ASCII path |
 | skills | `%USERPROFILE%\.roo\skills\` | deployed from [`skills/`](skills/); stays under the profile even when the root is under `%PUBLIC%`, because the editor owns this path and no native tool opens it |
 | the Zoombie role | `%APPDATA%\Code\User\globalStorage\zoocodeorganization.zoo-code\settings\custom_modes.yaml` | **merged**, not overwritten, from [`modes/`](modes/): only our entry is replaced, so a hand-written mode in that file survives |
@@ -475,8 +480,12 @@ Give the user a final table with:
   `gpuPolicy.backendSubstituted`).
 - model name and size,
 - PDF toolchain: the Python used and whether the dependencies installed cleanly
-  (`data.manifest.pdf.ok`), and whether Tesseract was detected
-  (`data.manifest.pdf.tesseract`; optional),
+  (`data.manifest.pdf.ok`),
+- Tesseract: the provisioned engine path (`data.manifest.tesseract.engine`), its
+  version (`data.manifest.tesseract.version`) and the language data actually on
+  disk (`data.manifest.tesseract.languages`; the pinned set is
+  `expectedLanguages`). A missing component is reported in `data.missing`, like
+  ffmpeg and whisper,
 - CLI path (`zoombie-env\bin\zoombie\zoombie.cmd`) and skill deployment results,
 - self-test result: TTS voice used (or that the step was SKIPPED), the actual
   transcript, pass/fail,
@@ -503,7 +512,7 @@ cause and the fix rather than overstating the result.
 [ ] A `.md` artifact can be written in the Zoombie role and a `.py` file is refused by its edit restriction
 [ ] No stray .roo\skills directory outside %USERPROFILE%
 [ ] A skill invocation routes through zoombie.cmd (not raw ffmpeg/whisper/python commands)
-[ ] PDF dependencies installed into the existing Python; Tesseract detection noted (optional)
+[ ] PDF dependencies installed into the existing Python; Tesseract engine provisioned into `zoombie-env\tesseract\` with `eng` and `rus` language data (`data.manifest.tesseract.ok`)
 [ ] Backend verified, not assumed: `backendObserved` matches `backendConfigured`; on a CUDA machine the cuBLAS runtime for the ASSET's major (e.g. `cublas64_11.dll`, `cublasLt64_11.dll`) is present beside `whisper-cli.exe`
 [ ] GPU policy holds: a machine with a fitted GPU reports `deviceUsed: cuda` on a real transcription, or `setup` FAILED and said why
 [ ] On a GPU-accelerated install (cuda, or a discrete-GPU vulkan), a real transcription reports `deviceUsed: cuda`/`vulkan` and a `realtimeFactor` well below 1.0. **This line does not apply to a CPU install** — `deviceUsed: cpu` there is the intended outcome, not a failure

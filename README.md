@@ -307,8 +307,14 @@ $zoombie = @(
 & $zoombie postprocess -Md "<summary.md>" [-Srt "<file>"] [-ImageDir "<dir>"] [-Apply]   # anchors, timestamps, index, images
 & $zoombie verify   -Dir "<library-root>" [-Recurse] [-Json]                               # exit 1 on problems
 & $zoombie index    -Dir "<library-root>" [-Output "<path>"] [-Json] [-Apply]             # regenerate README.md
-& $zoombie clean                                          # remove scratch dirs
+& $zoombie clean                                          # remove per-job scratch dirs
+& $zoombie clean -CleanScratch                            # sweep all toolchain scratch (a killed run's leftover)
 ```
+
+Every stage puts its per-run scratch under the toolchain root and removes it when
+it finishes; `-KeepScratch` (alias `-KeepWork`) retains it and the result reports
+it in `data.scratch`. `clean -CleanScratch` removes only dirs carrying our run
+marker -- a folder of yours in a root is reported, never deleted.
 
 Every subcommand accepts `-DryRun` (plan only) and most accept `-Force`.
 Long options also work in their conventional spelling (`--source`, `--output`),

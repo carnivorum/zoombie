@@ -25,7 +25,7 @@ import os
 
 from ..cli import Outcome
 from ..item import paths as item_paths
-from ..lib import env as env_mod, paths, pdf, process
+from ..lib import env as env_mod, next as next_mod, ocr, paths, pdf, process, reading, scratch
 from ..lib.errors import SetupRequiredError, ZoombieError
 
 
@@ -178,6 +178,10 @@ def run(args) -> Outcome:
     safe_markdown = os.path.join(work, "out.md")
     work_images = os.path.join(work, "images")
     work_vision = os.path.join(work, "vision")
+    # Compressed reading copies (plan §12) are encoded in an ASCII work subdir and
+    # copied back beside the rendered scans, in their own subdirectory.
+    work_read_vision = os.path.join(work, "reading")
+    vision_read_dir = reading.reading_dir(vision_dir) if vision_dir else None
     if args.dry_run:
         safe_input = os.path.join(work, "input.pdf")
     else:
@@ -192,13 +196,17 @@ def run(args) -> Outcome:
         f"  work={work}  ocr={bool(args.ocr)}  pages={args.pages or 'all'}"
     )
 
+    # -Lang defaults to DERIVED: a sibling transcript's script decides (Cyrillic ->
+    # eng+rus, Latin -> eng, none -> eng+rus). An explicit -Lang still wins. Read via
+    # getattr because a programmatic caller may build a Namespace without it.
+    language = getattr(args, "lang", None) or ocr.derive_lang(args.source)
     options = pdf.Options(
         input=safe_input,
         output=safe_markdown,
         ocr=args.ocr,
         images=work_images if want_images else None,
         pages=args.pages,
-        lang=args.lang,
+        lang=language,
         images_only=bool(args.images_only),
         images_dir=work_images if want_images else None,
         min_px=args.min_px,
@@ -208,6 +216,10 @@ def run(args) -> Outcome:
     )
 
     if args.dry_run:
+        # -DryRun writes nothing, including to disk: the work dir created a few
+        # lines up is removed here and reported (plan §10), so a dry run leaves no
+        # scratch under the toolchain root.
+        dry_scratch = scratch.report(work, kept=False)
         return Outcome(
             ok=True,
             data={
@@ -222,6 +234,19 @@ def run(args) -> Outcome:
                     "images": options.images_dir, "minPx": options.min_px,
                     "minPt": options.min_pt,
                 },
+                # Nothing was rendered or written, so there is nothing to attach;
+                # the recommended step is the same call without -DryRun.
+                "next": next_mod.build(
+                    "readpdf",
+                    {"-Source": args.source, "-Output": base},
+                    why=(
+                        "dry run: nothing was written; re-run without -DryRun to "
+                        "convert the document, then read any pages it reports as "
+                        "having no text layer"
+                    ),
+                    attachable=[],
+                ),
+                "scratch": dry_scratch,
             },
         )
 
@@ -231,6 +256,7 @@ def run(args) -> Outcome:
         raise ZoombieError(f"readpdf failed: {exc}") from exc
 
     artifacts: dict[str, dict] = {}
+    vision_reading: dict | None = None
 
     # Copy the Markdown back to the real (possibly non-ASCII) destination.
     if not args.images_only:
@@ -272,9 +298,82 @@ def run(args) -> Outcome:
             "count": len(result.vision_pages),
             "pages": [dict(entry) for entry in result.vision_pages],
         }
+        # A compressed reading copy per rendered page (plan §12), beside the PNG
+        # scans in their own subdirectory. A rendered page has no OCR text (that is
+        # why it was rendered), so the rule defaults to -q:v 3 for every page -- and
+        # says so, rather than guessing an escalation.
+        if not reading.disabled(args):
+            vision_read_plan = reading.plan([
+                {"file": entry["file"], "ocrText": None}
+                for entry in result.vision_pages
+            ])
+            vision_read = reading.make_copies(
+                vision_dir, work_read_vision, vision_read_plan
+            )
+            if vision_read.get("available") and vision_read_dir:
+                keep = {item["file"] for item in vision_read["byFrame"].values()}
+                reading.prune(vision_read_dir, keep)
+                if paths.is_dir(work_read_vision):
+                    paths.copy_tree(work_read_vision, vision_read_dir)
+                vision_reading = vision_read
 
-    if not args.keep_work:
-        paths.remove_quietly(work, recursive=True)
+    # CLI-owned cleanup (plan §10): remove this run's scratch unless
+    # -KeepScratch/-KeepWork asked to retain it. Every advertised path lives in the
+    # confirmed ``-Vision``/``-ImageDir`` destination, which was COPIED to above,
+    # so deleting the scratch cannot invalidate the attach list or data.next.
+    # It runs after both copy-backs, which is the bounded read E defined.
+    scratch_block = scratch.report(work, kept=scratch.keep_requested(args))
+
+    # The rendered scans are the only thing readpdf produces that a vision reader
+    # still has to LOOK at, so they are the attach list -- HARD-CAPPED (plan §9)
+    # exactly as ``slides`` caps its frames. A text-first run renders nothing, so
+    # its attach list is legitimately empty: the text is already in the Markdown.
+    # ``path`` is the reading copy when one was written, and ``bytes`` is THAT file's
+    # size, so ``budget`` reports what the agent is about to spend (plan §9/§12) -- a
+    # JPEG, not a larger PNG. The PNG is still identified by ``file``.
+    read_map = (vision_reading or {}).get("byFrame", {}) if vision_dir else {}
+    vision_attachable = [
+        {
+            "page": entry["page"],
+            "file": entry["file"],
+            "path": (
+                os.path.join(vision_read_dir, read_map[entry["file"]]["file"])
+                if entry["file"] in read_map and vision_read_dir
+                else os.path.join(vision_dir, entry["file"])
+            ),
+            "bytes": (
+                read_map[entry["file"]]["bytes"] if entry["file"] in read_map
+                else paths.file_size(os.path.join(vision_dir, entry["file"]))
+                if paths.is_file(os.path.join(vision_dir, entry["file"])) else 0
+            ),
+        }
+        for entry in result.vision_pages
+    ] if vision_dir else []
+    attach_cap = next_mod.cap_of(args)
+    vision_selected = next_mod.select(vision_attachable, attach_cap)
+
+    if vision_attachable:
+        next_command = "postprocess"
+        next_args = {"-Md": output_md} if not args.images_only else {"-Dir": os.path.dirname(output_md)}
+        next_why = (
+            "the pages with no text layer were rendered; read the attach list with "
+            "your OWN vision, then run postprocess -Apply to place the figures and "
+            "stamp the headings"
+        )
+    elif args.images_only:
+        next_command = None
+        next_args = None
+        next_why = (
+            "figures and the sidecar were written and no Markdown was requested; "
+            "hand the manifest to zoombie-summarize's postprocess pass"
+        )
+    else:
+        next_command = None
+        next_args = None
+        next_why = (
+            "the text layer was read directly, so there is nothing left to look at; "
+            "hand the Markdown to zoombie-summarize"
+        )
 
     return Outcome(
         ok=True,
@@ -288,7 +387,47 @@ def run(args) -> Outcome:
             # Render-only escalation: the scans a vision reader still has to look
             # at. Present only when -Vision was given and pages had no text layer.
             "visionDir": result.vision_dir if result.vision_pages else None,
-            "visionPages": [dict(entry) for entry in result.vision_pages],
+            # CAPPED (plan §9): ``visionPages`` is the agent-facing read list; the
+            # full count is ``visionPageCount`` and the deferred pages are named in
+            # ``data.next.overAttach``.
+            "visionPages": [
+                {**entry,
+                 "path": (
+                     os.path.join(vision_read_dir, read_map[entry["file"]]["file"])
+                     if entry["file"] in read_map and vision_read_dir
+                     else os.path.join(vision_dir, entry["file"])
+                 )}
+                for entry in vision_selected["attach"]
+            ] if vision_dir else [],
+            "visionPageCount": len(result.vision_pages),
+            # The compressed reading copies of the rendered scans (plan §12). A
+            # rendered page has no OCR text, so every page uses the default -q:v 3.
+            "readingCopy": {
+                "dir": vision_read_dir if vision_reading else None,
+                "available": bool(vision_reading),
+                "count": (vision_reading or {}).get("count", 0),
+                "bytes": (vision_reading or {}).get("bytes", 0),
+                "qualities": reading.summary(
+                    reading.plan([{"file": e["file"], "ocrText": None}
+                                  for e in result.vision_pages])
+                ).get("qualities", {}) if vision_reading else {},
+                "reason": (
+                    "no rendered scans, so there is nothing to read inline"
+                    if not result.vision_pages else
+                    "disabled by -NoReadingCopy" if reading.disabled(args) else
+                    f"a -q:v {reading.DEFAULT_QUALITY} JPEG per rendered page; a "
+                    "rendered page has no OCR text to escalate from, so every page "
+                    "uses the default quality"
+                    if vision_reading else
+                    "ffmpeg was not available, so the PNG scans were advertised"
+                ),
+            },
+            "next": next_mod.build(
+                next_command, next_args, why=next_why,
+                attachable=vision_attachable, attach_cap=attach_cap,
+            ),
+            # The scratch lifecycle, reported rather than left to prose (plan §10).
+            "scratch": scratch_block,
             "asciiSafe": True,
         },
     )

@@ -20,7 +20,7 @@ import sys
 from dataclasses import dataclass, field
 
 from . import SKILL_VERSION
-from .lib import pdf, process, slides
+from .lib import next as next_mod, pdf, process, reading, slides
 from .lib.errors import ZoombieError
 
 
@@ -38,6 +38,47 @@ def _add_common(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("-Force", "--force", action="store_true", help="overwrite existing outputs")
 
 
+def _add_attach_limit(parser: argparse.ArgumentParser) -> None:
+    """``-AttachLimit``: how many images a result may advertise for inline reading.
+
+    The cap is a TRANSPORT guarantee (plan §9): a result never hands an agent more
+    than this many image paths, because reading all of them is what recreated the
+    413 (§3). The flag lets a caller RAISE it deliberately for a known-small set; it
+    is never a way to smuggle a 96-frame deck into one result, and ``-Force`` does
+    not affect it. Read via ``getattr`` because a programmatic caller (and the
+    existing tests) may build a Namespace without it; omitting it -- or passing 0 --
+    means the built-in :data:`zoombie.lib.next.DEFAULT_ATTACH_CAP`.
+    """
+    parser.add_argument(
+        "-AttachLimit", "--attach-limit", dest="attach_limit", type=int, default=None,
+        help=(
+            "max image paths a result advertises for inline reading "
+            f"(default: {next_mod.DEFAULT_ATTACH_CAP}); the excess stays on disk and "
+            "is named in data.next.overAttach. Raise it only for a deliberately small set"
+        ),
+    )
+
+
+def _add_no_reading_copy(parser: argparse.ArgumentParser) -> None:
+    """``-NoReadingCopy``: advertise the PNG frames instead of the JPEG copies.
+
+    The compressed reading copies (plan §12) are the default: a JPEG of each frame
+    the agent may read inline, at the source resolution, so a session is not blown by
+    full-size PNGs (§3). This flag turns them off for a caller that wants the PNG
+    paths. Read via ``getattr`` so a Namespace built without it still defaults on.
+    """
+    parser.add_argument(
+        "-NoReadingCopy", "--no-reading-copy", dest="no_reading_copy",
+        action="store_true",
+        help=(
+            "do not write compressed reading copies; advertise the PNG frames "
+            f"(default: a -q:v {reading.DEFAULT_QUALITY} JPEG per frame, escalating "
+            f"to -q:v {reading.DENSE_QUALITY} above {reading.DENSE_NUMERIC_TOKENS} "
+            "numeric tokens)"
+        ),
+    )
+
+
 def _add_source_output(parser: argparse.ArgumentParser, output_help: str = "output file or basename") -> None:
     parser.add_argument("-Source", "--source", dest="source", required=True, help="source file or URL")
     parser.add_argument("-Output", "--output", dest="output", default=None, help=output_help)
@@ -45,7 +86,17 @@ def _add_source_output(parser: argparse.ArgumentParser, output_help: str = "outp
 
 def _add_work(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("-WorkRoot", "--work-root", dest="work_root", default=None, help="scratch root")
-    parser.add_argument("-KeepWork", "--keep-work", dest="keep_work", action="store_true", help="keep the work dir")
+    # -KeepScratch is the plan-§10 name; -KeepWork is the historical alias for the
+    # same decision (retain this run's scratch under the toolchain root for
+    # inspection). Both are accepted so no script or skill breaks.
+    parser.add_argument(
+        "-KeepWork", "--keep-work", dest="keep_work", action="store_true",
+        help="keep the work dir (alias of -KeepScratch)",
+    )
+    parser.add_argument(
+        "-KeepScratch", "--keep-scratch", dest="keep_scratch", action="store_true",
+        help="retain this run's scratch dir under the toolchain root for inspection",
+    )
 
 
 def _add_model(parser: argparse.ArgumentParser) -> None:
@@ -60,6 +111,24 @@ def _add_gpu_policy(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("-StrictGpu", "--strict-gpu", dest="strict_gpu", action="store_true")
 
 
+def _add_time_window(parser: argparse.ArgumentParser) -> None:
+    """``-From``/``-To``: decode only ``[From, To)`` of the input.
+
+    A window is decoded as a SHORT FILE sliced out of the input (16 kHz mono WAV)
+    and its artifacts are written under a window-qualified name, so they never
+    overwrite the full transcript. ``-To`` omitted means "to the end of the input".
+    ``HH:MM:SS``, ``MM:SS`` and plain seconds are all accepted.
+    """
+    parser.add_argument(
+        "-From", "--from", dest="from_time", default=None,
+        help="window start (HH:MM:SS, MM:SS or seconds); omit for the whole file",
+    )
+    parser.add_argument(
+        "-To", "--to", dest="to_time", default=None,
+        help="window end; omit for 'to the end of the input'",
+    )
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="zoombie",
@@ -72,9 +141,21 @@ def build_parser() -> argparse.ArgumentParser:
     subparsers.add_parser("doctor", help="report tool status")
 
     # --- clean ------------------------------------------------------------
+    # Default: remove the per-job ``<WorkRoot>\\<guid>`` dirs. -CleanScratch: sweep
+    # EVERY toolchain-owned scratch dir under both roots (work + tmp), which is the
+    # verb a killed run's leftover needs. Ownership is by run marker, so a user
+    # artifact that happens to sit in a root is reported in ``spared``, never deleted.
     clean = subparsers.add_parser("clean", help="remove scratch dirs")
     clean.add_argument("-WorkRoot", "--work-root", dest="work_root", default=None)
     clean.add_argument("-DryRun", "--dry-run", action="store_true")
+    clean.add_argument(
+        "-CleanScratch", "--clean-scratch", dest="clean_scratch", action="store_true",
+        help=(
+            "sweep every toolchain-owned scratch dir under the toolchain root "
+            "(work + tmp), e.g. the leftover of a killed run; user folders in a "
+            "root are reported, never removed"
+        ),
+    )
 
     # --- download ---------------------------------------------------------
     download = subparsers.add_parser("download", help="download a video or its audio")
@@ -91,6 +172,46 @@ def build_parser() -> argparse.ArgumentParser:
     extract.add_argument("-Format", "--format", dest="format", default="wav",
                          choices=["wav", "mp3", "m4a", "flac"])
     _add_common(extract)
+
+    # --- unpack -----------------------------------------------------------
+    # The generic NSIS/7z capability: an installer (or archive) is DATA, never an
+    # executed program. -Check lists the archive without extracting; -DryRun
+    # extracts to scratch and reports the real file list, writing nothing to the
+    # destination. Installer scaffolding ($PLUGINSDIR) is excluded by directory.
+    unpack_cmd = subparsers.add_parser(
+        "unpack", help="extract an NSIS installer or a 7z archive into a folder"
+    )
+    _add_source_output(
+        unpack_cmd,
+        output_help=(
+            "the folder that receives the extracted files (required; the "
+            "destination is copied to, never the scratch dir)"
+        ),
+    )
+    unpack_cmd.add_argument(
+        "-Strip", "--strip", dest="strip", type=int, default=0,
+        help="drop this many leading path levels from every entry (default: 0)",
+    )
+    unpack_cmd.add_argument(
+        "-Include", "--include", dest="include", action="append", default=None,
+        help=(
+            "only take entries matching this glob; repeatable, and matched against "
+            "the full path AND the base name (e.g. -Include *.dll -Include tessdata/*)"
+        ),
+    )
+    unpack_cmd.add_argument(
+        "-Check", "--check", action="store_true",
+        help="list the archive's contents; extract nothing and write nothing",
+    )
+    unpack_cmd.add_argument(
+        "-KeepWork", "--keep-work", dest="keep_work", action="store_true",
+        help="keep the scratch dir the payload was extracted into",
+    )
+    unpack_cmd.add_argument(
+        "-KeepScratch", "--keep-scratch", dest="keep_scratch", action="store_true",
+        help="alias of -KeepWork: retain the extraction scratch dir",
+    )
+    _add_common(unpack_cmd)
 
     # --- transcribe -------------------------------------------------------
     transcribe = subparsers.add_parser("transcribe", help="transcribe audio to text")
@@ -114,6 +235,7 @@ def build_parser() -> argparse.ArgumentParser:
         "-NoSrt", "--no-srt", dest="no_srt", action="store_true",
         help="suppress the .srt subtitles (the timings are then lost)",
     )
+    _add_time_window(transcribe)
     _add_common(transcribe)
 
     # --- pipeline ---------------------------------------------------------
@@ -138,6 +260,10 @@ def build_parser() -> argparse.ArgumentParser:
         "-NoSrt", "--no-srt", dest="no_srt", action="store_true",
         help="suppress the .srt subtitles (the timings are then lost)",
     )
+    # A window is reachable from the pipeline too, but only meaningfully for a
+    # LOCAL source: a URL is downloaded in full and then sliced. It composes with
+    # the same flags as ``transcribe``.
+    _add_time_window(pipeline)
     # NOTE: the pipeline deliberately exposes no -Format. Its audio is a 16 kHz
     # mono WAV because that is the only thing whisper.cpp consumes; the flag used
     # to be registered here and never read. -Format lives on download/extract,
@@ -181,7 +307,14 @@ def build_parser() -> argparse.ArgumentParser:
         help=f"drop images below this on-page size in points (default: {pdf.DEFAULT_MIN_PT})",
     )
     readpdf.add_argument("-Pages", "--pages", dest="pages", default=None, help="page range, e.g. 1-5,8")
-    readpdf.add_argument("-Lang", "--lang", dest="lang", default="eng", help="Tesseract language code")
+    # Default is DERIVED, not hard-coded: a sibling transcript's script decides
+    # (Cyrillic -> eng+rus, Latin -> eng, none -> eng+rus). -Lang still overrides.
+    readpdf.add_argument(
+        "-Lang", "--lang", dest="lang", default=None,
+        help="Tesseract language code (default: derived from a transcript, else eng+rus)",
+    )
+    _add_no_reading_copy(readpdf)
+    _add_attach_limit(readpdf)
     _add_common(readpdf)
 
     # --- readimages -------------------------------------------------------
@@ -191,11 +324,15 @@ def build_parser() -> argparse.ArgumentParser:
     readimages = subparsers.add_parser("readimages", help="turn images into Markdown (OCR or vision)")
     _add_source_output(readimages)
     readimages.add_argument("-Ocr", "--ocr", action="store_true", help="read the images with Tesseract")
-    readimages.add_argument("-Lang", "--lang", dest="lang", default="eng", help="Tesseract language code")
+    readimages.add_argument(
+        "-Lang", "--lang", dest="lang", default=None,
+        help="Tesseract language code (default: derived from a transcript, else eng+rus)",
+    )
     readimages.add_argument(
         "-ImageDir", "--image-dir", dest="image_dir", default=None,
         help="where to write the sidecar (default: <base>.images)",
     )
+    _add_attach_limit(readimages)
     _add_common(readimages)
 
     # --- slides -----------------------------------------------------------
@@ -230,13 +367,24 @@ def build_parser() -> argparse.ArgumentParser:
     slides_cmd.add_argument(
         "-SampleRate", "--sample-rate", dest="sample_rate", type=float,
         default=slides.DEFAULT_SAMPLE_RATE,
-        help=f"auto-detect sampling, frames per second (default: {slides.DEFAULT_SAMPLE_RATE})",
+        help=(
+            "auto-detect sampling cadence, frames per second -- BOUNDARY detection, "
+            f"not the image count (default: {slides.DEFAULT_SAMPLE_RATE})"
+        ),
+    )
+    slides_cmd.add_argument(
+        "-DiffThreshold", "--diff-threshold", dest="diff_threshold", type=float,
+        default=slides.DEFAULT_DIFF_THRESHOLD,
+        help=(
+            "mean grayscale diff (0-255) that starts a new slide -- the boundary "
+            f"signal, because a dHash cannot see a fade (default: {slides.DEFAULT_DIFF_THRESHOLD})"
+        ),
     )
     slides_cmd.add_argument(
         "-HashDistance", "--hash-distance", dest="hash_distance", type=int,
         default=slides.DEFAULT_HASH_DISTANCE,
         help=(
-            "max perceptual-hash distance for 'same slide' "
+            "max perceptual-hash distance for 'same picture' -- DEDUP only now "
             f"(default: {slides.DEFAULT_HASH_DISTANCE})"
         ),
     )
@@ -249,9 +397,53 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     slides_cmd.add_argument(
+        "-SampleIntervalSec", "--sample-interval-sec", dest="sample_interval", type=float,
+        default=slides.DEFAULT_SAMPLE_INTERVAL_SECONDS,
+        help=(
+            "inside a run longer than this many seconds, keep one extra interior "
+            f"sample per interval (default: {slides.DEFAULT_SAMPLE_INTERVAL_SECONDS})"
+        ),
+    )
+    slides_cmd.add_argument(
         "-MinPx", "--min-px", dest="min_px", type=int, default=slides.DEFAULT_MIN_PX,
         help=f"drop frames below this pixel size (default: {slides.DEFAULT_MIN_PX})",
     )
+    # The byte prefilter and the text threshold are BOTH non-destructive now: the
+    # byte value only decides whether to spend an OCR call, and the text value is a
+    # reporting flag. Neither removes a frame. The byte value sits inside the
+    # measured gap between flat talking-head frames (200-470 KB) and text slides
+    # (590-960 KB) on the Crimson item.
+    slides_cmd.add_argument(
+        "-MinFrameBytes", "--min-frame-bytes", dest="min_frame_bytes", type=int,
+        default=slides.DEFAULT_MIN_FRAME_BYTES,
+        help=(
+            "skip the OCR call for a frame smaller than this many bytes (the frame "
+            f"is KEPT; default: {slides.DEFAULT_MIN_FRAME_BYTES})"
+        ),
+    )
+    slides_cmd.add_argument(
+        "-MinTextChars", "--min-text-chars", dest="min_text_chars", type=int,
+        default=slides.DEFAULT_MIN_TEXT_CHARS,
+        help=(
+            "flag (never drop) a frame whose OCR text is shorter than this as "
+            f"'likely image-only' (default: {slides.DEFAULT_MIN_TEXT_CHARS})"
+        ),
+    )
+    # Text is REPORTING, not a decision. OCR runs once per run and its text is
+    # written to .data/ocr.json for the agent to score; -NoTextGate disables it.
+    slides_cmd.add_argument(
+        "-NoTextGate", "--no-text-gate", dest="no_text_gate", action="store_true",
+        help="disable the per-run OCR reporting pass (keep frames, write no ocr.json)",
+    )
+    _add_no_reading_copy(slides_cmd)
+    slides_cmd.add_argument(
+        "-Lang", "--lang", dest="lang", default=None,
+        help=(
+            "Tesseract language for the OCR reporting pass "
+            "(default: derived from a transcript, else eng+rus)"
+        ),
+    )
+    _add_attach_limit(slides_cmd)
     _add_common(slides_cmd)
 
     # --- postprocess ------------------------------------------------------
@@ -281,6 +473,7 @@ def build_parser() -> argparse.ArgumentParser:
     postprocess.add_argument(
         "-Report", "--report", dest="report", default=None, help="write the report JSON to this path"
     )
+    _add_attach_limit(postprocess)
 
     # --- verify -----------------------------------------------------------
     verify = subparsers.add_parser("verify", help="check a produced summary tree (exit 1 on problems)")
@@ -403,6 +596,9 @@ def _dispatch(args: argparse.Namespace) -> Outcome:
     if args.command == "extract":
         from .commands import extract
         return extract.run(args)
+    if args.command == "unpack":
+        from .commands import unpack
+        return unpack.run(args)
     if args.command == "transcribe":
         from .commands import transcribe
         return transcribe.run(args)

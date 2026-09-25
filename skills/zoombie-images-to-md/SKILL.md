@@ -47,8 +47,11 @@ pages are read. An image folder → the images are read.
   page_title, digest, bytes}`.
 - The JSON result `data` keys for `readpdf` are: `output`, `imagesOnly`,
   `artifacts`, `pages`, `ocrUsed`, `keptScannedPages`, `visionDir`,
-  `visionPages`. Inside `artifacts`, `md` is `{path, size}` and `images` is
-  `{path, count, manifest, skipped}`.
+  `visionPages`, `readingCopy`. Inside `artifacts`, `md` is `{path, size}` and
+  `images` is `{path, count, manifest, skipped}`.
+- `visionPages[i].path` is a **compressed reading copy** (a JPEG under
+  `readings/`, plan §12), not the PNG: open the path you are given. `readingCopy`
+  reports the directory and the quality routing. The PNG scan stays the figure.
 - For `readimages`: `output`, `artifacts`, `count`, `ocrUsed`, `visionOnly`.
   `visionOnly` is `true` when no `-Ocr` was given — the images were recorded for
   YOU to read, and no text was written.

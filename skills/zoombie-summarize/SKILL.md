@@ -28,34 +28,21 @@ A `summary.md` is exactly six `##` sections, numbered:
 | 5 | Related articles | you + the CLI's link repair |
 | 6 | **The source text, verbatim** (a copy, not a recap), with `###` subheadings | you write the headings and prose; **the CLI adds the anchors and timestamps** |
 
-**Block 6 is a COPY of the source, not a summary of it.** It carries the source
-text itself, with recognition artefacts cleaned out -- filler, duplicated cues and
-machine noise removed, punctuation restored -- and nothing condensed, paraphrased
-or re-ordered. A reader must be able to treat it as the source.
+**Block 6 is a COPY of the source, not a summary of it** — the source text with
+recognition artefacts cleaned out (filler, duplicated cues, machine noise), and
+nothing condensed, paraphrased or re-ordered. A reader must be able to treat it as
+the source.
 
-**The heading must SAY so**, because nothing else in the file does. This is not
-cosmetic: a task on another machine read block 6 as a recap and treated a verbatim
-copy as a second-hand digest, precisely because the heading was the only signal and
-it did not give one. Use a heading that names the copy, in the document's language:
+**The heading must SAY so**, because nothing else in the file does: a task on
+another machine read block 6 as a recap precisely because the heading gave no
+signal. Name the copy, in the document's language — e.g. `## 6. Полный текст
+источника (копия, очищенная от артефактов распознавания)`, or in English
+`## 6. Source text - verbatim copy, cleaned of recognition artifacts`. `verify`
+reports a heading that does not declare itself a copy.
 
-```markdown
-## 6. Полный текст источника (копия, очищенная от артефактов распознавания)
-```
-
-or, in English:
-
-```markdown
-## 6. Source text - verbatim copy, cleaned of recognition artifacts
-```
-
-`verify` reports a summary whose block-6 heading does not declare itself a copy.
-The pass itself is unaffected -- block 6 is located by its NUMBER, not its title --
-so the wording is yours as long as it says what the block is.
-
-**The passes address sections by NUMBER, not by title.** `## 4.` is matched as
-`^##\s*4\.`, so a title in any language is safe and rephrasing it cannot break
-the pass. What must survive is the numbered heading itself. The Russian titles
-used by this repo's own tests are the convention:
+**The passes address sections by NUMBER, not by title** (`## 4.` is matched as
+`^##\s*4\.`), so a title in any language is safe. The numbering is what must
+survive; the Russian titles below are the repo's test convention:
 
 ```
 # <title>
@@ -73,51 +60,59 @@ used by this repo's own tests are the convention:
 ## 6. Полный текст источника (копия, очищенная от артефактов распознавания)
 ```
 
-(The Russian titles are the convention this repo's own tests use; the numbering is
-what matters to the passes, and block 6's title must declare the copy.)
-
 ### The criticism sub-block (block 3)
 
 Block 3 may end with a criticism sub-block: the flaws worth flagging in the source
-itself — an unsupported claim, a stale figure, a one-sided framing.
+— an unsupported claim, a stale figure, a one-sided framing.
 
-**It is bold-italic text, NOT a heading.** `assign_anchors` numbers every heading
-from `###` to `######`, so a `####` would consume an `s-N` that nothing links to,
-and `verify` fails on a dangling anchor. Bold-italic is not a heading, so no pass
-sees it and block 3 can never disturb block 6.
+**Bold-italic text, NOT a heading.** `assign_anchors` numbers every heading from
+`###` down, so a `####` would consume an `s-N` that nothing links to and `verify`
+fails on a dangling anchor. Form: a lone `***Criticism***` (or `***Критика***`)
+line, blank line either side, one line per flaw.
 
-Form: a lone `***Criticism***` (or `***Критика***`) line, blank line either side,
-one line per flaw.
-
-It is **optional, and often absent.** Include it only when there is something
-material to say; do not pad it or manufacture objections to look rigorous. When
-the source is sound, omit it rather than writing "nothing to criticise".
+It is **optional and often absent.** Include it only when there is something
+material to say; when the source is sound, omit it.
 
 ### Slides (video sources only): ask first
 
 For a **video** source, ask before anything expensive: (1) "should I also try to
 extract slides?"; (2) if yes, "do you have exact timestamps?" — **yes** runs
 `slides -Times "..."` (one frame each, the minimal set), **no** runs `slides` to
-auto-detect and dedup. `postprocess -Apply` then embeds them via the usual image
-pass. The frames are copied into the item's `.data/img/` (the deliverable); if you
-stage the timestamp list or any other scratch in the meantime, keep it under the
-workspace `/.tmp/` folder, not in the item.
+auto-detect and dedup. `postprocess -Apply` then embeds them. Frames land in
+`.data/img/`; stage any scratch under the workspace `/.tmp/`.
 
-**Block-6 convention that makes it work:** one `###` per slide, and **the
-narration for that slide FIRST** under each heading. `slides` sets each entry's
-`anchor_text` to that narration (so the figure is placed under it) and its
-`timeSec` (so the heading is stamped deterministically, not by fuzzy search). A
-heading led by unspoken text makes the anchor miss, and the figure is reported as
-skipped rather than misplaced.
+`slides` **promotes, never drops on text**: every stable run keeps ≥1 frame, so an
+image-only slide is never lost; `data.images.skippedReasons` names the structural
+and duplicate drops. OCR runs **once per run** into **`<item>/.data/ocr.json`**
+(`data.ocr.artifact`) — score usefulness from that text, not from char count.
+
+**Block-6 convention:** one `###` per slide, with the **narration FIRST** under
+each heading (`anchor_text`, the placement anchor) plus `timeSec` for the stamp.
+
+**Read the kept frames with your OWN vision — OCR filters, it does not read.**
+Open each path in `data.visionFrames` and write what the slide SAYS — title,
+bullets, table — into the block-6 **body**. The heading stays led by the narration
+(so the anchor resolves); the slide's content goes in the body.
+
+### Block-6 subsections: on TOPIC CHANGE, not one per slide
+
+A `###` is a **topic boundary in the narration**, not a slide boundary (one per
+slide gave 124 headings for a 96-slide deck). **Block 4 indexes level-3 headings
+only**; every heading still gets its `s-N` anchor and stamp, but `####`-and-deeper
+stay out of the contents. Use `####` for a sub-point within a topic.
 
 ### What `postprocess` does to that skeleton
 
-1. Numbers every `###` heading in block 6 and prefixes `<a id="s-N"></a>`.
-2. Reads the sibling SRT and stamps each block-6 heading with `HH:MM:SS — `.
-3. Regenerates block 4 as an indented bullet index linking `#s-N`.
+1. Numbers every `###`-and-deeper block-6 heading and prefixes `<a id="s-N"></a>`.
+2. Stamps each heading `HH:MM:SS — ` from the sibling SRT. A manifest's `timeSec`
+   is used **only when heading count == image count**; on a mismatch the ordinal
+   association is refused (it would shift every stamp) and the SRT search is used.
+3. Regenerates block 4 as an indented index linking `#s-N`, **level-3 only**.
 4. Percent-encodes link destinations and de-brackets link labels.
-5. For a PDF-derived document, strips previously inserted images and re-inserts
-   them from `.data/img/manifest.json`.
+5. Re-inserts images from `.data/img/manifest.json`. A figure with a degenerate
+   `anchor_text` (a repeated whisper-loop phrase, or under a 3-word floor) is
+   **not placed** — reported in `data.files[].imagesSkippedDetail`, counted in
+   `skipped`. Do not hand-place it.
 6. Collapses blank runs and ensures exactly one trailing newline.
 
 Each pass works on a *range* rebuilt from the document, never by appending, so
@@ -190,6 +185,10 @@ Read `data` for what changed. Do **not** hand-assemble a Python command.
            transcript.txt, transcript.srt, source.json, item.json
    ```
 
+   `.data/` is created by `transcribe`/`pipeline` the moment `-Output` names the
+   item, so a folder that has only been transcribed is already a recognised item.
+   You do not create `.data/`; you write `summary.md` and run `postprocess`.
+
    Read what the workspace already does instead of imposing a convention:
 
    ```powershell
@@ -203,14 +202,15 @@ Read `data` for what changed. Do **not** hand-assemble a Python command.
    recommendation is `<DD.MM.YYYY> - <title>`; say that is the default. Then
    present the proposals and wait for the user to choose.
 
-   **Use the number you were given.** `nextNumber` comes from the scan, so copy
-   it. Never invent a number, never write a placeholder such as `NN`, and never
-   silently pick a date. A folder name is free -- but a number the toolchain
-   assigned is not yours to guess.
+   **Use the number you were given.** Copy `nextNumber` from the scan; never
+   invent a number, write `NN`, or silently pick a date.
 
 3. **Write the prose** for the blocks you own: 1, 2, 3, and the block-6 headings
    with their content. Put the origin link in block 2 — for a video whose local
-   file was deleted, `<base>.source.json` still carries the URL.
+   file was deleted, `<base>.source.json` still carries the URL (its `url` is
+   `null` with a `urlReason` when the only input was a deleted scratch file: say
+   the origin was not durable rather than inventing a link).
+   Block-6 subsections follow **topic change, not slides** — see above.
 
 4. **Run `postprocess`** with the confirmed paths and `-Apply`.
 
@@ -222,18 +222,14 @@ Read `data` for what changed. Do **not** hand-assemble a Python command.
 
 ## Rules
 
-- **Never edit what the CLI owns.** If the anchors, timestamps, contents or image
-  placement are wrong, fix the *input* or the *prose* and run `postprocess`
-  again. Hand-patching block 4 or an `<a id>` is the one way to break the
-  idempotency guarantee.
-- **One document per item.** The item folder holds `summary.md`, the source media
-  when it was kept, and `.data/`. Everything under `.data/` -- `img/` with its
-  `README.md` and `manifest.json`, the transcript, `item.json` -- is a sidecar or
-  derived material, not a document. Never hand-edit it.
+- **Never edit what the CLI owns.** If anchors, timestamps, contents or image
+  placement are wrong, fix the *input* or the *prose* and re-run `postprocess`.
+  Hand-patching block 4 or an `<a id>` breaks the idempotency guarantee.
+- **One document per item.** `summary.md`, the kept media, and `.data/`.
+  Everything under `.data/` is a sidecar or derived material — never hand-edit it.
 - **The name is the user's.** Do not rename a folder to satisfy a convention, and
-  do not read meaning from one: the item's number, date and title live in
+  do not read meaning from one: the number, date and title live in
   `.data/item.json`.
-- **Dry run first** when the document already exists, so you can show the user
-  the diff before it is written.
+- **Dry run first** when the document exists, so you can show the diff first.
 - **Do not re-transcribe or re-convert.** If the source material is missing, hand
-  back to the skill that produces it rather than doing its job here.
+  back to the skill that produces it.

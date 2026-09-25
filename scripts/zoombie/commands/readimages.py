@@ -21,7 +21,7 @@ import hashlib
 import os
 
 from ..cli import Outcome
-from ..lib import ocr, paths, process
+from ..lib import next as next_mod, ocr, paths, process
 from ..lib.errors import SetupRequiredError, ZoombieError
 
 
@@ -119,6 +119,11 @@ def run(args) -> Outcome:
     image_dir = paths.absolute(args.image_dir) if args.image_dir else f"{base}.images"
     paths.assert_fits(image_dir, "The readimages sidecar directory", slack=24)
 
+    # -Lang defaults to DERIVED: a sibling transcript's script decides (Cyrillic ->
+    # eng+rus, Latin -> eng, none -> eng+rus). An explicit -Lang still wins. Read via
+    # getattr because a programmatic caller may build a Namespace without it.
+    language = getattr(args, "lang", None) or ocr.derive_lang(args.source)
+
     ocr_requested = bool(args.ocr)
     if ocr_requested:
         usable, detail = ocr.available()
@@ -130,6 +135,13 @@ def run(args) -> Outcome:
             )
 
     if args.dry_run:
+        # The image list is CAPPED here too (plan §9): a dry run is what the agent
+        # plans its reads from, so it must already be honest about how many images
+        # the transport will carry. ``selected`` keeps the remainder in overAttach.
+        selected = next_mod.select(
+            [{"file": os.path.basename(path), "path": path} for path in images],
+            next_mod.cap_of(args),
+        )
         return Outcome(
             ok=True,
             data={
@@ -138,7 +150,21 @@ def run(args) -> Outcome:
                 "images": image_dir,
                 "count": len(images),
                 "ocr": ocr_requested,
-                "files": [os.path.basename(path) for path in images],
+                "files": [entry["file"] for entry in selected["attach"]],
+                "filesTruncated": selected["truncated"],
+                "next": next_mod.build(
+                    "readimages",
+                    {"-Source": args.source, "-Output": output_md},
+                    why=(
+                        "dry run: nothing was written; re-run without -DryRun to "
+                        "produce the Markdown and the sidecar, then have the vision "
+                        "reader read the attach list"
+                    )
+                    if not ocr_requested
+                    else "dry run: nothing was written; re-run without -DryRun to "
+                    "produce the Markdown with OCR text",
+                    attachable=[],
+                ),
             },
         )
 
@@ -166,7 +192,7 @@ def run(args) -> Outcome:
         body: list[str] = [f"![{name}]({link})"]
         if ocr_requested:
             try:
-                text = ocr.ocr_image(image_path, args.lang)
+                text = ocr.ocr_image(image_path, language)
             except RuntimeError as exc:
                 raise SetupRequiredError(f"OCR failed for {name}: {exc}") from exc
             if text:
@@ -194,6 +220,37 @@ def run(args) -> Outcome:
         "step",
     )
 
+    # The vision hand-off, HARD-CAPPED (plan §9) exactly as ``slides`` is: the
+    # first ``DEFAULT_ATTACH_CAP`` images are what this result advertises for
+    # inline reading, and the remainder is deferred to ``data.next.overAttach``
+    # rather than dropped. With ``-Ocr`` the text is already in the document, so
+    # there is nothing left to read and there is no attach list.
+    #
+    # ``command`` is ``None`` for BOTH cases on purpose: the next step is an AGENT
+    # action (read the attach list with its own vision, then hand the Markdown to
+    # zoombie-summarize), not a CLI verb. Recommending ``readimages`` again would be
+    # a self-loop that neither can consume -- it wrote only image links, which
+    # ``postprocess`` (a 6-block pass) cannot place either -- and a wrong graph edge
+    # is worse than an honest hand-off, because the agent would follow it.
+    text_written = ocr_requested and ocr_used
+    attachable = [] if text_written else [
+        {"file": name, "path": path, "bytes": paths.file_size(path)}
+        for name, path in zip((row["file"] for row in rows), images)
+    ]
+    next_block = next_mod.build(
+        None,
+        None,
+        why=(
+            "the OCR text is already in the document, so nothing is left to read; "
+            "hand the Markdown to zoombie-summarize"
+            if text_written
+            else "this run wrote image links only; read the attach list with your "
+            "OWN vision into the prose, then hand the Markdown to zoombie-summarize"
+        ),
+        attachable=attachable,
+        attach_cap=next_mod.cap_of(args),
+    )
+
     return Outcome(
         ok=True,
         data={
@@ -211,6 +268,7 @@ def run(args) -> Outcome:
             # Explicit: with no -Ocr this run recorded images for a vision reader
             # and wrote NO text, rather than writing an empty document silently.
             "visionOnly": not ocr_requested,
+            "next": next_block,
             "asciiSafe": True,
         },
     )

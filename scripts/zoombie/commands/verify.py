@@ -16,6 +16,9 @@ Checks, per Markdown file:
 * ``dead-link``      -- a block-5 relative link that resolves to nothing.
 * ``missing-source`` -- a ``<base>.md`` referenced by the block-2 source block
   that does not exist.
+* ``section6-image-count-mismatch`` -- ADVISORY: the anchored block-6 heading count
+  differs from the image manifest's ``count``/``images`` length, so the ordinal
+  heading-to-image stamp association cannot hold.
 
 Two properties matter more than the checks themselves:
 
@@ -30,6 +33,7 @@ Two properties matter more than the checks themselves:
 
 from __future__ import annotations
 
+import json
 import os
 import re
 from urllib.parse import unquote
@@ -54,6 +58,9 @@ KIND_DEAD_ANCHOR = "dead-anchor"
 KIND_DEAD_LINK = "dead-link"
 KIND_MISSING_SOURCE = "missing-source"
 KIND_SECTION6_UNDECLARED = "section6-not-declared"
+# Named for what it DETECTS: the number of anchored block-6 headings does not
+# match the number of images the manifest declares.
+KIND_SECTION6_IMAGE_COUNT = "section6-image-count-mismatch"
 
 # Problems are fatal by default: `verify` exit code 1 is a contract, and most of
 # what it reports (a dead anchor, a missing manifest) is a broken document. A check
@@ -191,6 +198,72 @@ def _check_links(md_path: str, text: str, problems: list[dict]) -> None:
             add(KIND_DEAD_LINK, dest_offset, f"related article [{label}]({dest}) -> {resolved}")
         else:
             add(KIND_DEAD_LINK, dest_offset, f"[{label}]({dest}) -> {resolved}")
+
+
+def _slide_manifest_count(image_dir: str) -> int | None:
+    """The image count of a SLIDE manifest, or ``None`` for anything else.
+
+    The "one ``###`` per image" convention this check tests is specific to a slide
+    deck, whose manifest the ``slides`` command tags ``kind: "slides"``. A
+    PDF-derived summary has no such convention -- its ``###`` headings and its
+    figures are unrelated -- so comparing the two there would flag every PDF item
+    and hollow the check out. ``count`` is used when present, else the length of
+    ``images``; ``None`` means "no slide manifest here", the skip signal.
+    """
+    path = os.path.join(image_dir, MANIFEST_NAME)
+    if not paths.is_file(path):
+        return None
+    try:
+        with open(paths.to_extended(path), "r", encoding="utf-8") as handle:
+            payload = json.load(handle)
+    except (OSError, ValueError):
+        return None
+    if not isinstance(payload, dict) or payload.get("kind") != "slides":
+        return None
+    if isinstance(payload.get("count"), int):
+        return int(payload["count"])
+    images = payload.get("images")
+    return len(images) if isinstance(images, list) else None
+
+
+def _check_section6_counts(md_path: str, text: str, problems: list[dict]) -> None:
+    """Report a block-6 heading count that disagrees with the image manifest.
+
+    This is the check Defect 2's author asked for: ``postprocess`` associates
+    heading *k* with manifest image *k* **by ordinal**, valid only when the counts
+    match, and the Crimson item authored 124 headings for a 96-image manifest --
+    which shifted every stamp. The write-time guard now refuses that association,
+    so a mismatch here means the document predates the guard or was made by hand.
+
+    ADVISORY, for exactly that reason and consistent with the block-6 declaration
+    check: failing every pre-guard document would make ``verify`` useless as a gate.
+    The signal is what matters -- a count mismatch is how a stamped index goes
+    wrong in a way a reader cannot see.
+    """
+    bounds = md.block_range(text, SECTION6_RE)
+    if bounds is None:
+        return
+    headings = len(ANCHOR_RE.findall(text[bounds[0]:bounds[1]]))
+    image_dir = item_paths.image_dir(os.path.dirname(os.path.abspath(md_path)))
+    if not paths.is_dir(image_dir):
+        legacy = os.path.join(os.path.dirname(os.path.abspath(md_path)), IMAGE_DIR_NAME)
+        image_dir = legacy if paths.is_dir(legacy) else image_dir
+    expected = _slide_manifest_count(image_dir)
+    if expected is None or expected == headings:
+        return
+    problems.append(
+        {
+            "file": md_path,
+            "line": _line_of(text, bounds[0]),
+            "kind": KIND_SECTION6_IMAGE_COUNT,
+            "severity": SEVERITY_WARNING,
+            "detail": (
+                f"block 6 has {headings} anchored headings but the manifest "
+                f"declares {expected} images; the ordinal heading-to-image stamp "
+                "association cannot hold, so timestamps may be shifted"
+            ),
+        }
+    )
 
 
 def _check_section6(md_path: str, text: str, problems: list[dict]) -> None:
@@ -352,6 +425,7 @@ def verify_tree(root: str, recurse: bool = False) -> dict:
         # block 6 to declare anything about.
         if os.path.basename(md_path).lower() == item_paths.SUMMARY_NAME:
             _check_section6(md_path, text, problems)
+            _check_section6_counts(md_path, text, problems)
 
     # A deduplicated report, sorted so two runs are byte-comparable.
     unique: list[dict] = []

@@ -28,6 +28,11 @@ In the confirmed item folder, one `pipeline` call writes:
 | `.data/source.json` | the ORIGIN of the video, including the source URL |
 | `<source media>` (item root) | the retained download, when one was kept |
 
+`-Output` names the item folder, so **`<item>/.data/` is created at that point** --
+before the transcription even runs. A folder that has only been transcribed is
+therefore already a recognised item, which is what keeps the documented
+"transcribe → then summarize" order true (see `zoombie.item.paths.is_item`).
+
 - `.txt` and `.srt` come from ONE whisper decode. The SRT is never a separate
   pass and is never a yt-dlp subtitle download: yt-dlp is never asked for
   subtitles.

@@ -40,7 +40,7 @@ import re
 
 from ..cli import Outcome
 from ..item import paths as item_paths
-from ..lib import markdown as md, paths, process
+from ..lib import markdown as md, next as next_mod, paths, process
 from ..lib.errors import ZoombieError
 from ..lib.srt import SrtIndex, parse
 from ..lib.textnorm import hhmmss, norm, percent_encode_dest
@@ -76,6 +76,43 @@ ABSOLUTE_RE = re.compile(r"^(?:[a-z][a-z0-9+.-]*:|//)", re.IGNORECASE)
 IMG_ALT_RE = re.compile(r"!\[(?P<alt>[^\]]*)\]\((?P<dest>[^)\n]*)\)")
 
 TIMESTAMP_WINDOWS: tuple[int, ...] = (14, 8, 6, 5, 4, 3)
+
+# An anchor shorter than this many normalized words carries too little evidence to
+# place a figure: a two-word anchor matches almost any paragraph, so treating it as
+# an anchor is a guess, not a match.
+MIN_ANCHOR_WORDS = 3
+
+
+def degenerate_anchor_reason(anchor: str | None) -> str | None:
+    """Why ``anchor`` cannot place a figure, or ``None`` when it is usable.
+
+    Two shapes are unplaceable, and both are symptoms of the same upstream bug --
+    a whisper repetition loop that made a slide's narration degenerate:
+
+    * **below the length floor** -- fewer than :data:`MIN_ANCHOR_WORDS` normalized
+      words, so the "anchor" matches most paragraphs and places nothing reliably;
+    * **a repeated n-gram** -- the whole anchor is one token-group repeated
+      (``"in the same. in the same."`` with period 3). This is the Crimson case:
+      the manifest rows 19-26 carried ``"in the same. in the same. in the same."``,
+      ``_match_anchor`` found no paragraph, and the nearest-neighbour fallback then
+      stacked eight figures (018-025) under one heading. Reporting is the fix: an
+      unplaced figure is a report line, a mis-placed one is a false claim.
+    """
+    if not anchor:
+        return None
+    words = norm(anchor).split()
+    if len(words) < MIN_ANCHOR_WORDS:
+        return f"anchor below the {MIN_ANCHOR_WORDS}-word floor ({len(words)} words)"
+    for period in range(1, len(words) // 2 + 1):
+        if len(words) % period:
+            continue
+        unit = words[:period]
+        if all(words[i : i + period] == unit for i in range(0, len(words), period)):
+            return (
+                f"anchor is a repeated {period}-word n-gram "
+                f"({len(words)//period} repetitions of {unit!r})"
+            )
+    return None
 
 
 # --------------------------------------------------------------------------- #
@@ -286,18 +323,35 @@ def time_stamps(
     """Deterministic heading stamps read from a slide manifest's times.
 
     A slide manifest already carries the exact time each slide was on screen, so
-    the ordinal heading-to-slide association is exact and needs no text search.
-    The association is by ORDER, which is the documented block-6 convention (one
-    ``###`` per slide, in reading order): heading ``k`` gets time ``k``. A manifest
-    with fewer times than headings leaves the extra headings to the SRT fallback,
-    and one with more is truncated -- so neither shape can ever clamp a wrong time
-    onto a real heading.
+    the ordinal heading-to-slide association is exact and needs no text search --
+    **but only when the heading count equals the manifest count**. The association
+    is by ORDER, which is the documented block-6 convention (one ``###`` per
+    slide, in reading order): heading ``k`` gets time ``k``.
+
+    REFUSING a mismatch is the fix for the reader-visible corruption: the Crimson
+    item had 124 block-6 headings and 96 manifest times, so a positional
+    association stamped heading ``k`` with slide ``k`` and shifted the stamps by
+    18-36 minutes -- heading text «рыночной моды» was stamped ``00:44:40`` while
+    the SRT places that speech at ``00:13:30``. A plausible wrong timestamp is
+    indistinguishable from a correct one, so on a count mismatch the ordinal
+    association is abandoned entirely and the caller falls back to the SRT/fuzzy
+    path. A warning naming BOTH counts is logged, because the fallback is a
+    different provenance for the same value and a reader must be able to tell.
+
+    Returns ``{}`` on a mismatch (nothing stamped) -- never a partial, shifted map.
     """
     stamps: dict[str, str] = {}
     headings = _headings_in_range(text, heading_start, heading_end)
+    if len(headings) != len(times):
+        process.log(
+            f"  slide-time association refused: block 6 has {len(headings)} "
+            f"headings but the manifest has {len(times)} times, so the ordinal "
+            "(one heading per slide) convention does not hold; falling back to the "
+            "SRT text search. A count mismatch is how timestamps shift silently.",
+            "warn",
+        )
+        return stamps
     for position, seconds in enumerate(times):
-        if position >= len(headings):
-            break
         if seconds is None:
             continue
         stamps[headings[position]["anchor"]] = hhmmss(seconds)
@@ -458,14 +512,29 @@ def heading_start(text: str) -> int | None:
 # block 4: the index
 # --------------------------------------------------------------------------- #
 
-def build_index_entries(text: str, heading_start: int, heading_end: int, stamps: dict[str, str]) -> list[dict]:
+def build_index_entries(
+    text: str, heading_start: int, heading_end: int, stamps: dict[str, str]
+) -> list[dict]:
     """The heading list :func:`zoombie.lib.markdown.render_index` consumes.
 
     Titles are read back off the *rewritten* heading lines, so the index entry and
     the heading it links to cannot drift: one source of truth, two renderings.
+
+    **Capped at level 3.** Every heading still gets an ``s-N`` anchor and a
+    timestamp (the numbering pass is untouched, so ``verify`` sees no dangling
+    anchor and a figure can still be placed under a deep heading), but only the
+    ``###`` level is LISTED in block 4. The Crimson item authored 124 block-6
+    headings for a 96-slide deck and the index listed all 124, which is a table of
+    contents no reader can use -- and the count mismatch is what then mis-stamped
+    the headings (see :func:`time_stamps`). A ``####`` sub-point of a topic belongs
+    in block 6, not in the contents.
     """
     entries: list[dict] = []
     for heading in _headings_in_range(text, heading_start, heading_end):
+        if heading["level"] != 3:
+            # Kept out of the INDEX only; the heading itself is left numbered and
+            # stamped, so the anchoring and the idempotency guarantees are intact.
+            continue
         title, stamp = _split_heading(heading["title"])
         entries.append(
             {
@@ -563,7 +632,7 @@ def insert_images(
     prefix: str,
     *,
     marker: str | None = None,
-) -> tuple[str, int, int]:
+) -> tuple[str, int, int, list[dict]]:
     """Strip a previous run's images, then re-insert them from the manifest.
 
     ``strip_inserted_images`` runs first so a re-run removes the previous run's
@@ -579,22 +648,41 @@ def insert_images(
     3. fall back to the nearest *previous* matched image, preserving reading
        order for a figure whose anchor prose the agent paraphrased away.
 
-    Returns ``(text, placed, skipped)``; ``skipped`` counts manifest entries that
-    had no anchor at all (they are NOT dumped at the top of the document -- a
-    missing figure is a report line, not a reason to corrupt the layout).
+    The nearest-neighbour fallback (3) is DELIBERATELY not applied to a figure
+    whose ``anchor_text`` is :func:`degenerate_anchor_reason`-unplaceable: falling
+    back there is what stacked eight Crimson figures under one heading, because a
+    degenerate anchor means the manifest itself is broken (an upstream whisper
+    loop), not that the anchor prose was paraphrased. Such an entry is counted in
+    ``skipped`` with a reason and never placed. A figure that resolves to the same
+    paragraph as an earlier one is reported too (``same-paragraph``), so a stack is
+    visible even when it is legitimate.
+
+    Returns ``(text, placed, skipped, details)``; ``details`` names, per unplaced
+    entry, the ``reason`` (and the ``file``), so the run can report WHY a figure is
+    missing rather than only that one is. Entries with no anchor at all are NOT
+    dumped at the top of the document -- a missing figure is a report line, not a
+    reason to corrupt the layout.
 
     Offsets are re-sliced after every insertion, because an insertion shifts
     everything after it; inserting into a stale offset list is the bug this
     guards against.
     """
+    details: list[dict] = []
     if not manifest:
-        return text, 0, 0
+        return text, 0, 0, details
 
     text = md.strip_inserted_images(text)
 
     bounds = md.block_range(text, SECTION6_RE)
     if bounds is None:
-        return text, 0, len(manifest.get("images", []))
+        entries = manifest.get("images", [])
+        for entry in entries:
+            details.append({
+                "file": (entry or {}).get("file"),
+                "reason": "no-block-6",
+                "detail": "the document has no '## 6.' section to place a figure in",
+            })
+        return text, 0, len(entries), details
 
     body_start, body_end = bounds
     images = [entry for entry in manifest["images"] if isinstance(entry, dict) and entry.get("file")]
@@ -614,8 +702,23 @@ def insert_images(
     # later image in front of the earlier one, because each insertion happens at
     # the same spot.
     tails: dict[int, int] = {}
+    # Paragraph index -> the first figure already placed there, so a second figure
+    # landing on the same paragraph is reported rather than silently stacked.
+    first_on_paragraph: dict[int, str] = {}
 
     for entry in images:
+        degenerate = degenerate_anchor_reason(entry.get("anchor_text"))
+        if degenerate is not None:
+            # Unplaceable BY DESIGN: no nearest-neighbour fallback for a broken
+            # anchor, because that is the guess that mis-places a figure.
+            skipped += 1
+            details.append({
+                "file": entry.get("file"),
+                "reason": "degenerate-anchor",
+                "detail": degenerate,
+            })
+            continue
+
         offset = _match_anchor(paragraphs_norm, entry.get("anchor_text"), cursor)
         if offset is None:
             offset = _match_anchor(paragraphs_norm, entry.get("page_title"), 0)
@@ -624,6 +727,12 @@ def insert_images(
             offset = last_index
         if offset is None:
             skipped += 1
+            details.append({
+                "file": entry.get("file"),
+                "reason": "no-anchor",
+                "detail": "neither anchor_text nor page_title matched a paragraph, "
+                          "and there was no earlier figure to hang off",
+            })
             continue
 
         # Clamp: an insertion changes the paragraph list, so an offset carried
@@ -632,8 +741,27 @@ def insert_images(
         # figure instead.
         if not paragraphs:
             skipped += 1
+            details.append({
+                "file": entry.get("file"),
+                "reason": "no-paragraphs",
+                "detail": "block 6 has no paragraph to place a figure after",
+            })
             continue
         offset = max(0, min(offset, len(paragraphs) - 1))
+
+        # A figure SHARING a paragraph with an earlier placed figure is reported:
+        # it is sometimes legitimate (two figures for one anchor), but the Crimson
+        # stack of eight under ``s-57`` was exactly this shape, and a stack is a
+        # reader-visible defect rather than a benign one.
+        sharing = first_on_paragraph.get(offset)
+        if sharing is None:
+            first_on_paragraph[offset] = entry["file"]
+        else:
+            details.append({
+                "file": entry.get("file"),
+                "reason": "same-paragraph",
+                "detail": f"resolves to the same paragraph as {sharing}",
+            })
 
         link = image_link(prefix, entry["file"])
         if offset in tails:
@@ -661,7 +789,7 @@ def insert_images(
         # Every offset after the insertion has moved; rebuild both lists.
         paragraphs = _paragraph_offsets(text, body_start, body_end)
         paragraphs_norm = [norm(text[start:end]) for start, end in paragraphs]
-    return text, placed, skipped
+    return text, placed, skipped, details
 
 
 def _paragraph_offsets(text: str, body_start: int, body_end: int) -> list[tuple[int, int]]:
@@ -757,6 +885,9 @@ def process_document(
         "linksRewritten": 0,
         "imagesPlaced": 0,
         "imagesSkipped": 0,
+        # Why each unplaced figure was unplaced (degenerate anchor, no match, or a
+        # paragraph shared with an earlier figure). Empty when everything placed.
+        "imagesSkippedDetail": [],
     }
 
     # The region that is numbered, timestamped and indexed: block 6, resolved by
@@ -811,7 +942,11 @@ def process_document(
             ]
         text = apply_stamps(text, stamps, start, end)
         entries = build_index_entries(text, start, end, stamps)
-        stats["headings"] = len(entries)
+        # ``headings`` is every block-6 heading (level 3 and deeper) -- the anchor
+        # pass numbered them all; ``indexEntries`` is what block 4 lists, capped at
+        # level 3. The two differing is the point of the cap, so they are counted
+        # separately rather than conflated.
+        stats["headings"] = len(_headings_in_range(text, start, end))
         stats["timestamped"] = timestamped
         stats["unmatched"] = unmatched
         text, replaced = replace_index(text, entries)
@@ -828,9 +963,15 @@ def process_document(
         # directory, so the strip half and the insert half can never disagree about
         # where the images live.
         prefix = image_url_prefix(image_dir, md_path)
-        text, placed, skipped = insert_images(text, manifest, prefix, marker=prefix)
+        text, placed, skipped, image_details = insert_images(
+            text, manifest, prefix, marker=prefix
+        )
         stats["imagesPlaced"] = placed
         stats["imagesSkipped"] = skipped
+        # WHY each figure was not placed, in the same spirit as ``skipped``: a
+        # degenerate anchor, a paragraph that could not be found, or two figures on
+        # one paragraph. A bare count would hide which of those it was.
+        stats["imagesSkippedDetail"] = image_details
 
     # 6. whitespace discipline
     text = md.collapse_blank_runs(text)
@@ -976,6 +1117,26 @@ def run(args) -> Outcome:
             json.dump(report, handle, ensure_ascii=False, indent=2)
             handle.write("\n")
 
+    # postprocess produces no images to look at, so its attach list is empty by
+    # construction -- but the block is still emitted, so every pipeline result has
+    # the same shape. The recommended step is the tree check that catches a
+    # dangling anchor or a broken image reference. ``command`` is None when the run
+    # changed nothing and there is genuinely nothing left to do.
+    verify_dir = target if paths.is_dir(target) else (os.path.dirname(target) or os.getcwd())
+    next_block = next_mod.build(
+        "verify" if changed_files or args.apply else None,
+        {"-Dir": verify_dir} if (changed_files or args.apply) else None,
+        why=(
+            "the document was rewritten; verify resolves the anchors, the block-4 "
+            "links and the image references and exits 1 on a problem"
+            if changed_files or args.apply
+            else "the document already matched, so there is nothing left to write; "
+            "run verify -Dir to check the finished tree"
+        ),
+        attachable=[],
+        attach_cap=next_mod.cap_of(args),
+    )
+
     return Outcome(
         ok=True,
         data={
@@ -983,5 +1144,6 @@ def run(args) -> Outcome:
             "dryRun": not args.apply,
             "changed": changed_files,
             "files": reports,
+            "next": next_block,
         },
     )

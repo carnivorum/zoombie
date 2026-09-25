@@ -337,3 +337,72 @@ class TestReportOrdering:
         first = vf.verify_tree(str(root))
         second = vf.verify_tree(str(root))
         assert first == second
+
+
+class TestSection6ImageCount:
+    """The advisory check: block-6 heading count vs the slide manifest count.
+
+    Named for what it detects -- a shifted stamp association -- and advisory
+    because a document written before the write-time guard is exactly what it
+    catches, so failing it would reject every pre-guard library.
+    """
+
+    def _slide_manifest(self, root, count, *, images=None, kind="slides"):
+        payload = {"count": count, "kind": kind}
+        if images is not None:
+            payload["images"] = images
+        (root / "img" / "manifest.json").write_text(
+            json.dumps(payload), encoding="utf-8"
+        )
+
+    def test_a_mismatch_is_reported_as_an_advisory(self, tmp_path):
+        # CLEAN has two anchored block-6 headings (s-1, s-2); declare three images.
+        root = build_tree(tmp_path)
+        self._slide_manifest(root, 3)
+        report = vf.verify_tree(str(root))
+
+        advisories = [a for a in report["advisories"]
+                      if a["kind"] == vf.KIND_SECTION6_IMAGE_COUNT]
+        assert len(advisories) == 1
+        advisory = advisories[0]
+        assert advisory["severity"] == vf.SEVERITY_WARNING
+        assert advisory["file"].endswith("summary.md")
+        assert "2 anchored headings" in advisory["detail"]
+        assert "3 images" in advisory["detail"]
+        # Advisory, so the tree still passes: a pre-guard document must not fail.
+        assert report["ok"] is True
+        assert vf.KIND_SECTION6_IMAGE_COUNT not in kinds(report)
+
+    def test_a_match_is_not_reported(self, tmp_path):
+        root = build_tree(tmp_path)
+        self._slide_manifest(root, 2)
+        report = vf.verify_tree(str(root))
+        assert all(a["kind"] != vf.KIND_SECTION6_IMAGE_COUNT
+                   for a in report["advisories"])
+
+    def test_the_images_length_is_the_fallback(self, tmp_path):
+        """A manifest carrying only ``images`` is still compared."""
+        root = build_tree(tmp_path)
+        self._slide_manifest(root, 0, images=[{"file": "a.png"}, {"file": "b.png"},
+                                              {"file": "c.png"}])
+        report = vf.verify_tree(str(root))
+        assert any(a["kind"] == vf.KIND_SECTION6_IMAGE_COUNT
+                   for a in report["advisories"])
+
+    def test_a_pdf_manifest_is_not_compared(self, tmp_path):
+        """A PDF summary has no one-heading-per-image convention, so it is skipped.
+
+        The stock ``build_tree`` writes a manifest WITHOUT ``kind: slides`` (the
+        PDF shape); comparing counts there would flag every PDF item.
+        """
+        root = build_tree(tmp_path)
+        report = vf.verify_tree(str(root))
+        assert all(a["kind"] != vf.KIND_SECTION6_IMAGE_COUNT
+                   for a in report["advisories"])
+
+    def test_no_manifest_is_not_reported(self, tmp_path):
+        root = build_tree(tmp_path)
+        (root / "img" / "manifest.json").unlink()
+        report = vf.verify_tree(str(root))
+        assert all(a["kind"] != vf.KIND_SECTION6_IMAGE_COUNT
+                   for a in report["advisories"])

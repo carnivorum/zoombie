@@ -83,6 +83,28 @@ class TestTimings:
         assert result.total_ms is None
 
 
+class TestAudioReadFailure:
+    """Defect 7: the log lines that explain an exit-0 run with no transcript."""
+
+    def test_finds_both_read_failure_lines(self):
+        lines = whisper.audio_read_failure([
+            "whisper_backend_init_gpu: using CUDA0 backend",
+            "read_audio_data: failed to read audio data",
+            "error: failed to read audio file 'C:\\work\\input.mp4'",
+        ])
+        assert any("failed to read audio data" in line for line in lines)
+        assert any("failed to read audio file" in line for line in lines)
+
+    def test_a_healthy_log_has_none(self):
+        assert whisper.audio_read_failure(
+            ["whisper_print_timings:     total time =   100.00 ms"]
+        ) == []
+
+    def test_empty_or_none_log_is_empty(self):
+        assert whisper.audio_read_failure([]) == []
+        assert whisper.audio_read_failure(None) == []
+
+
 class TestGpuFailure:
     def test_zero_exit_is_never_a_failure(self):
         assert not whisper.looks_like_gpu_failure(0, ["CUDA error: out of memory"])
@@ -135,6 +157,39 @@ class TestCapabilities:
     def test_missing_exe_path(self, tmp_path):
         caps = whisper.capabilities(str(tmp_path / "nope.exe"))
         assert caps.checked is False
+
+    def test_reads_the_decoder_loop_flags(self, tmp_path, monkeypatch):
+        """``-mc``/``--max-context`` and ``-et``/``--entropy-thold`` are probed.
+
+        These are the genuinely relevant repetition-loop knobs; the probe previously
+        missed them, so a loop could not be mitigated by the flags that address it.
+        """
+        exe = tmp_path / "whisper-cli.exe"
+        exe.write_bytes(b"x")
+        help_text = (
+            "usage: whisper-cli [options]\n"
+            "  -mc N,        --max-context N   [default: 16384]\n"
+            "  -et N,        --entropy-thold N [default: 2.40]\n"
+            "  -nf,          --no-fallback     [false]\n"
+        )
+        monkeypatch.setattr(whisper, "help_text", lambda _e: help_text)
+        # A fresh exe path, so the module-level capability cache misses.
+        caps = whisper.capabilities(str(exe))
+        assert caps.max_context is True
+        assert caps.entropy_thold is True
+        assert caps.no_fallback is True
+        report = caps.to_report()
+        assert report["maxContext"] is True
+        assert report["entropyThold"] is True
+        assert report["noFallback"] is True
+
+    def test_absent_loop_flags_stay_false(self, tmp_path, monkeypatch):
+        exe = tmp_path / "old.exe"
+        exe.write_bytes(b"x")
+        monkeypatch.setattr(whisper, "help_text", lambda _e: "usage: whisper-cli\n  -fa\n")
+        caps = whisper.capabilities(str(exe))
+        assert caps.max_context is False
+        assert caps.entropy_thold is False
 
 
 class TestProbeBackend:

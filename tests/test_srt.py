@@ -42,6 +42,64 @@ CLEAN_CUES = [
 ]
 
 
+def _repeated(count: int, text: str, *, start_index: int = 95, step: float = 30.0) -> list:
+    """``count`` consecutive cues all carrying ``text``, ``step`` seconds apart."""
+    base = 47 * 60.0  # 00:47:00, where the Crimson loop begins.
+    return [
+        Cue(start_index + i, base + i * step, base + (i + 1) * step, text)
+        for i in range(count)
+    ]
+
+
+class TestRepetitionRuns:
+    """Defect 4: the SRT repetition detector, tripped by the Crimson window."""
+
+    def test_the_crimson_window_trips_it(self):
+        """``in the same.`` across 20 consecutive cues, cue index 95 onwards.
+
+        The real SRT has cues 95-114 = ``00:47:00``-``00:57:00`` verbatim; this
+        reproduces that shape and asserts the detector reports it at cue 95.
+        """
+        cues = _repeated(20, "in the same.")
+        runs = srt_lib.repetition_runs(cues)
+        assert len(runs) == 1
+        assert runs[0]["cue_indexes"][0] == 95
+        assert runs[0]["cue_count"] == 20
+        assert runs[0]["unit"] == "in the same"
+        assert runs[0]["start"] == "00:47:00"
+
+    def test_normal_prose_does_not_fire(self):
+        runs = srt_lib.repetition_runs(CLEAN_CUES)
+        assert runs == []
+
+    def test_a_short_run_does_not_fire(self):
+        """A handful of repeats is a speaker's habit, not a decoder loop."""
+        cues = _repeated(5, "in the same.")
+        assert srt_lib.repetition_runs(cues) == []
+
+    def test_the_partial_loop_with_extra_words_still_fires(self):
+        """``in. in the same.`` -- a phrase loop within a cue boundary is caught."""
+        cues = [
+            Cue(i, i * 30.0, (i + 1) * 30.0, "in. in the same.")
+            for i in range(8)
+        ]
+        runs = srt_lib.repetition_runs(cues)
+        assert len(runs) == 1
+        assert runs[0]["cue_count"] == 8
+
+    def test_two_separated_loops_are_two_entries(self):
+        cues = (
+            _repeated(10, "in the same.", start_index=1)
+            + [Cue(11, 300.0, 330.0, "реальная речь продолжается здесь и сейчас")]
+            + _repeated(9, "in the same.", start_index=12)
+        )
+        runs = srt_lib.repetition_runs(cues)
+        assert [run["cue_indexes"][0] for run in runs] == [1, 12]
+
+    def test_empty_input_is_empty(self):
+        assert srt_lib.repetition_runs([]) == []
+
+
 class TestParse:
     def test_bom_crlf_multiline_and_missing_final_newline(self, tmp_path):
         path = _write(tmp_path, "transcript.srt", SRT_BOM_CRLF)

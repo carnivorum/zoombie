@@ -51,6 +51,28 @@ def log(message: str, level: str = "info") -> None:
     sys.stderr.flush()
 
 
+def result_payload(
+    action: str,
+    ok: bool = True,
+    data: dict | None = None,
+    error: str | None = None,
+) -> dict:
+    """Build the one JSON result envelope: ``{ok, action, error, data, timestamp}``.
+
+    Kept separate from :func:`write_result` so a transport that does NOT write to
+    stdout -- the MCP facade (plan §11) -- composes the *same* envelope from one
+    place instead of re-implementing it. That matters: a facade that rebuilt the
+    shape would be a second definition of the contract, which drifts.
+    """
+    return {
+        "ok": bool(ok),
+        "action": action,
+        "error": error,
+        "data": data if data is not None else {},
+        "timestamp": utc_now_iso(),
+    }
+
+
 def write_result(
     action: str,
     ok: bool = True,
@@ -62,13 +84,7 @@ def write_result(
     Key order is fixed (ok, action, error, data, timestamp) so the line is
     byte-stable for a caller that compares runs.
     """
-    payload = {
-        "ok": bool(ok),
-        "action": action,
-        "error": error,
-        "data": data if data is not None else {},
-        "timestamp": utc_now_iso(),
-    }
+    payload = result_payload(action, ok=ok, data=data, error=error)
     sys.stdout.write(json.dumps(payload, ensure_ascii=False, separators=(",", ":")) + "\n")
     sys.stdout.flush()
 

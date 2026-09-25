@@ -33,6 +33,7 @@ import os
 import re
 from dataclasses import dataclass
 
+from .errors import ZoombieError
 from .textnorm import hhmmss, norm, normalize_with_map
 
 __all__ = [
@@ -41,6 +42,9 @@ __all__ = [
     "SrtIndex",
     "parse",
     "anomalies",
+    "repetition_runs",
+    "format_timestamp",
+    "shift_timestamps",
 ]
 
 # ``00:01:02,345 --> 00:01:05,000``; the comma/dot fraction is optional because
@@ -69,6 +73,16 @@ DEFAULT_FILLERS = (
 LONG_CUE_SECONDS = 30.0
 LONG_CUE_MAX_WORDS = 3
 ANOMALY_RUN_MIN = 3
+
+# Repetition-loop detection. A whisper.cpp decoder failure repeats the SAME n-gram
+# across consecutive cues for minutes; the Crimson window was ``in the same.`` over
+# 20 consecutive 30-second cues (~10.5 minutes). The n-gram is measured in tokens
+# so a 5-gram spans cue boundaries (``in the same. in the same.`` is not 5 tokens
+# within one cue). ``max_period`` bounds the search: a pathological vocabulary-wide
+# loop is not the failure this detects, a short phrase loop is.
+REPETITION_NGRAM = 5
+REPETITION_MIN_CUES = 8
+REPETITION_MAX_PERIOD = 40
 
 
 @dataclass
@@ -402,3 +416,180 @@ def anomalies(
     order = {"duplicate-run": 0, "noise-only-run": 1, "timing": 2}
     entries.sort(key=lambda e: (e["cue_indexes"][0], order[e["kind"]]))
     return entries
+
+
+def repetition_runs(
+    cues: list[Cue],
+    ngram: int = REPETITION_NGRAM,
+    min_cues: int = REPETITION_MIN_CUES,
+    max_period: int = REPETITION_MAX_PERIOD,
+) -> list[dict]:
+    """Report decoder repetition loops over consecutive cues. NEVER raises.
+
+    A whisper.cpp repetition loop is a specific shape: the SAME short n-gram
+    repeated VERBATIM across many consecutive cues, because the decoder stops
+    attending to the audio and echoes itself. The Crimson window is the reference
+    case -- ``in the same.`` across cues 95-114 (``00:47:00``-``00:57:00``), ~10.5
+    minutes of the 1:44 recording, which nothing in the run reported.
+
+    **Why a plain `duplicate-run` in :func:`anomalies` is not enough.** That check
+    requires the whole cue TEXT to be identical, so it misses the shape where the
+    repeated unit is shorter than a cue (``in. in the same. in the same.``). This
+    detector normalizes the whole cue stream into one token sequence and looks for a
+    period ``p`` (1..``max_period``) whose unit repeats for at least ``min_cues``
+    consecutive cues -- so a phrase loop is caught whether or not it fills a cue.
+
+    This is a **pure reporter** and by design does NOT fail the run: a loop is
+    evidence about the transcript, not proof the requested operation failed, and
+    the caller's job is to surface it. Returns one entry per maximal run:
+    ``{"ngram", "period", "unit", "cue_count", "cue_indexes", "start", "end",
+    "text", "detail"}``, ordered by first cue.
+    """
+    if not cues or ngram < 1 or min_cues < 1:
+        return []
+
+    # Per-cue normalized token lists, so the run boundary is always a cue boundary
+    # and the reported indexes are real cue numbers.
+    cue_tokens = [norm(cue.text).split() for cue in cues]
+
+    def _period_of(tokens: list[str]) -> int | None:
+        """Smallest period making ``tokens`` a whole number of repeats, or ``None``.
+
+        Bounded by ``max_period`` and ``ngram`` so the search cannot degenerate into
+        "the whole cue is the unit" (which every cue satisfies and which detects
+        nothing). A unit longer than the n-gram asked about is not the short-phrase
+        loop this looks for.
+        """
+        limit = min(max_period, ngram, len(tokens))
+        for period in range(1, limit + 1):
+            if len(tokens) % period:
+                continue
+            unit = tokens[:period]
+            if all(tokens[i : i + period] == unit for i in range(0, len(tokens), period)):
+                return period
+        return None
+
+    def _extend(start: int) -> tuple[int, int, list[str]] | None:
+        """The run beginning at ``start``: ``(exclusive_end, period, unit)`` or None."""
+        first = cue_tokens[start]
+        if not first:
+            return None
+        period = _period_of(first)
+        if period is None:
+            return None
+        unit = first[:period]
+        end = start + 1
+        while end < len(cues):
+            tokens = cue_tokens[end]
+            if not tokens or len(tokens) % period or any(
+                tokens[i : i + period] != unit for i in range(0, len(tokens), period)
+            ):
+                break
+            end += 1
+        if end - start < min_cues:
+            return None
+        return end, period, unit
+
+    runs: list[dict] = []
+    start = 0
+    while start < len(cues):
+        found = _extend(start)
+        if found is None:
+            start += 1
+            continue
+        end, period, unit = found
+        group = cues[start:end]
+        runs.append(
+            {
+                "ngram": ngram,
+                "period": period,
+                "unit": " ".join(unit),
+                "cue_count": len(group),
+                "cue_indexes": [cue.index for cue in group],
+                "start": group[0].start_hhmmss,
+                "end": group[-1].end_hhmmss,
+                "text": group[0].text,
+                "detail": (
+                    f"{len(group)} consecutive cues repeat the same phrase "
+                    f"({group[0].start_hhmmss}-{group[-1].end_hhmmss}); this is a "
+                    "whisper.cpp repetition loop, not speech"
+                ),
+            }
+        )
+        start = end
+    return runs
+
+
+# --------------------------------------------------------------------------- #
+# window timestamp offsetting
+# --------------------------------------------------------------------------- #
+
+# SRT's canonical timestamp form; the comma fraction is what every player and
+# subtitle editor expects, and two digits are always emitted.
+_CUE_STAMP_RE = re.compile(
+    r"(?P<h>\d{1,2}):(?P<m>\d{2}):(?P<s>\d{2})(?P<frac>[,.]\d{1,3})?"
+)
+# The full arrow line, so a timestamp echoed inside CUE TEXT is never touched --
+# only the line that carries the ``-->`` separator is a timing to shift.
+_CUE_LINE_RE = re.compile(
+    r"^(?P<start>\d{1,2}:\d{2}:\d{2}(?:[,.]\d{1,3})?)\s*-->\s*"
+    r"(?P<end>\d{1,2}:\d{2}:\d{2}(?:[,.]\d{1,3})?)$"
+)
+
+
+def format_timestamp(seconds: float) -> str:
+    """``HH:MM:SS,mmm`` -- the canonical SRT timestamp with a comma fraction.
+
+    Distinct from :func:`zoombie.lib.textnorm.hhmmss`, which omits the fraction
+    because headings do not need one. A window is spliced onto a full transcript,
+    so its timestamps must be in the SRT file's own format -- a timestamp with no
+    fraction would be a different, visibly foreign spelling.
+    """
+    total = max(0.0, float(seconds))
+    millis = int(round(total * 1000))
+    hours, rem = divmod(millis, 3_600_000)
+    minutes, rem = divmod(rem, 60_000)
+    whole, ms = divmod(rem, 1000)
+    return f"{hours:02d}:{minutes:02d}:{whole:02d},{ms:03d}"
+
+
+def parse_timestamp(value: str) -> float:
+    """Parse one ``HH:MM:SS[,mmm]`` SRT timestamp into seconds."""
+    match = _CUE_STAMP_RE.fullmatch(str(value).strip())
+    if match is None:
+        raise ZoombieError(f"Invalid SRT timestamp: {value!r}")
+    total = int(match.group("h")) * 3600 + int(match.group("m")) * 60 + int(match.group("s"))
+    fraction = match.group("frac")
+    if fraction:
+        total += int(fraction[1:].ljust(3, "0")) / 1000.0
+    return float(total)
+
+
+def shift_timestamps(text: str, offset_seconds: float) -> str:
+    """Add ``offset_seconds`` to every SRT timing line in ``text``.
+
+    This is what turns a decode of a sliced window back into the RECORDING's own
+    clock: whisper always writes the sliced audio from ``00:00:00``, so without
+    this an SRT covering ``00:47:00``-``00:55:00`` of the original would carry
+    ``00:00:00``-``00:08:00`` and could not be spliced or compared without mental
+    arithmetic. Only lines that carry the ``-->`` separator are rewritten, and
+    only the two leading timestamps on each -- a timestamp that appears inside
+    cue text (a quoted clock time, say) is left byte-for-byte intact.
+    """
+    if not text or not offset_seconds:
+        return text
+
+    def _shift_one(match: re.Match[str]) -> str:
+        value = parse_timestamp(match.group(0))
+        return format_timestamp(value + offset_seconds)
+
+    def _shift_line(line: str) -> str:
+        # Strip the terminator (CRLF or LF) but keep it verbatim, so a CRLF file
+        # stays CRLF; the pattern is then matched against the bare line.
+        body = line.rstrip("\r\n")
+        ending = line[len(body):]
+        if _CUE_LINE_RE.match(body) is None:
+            return line
+        return _CUE_STAMP_RE.sub(_shift_one, body) + ending
+
+    return "\n".join(_shift_line(line) for line in text.split("\n"))

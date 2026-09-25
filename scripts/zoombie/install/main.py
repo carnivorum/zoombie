@@ -12,7 +12,17 @@ import sys
 from datetime import datetime, timezone
 
 from .. import SKILL_VERSION
-from ..lib import cublas, env as env_mod, manifest, paths, process, tools, whisper
+from ..lib import (
+    cublas,
+    env as env_mod,
+    manifest,
+    paths,
+    process,
+    tesseract,
+    tools,
+    unpack,
+    whisper,
+)
 from . import components, hardware
 
 
@@ -189,16 +199,22 @@ def _install(modes: components.Modes, args, root: str, result: dict) -> tuple[bo
     process.log("deploying the Zoombie role to the global custom modes", "step")
     mode_results = components.deploy_modes(modes)
 
+    # The 7-Zip extractor is the shared capability that reads an installer as data,
+    # so it is a component in its OWN right rather than a side effect of whichever
+    # consumer needs it first. Provisioned before Tesseract, which is the consumer
+    # that depends on it today.
+    process.log("ensuring the archive extractor", "step")
+    extractor_info = components.install_extractors(modes)
+
+    # Tesseract is a PROVISIONED component, not an optional system install: the
+    # toolchain owns a pinned, hash-verified engine so ``ocr.available()`` can
+    # return a version on a fresh machine with no elevation and nothing system-wide.
+    process.log("ensuring Tesseract OCR", "step")
+    tesseract_info = components.install_tesseract(modes)
+
     process.log("ensuring the PDF -> Markdown toolchain", "step")
     requirements = os.path.join(env_mod.cli_dir(), "requirements-pdf.txt")
     pdf_info = components.install_pdf_dependencies(modes, python, requirements)
-    if pdf_info.get("tesseract"):
-        process.log(f"tesseract present: {pdf_info['tesseract']}")
-    else:
-        process.log(
-            "tesseract not found (optional; OCR fallback unavailable). Install with: "
-            "winget install UB-Mannheim.TesseractOCR"
-        )
 
     # The self-test's own dependency (pyttsx3, for the TTS step). It is NOT a
     # runtime dependency of the pipeline, but the project rule is "never claim
@@ -215,6 +231,7 @@ def _install(modes: components.Modes, args, root: str, result: dict) -> tuple[bo
         root=root, python=python, python_version=tools.tool_version(python, ["--version"]),
         ytdlp_info=ytdlp_info, whisper_info=whisper_info, backend_probe=backend_probe,
         cuda_runtime=cuda_runtime, model_info=model_info, pdf_info=pdf_info,
+        tesseract_info=tesseract_info, extractor_info=extractor_info,
         selftest_info=selftest_info, mode_results=mode_results, hw=hw,
     )
     if modes.may_write:
@@ -239,8 +256,25 @@ def _install(modes: components.Modes, args, root: str, result: dict) -> tuple[bo
         missing.append("models")
     if modes.check and not pdf_info.get("ok"):
         missing.append("pdf-deps")
-    if modes.check and not pdf_info.get("tesseract"):
-        missing.append("tesseract (optional)")
+    # The extractor is toolchain-owned like ffmpeg and whisper, so an absent one is
+    # a real gap. Checked against the FILESYSTEM, not the component's return value:
+    # in -Check/-DryRun the component reports optimistically ("would provision").
+    if not paths.is_file(unpack.extractor_path()):
+        missing.append("extractor")
+    # Tesseract is now toolchain-owned, so a missing engine is a real gap rather
+    # than an "optional" note -- the same standard ffmpeg and whisper are held to.
+    # Checked against the FILESYSTEM, not the component's return value: in -Check /
+    # -DryRun the component reports optimistically ("would provision"), and the
+    # missing list must still name what is genuinely absent.
+    if not paths.is_file(tesseract.engine_path()):
+        missing.append("tesseract")
+    else:
+        _installed_langs = tesseract.language_list()
+        _missing_langs = [
+            lang for lang in tesseract.DEFAULT_LANGUAGES if lang not in _installed_langs
+        ]
+        if _missing_langs:
+            missing.append(f"tesseract-lang ({', '.join(_missing_langs)})")
     # pyttsx3 is deliberately NOT in `missing`: without it the self-test degrades
     # to a reported SKIP rather than a failure, exactly as readpdf does. It is
     # reported as its own field instead of failing the whole install.
@@ -318,7 +352,8 @@ def _install(modes: components.Modes, args, root: str, result: dict) -> tuple[bo
 
 def _build_manifest(
     *, root, python, python_version, ytdlp_info, whisper_info, backend_probe,
-    cuda_runtime, model_info, pdf_info, selftest_info, mode_results, hw,
+    cuda_runtime, model_info, pdf_info, tesseract_info, extractor_info,
+    selftest_info, mode_results, hw,
 ) -> dict:
     """Assemble env.json.
 
@@ -387,9 +422,49 @@ def _build_manifest(
             "python": pdf_info.get("python"),
             "pythonVersion": pdf_info.get("pythonVersion"),
             "ok": bool(pdf_info.get("ok")),
+            # The engine as RESOLVED (toolchain -> system -> PATH), kept beside the
+            # provisioned record below so a system install is still visible.
             "tesseract": pdf_info.get("tesseract"),
             "tesseractVersion": pdf_info.get("tesseractVersion"),
             "note": pdf_info.get("note"),
+        },
+        # The toolchain-owned NSIS/7z reader, as its OWN component. It is not a
+        # Tesseract detail: it is what turns any installer-only upstream into a
+        # portable payload, so it is recorded independently of who consumes it.
+        "extractor": {
+            "path": extractor_info.get("path") or unpack.extractor_path(),
+            "name": unpack.EXTRACTOR["name"],
+            "version": unpack.EXTRACTOR["version"],
+            "bootstrap": {
+                "name": unpack.EXTRACTOR_BOOTSTRAP["name"],
+                "version": unpack.EXTRACTOR_BOOTSTRAP["version"],
+            },
+            "sha256": unpack.EXTRACTOR["sha256"],
+            "ok": bool(extractor_info.get("ok")),
+            "note": extractor_info.get("note"),
+        },
+        # The toolchain-owned OCR engine. ``engine`` is the resolved path
+        # ``ocr.available()`` prefers, ``languages`` is the traineddata ACTUALLY on
+        # disk, and ``expectedLanguages`` is the pinned set, so a partial language
+        # install is visible rather than silently accepted.
+        "tesseract": {
+            "engine": tesseract_info.get("engine"),
+            "version": tesseract_info.get("engineVersion"),
+            "languages": tesseract_info.get("languages") or [],
+            "expectedLanguages": tesseract_info.get("expectedLanguages")
+            or list(tesseract.DEFAULT_LANGUAGES),
+            "ok": bool(tesseract_info.get("ok")),
+            "note": tesseract_info.get("note"),
+            # The extractor row moved to the top-level "extractor" block above; the
+            # name/version pair is kept here for continuity with existing consumers.
+            "extractor": {
+                "name": unpack.EXTRACTOR["name"],
+                "version": unpack.EXTRACTOR["version"],
+            },
+            "installer": {
+                "version": tesseract.ENGINE["version"],
+                "sha256": tesseract.ENGINE["sha256"],
+            },
         },
         # The deployed Zoo Code role. The target path is taken from the records
         # rather than recomputed, so the manifest names the file that was actually

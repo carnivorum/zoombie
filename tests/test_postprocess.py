@@ -145,7 +145,8 @@ class TestDryRunIsTheDefault:
         entry = payload["files"][0]
         for key in (
             "md", "applied", "headings", "timestamped", "unmatched", "indexEntries",
-            "linksRewritten", "imagesPlaced", "imagesSkipped", "charsBefore", "charsAfter",
+            "linksRewritten", "imagesPlaced", "imagesSkipped", "imagesSkippedDetail",
+            "charsBefore", "charsAfter",
         ):
             assert key in entry, key
         assert entry["applied"] is True
@@ -573,6 +574,108 @@ class TestImages:
         ) == 0
         assert "img/001" not in read_text(path)
 
+    def test_two_identical_degenerate_anchors_are_skipped_not_placed(self, tmp_path):
+        """Defect 3: a repeated-n-gram anchor is unplaceable, so it is counted.
+
+        The Crimson manifest carried ``"in the same. in the same. in the same."``
+        (the whisper loop) for rows 19-26; the anchor matched no paragraph and the
+        nearest-neighbour fallback then stacked eight figures under one heading. The
+        contract is ``skipped == 2`` and NO insertion.
+        """
+        path, image_dir = self._with_manifest(tmp_path)
+        degenerate = "in the same. in the same. in the same."
+        manifest = {
+            "source": "deck.pdf",
+            "count": 2,
+            "images": [
+                {"file": "018 - x.png", "anchor_text": degenerate, "page_title": "",
+                 "bytes": 10},
+                {"file": "019 - x.png", "anchor_text": degenerate, "page_title": "",
+                 "bytes": 10},
+            ],
+        }
+        (image_dir / "manifest.json").write_text(
+            json.dumps(manifest, ensure_ascii=False), encoding="utf-8"
+        )
+        assert cli.main(
+            ["postprocess", "-Md", str(path), "-Apply", "-ImageDir", str(image_dir)]
+        ) == 0
+        text = read_text(path)
+        assert "img/018" not in text and "img/019" not in text
+
+        _, placed, skipped, details = pp.insert_images(
+            read_text(path), manifest, "img/", marker="img/"
+        )
+        assert placed == 0
+        assert skipped == 2
+        assert [entry["reason"] for entry in details] == [
+            "degenerate-anchor", "degenerate-anchor"
+        ]
+
+    def test_degenerate_anchor_reasons(self):
+        assert pp.degenerate_anchor_reason("a b") is not None            # under floor
+        assert pp.degenerate_anchor_reason("") is None                   # not ours to judge
+        assert pp.degenerate_anchor_reason("in the same. in the same.") is not None
+        assert pp.degenerate_anchor_reason("всё идёт по плану сегодня") is None
+
+    def test_a_short_but_real_anchor_is_not_degenerate(self):
+        # Three distinct words is the floor, so this passes the gate (the floor is
+        # 3 words, not "any short phrase").
+        assert pp.degenerate_anchor_reason("рынок растёт сегодня") is None
+        # Two words IS below the floor: too little to match reliably.
+        assert pp.degenerate_anchor_reason("рынок растёт") is not None
+
+    def test_same_paragraph_placement_is_reported(self, tmp_path):
+        """Two figures resolving to one paragraph are reported, not silently stacked."""
+        path, image_dir = self._with_manifest(tmp_path)
+        anchor = "Продолжаем с дополнительными материалами по инструментам рынка."
+        manifest = {
+            "source": "deck.pdf",
+            "count": 2,
+            "images": [
+                {"file": "001 - a.png", "anchor_text": anchor, "page_title": "", "bytes": 1},
+                {"file": "002 - b.png", "anchor_text": anchor, "page_title": "", "bytes": 1},
+            ],
+        }
+        (image_dir / "manifest.json").write_text(
+            json.dumps(manifest, ensure_ascii=False), encoding="utf-8"
+        )
+        _, placed, _, details = pp.insert_images(
+            read_text(path), manifest, "img/", marker="img/"
+        )
+        assert placed == 2
+        assert any(entry["reason"] == "same-paragraph" for entry in details)
+
+
+class TestIndexLevelCap:
+    """Defect 5: block 4 lists level-3 headings only; deeper ones stay unindexed."""
+
+    DOC = (
+        "# T\n\n## 4. Содержание\n\n## 6. Полный текст (копия)\n"
+        "### Topic A\nПервый абзац.\n\n"
+        "#### Sub-point A1\nДеталь подтемы.\n\n"
+        "### Topic B\nВторой абзац.\n"
+    )
+
+    def test_deep_headings_are_numbered_but_not_indexed(self):
+        out, stats = pp.process_document(self.DOC, None, "img")
+        # Every heading is still anchored, so no id is left dangling.
+        assert '<a id="s-1"></a>Topic A' in out
+        assert '<a id="s-2"></a>Sub-point A1' in out
+        assert '<a id="s-3"></a>Topic B' in out
+        # ... but the index lists only the two level-3 topics.
+        index_body = out.split("## 4.")[1].split("## 6.")[0]
+        assert index_body.count("- [") == 2
+        assert "Sub-point A1" not in index_body
+        assert stats["indexEntries"] == 2
+        # The heading COUNT still reports every heading (the anchor pass saw all 3).
+        assert stats["headings"] == 3
+
+    def test_cap_is_idempotent(self):
+        once, _ = pp.process_document(self.DOC, None, "img")
+        twice, _ = pp.process_document(once, None, "img")
+        assert once == twice
+
 
 class TestSlideTimes:
     """A slide manifest's ``timeSec`` prefers over the fuzzy SRT text search.
@@ -602,6 +705,7 @@ class TestSlideTimes:
         )
 
     def test_time_sec_stamps_headings_by_order(self, tmp_path):
+        """Equal counts: the ordinal association IS valid, so it is used."""
         image_dir = tmp_path / "img"
         self._manifest(image_dir, [83.0, 3661.0])
         out, stats = pp.process_document(
@@ -612,15 +716,38 @@ class TestSlideTimes:
         assert f"01:01:01 {EM} Slide two" in out
         assert stats["unmatched"] == []
 
-    def test_more_times_than_headings_is_truncated(self, tmp_path):
+    def test_a_count_mismatch_refuses_the_ordinal_association(self, tmp_path):
+        """3 headings, 2 manifest times: NOTHING may be stamped from the manifest.
+
+        This replaces the old ``test_more_times_than_headings_is_truncated``, which
+        pinned the defective behaviour. Truncating a longer manifest silently
+        mis-associates every heading (that is Defect 2: 124 headings vs 96 slides
+        shifted the stamps by 18-36 minutes), so the correct contract is to abandon
+        the ordinal association for the whole document and fall back to the SRT.
+        With no SRT here, the headings are unstamped and reported as unmatched.
+        """
         image_dir = tmp_path / "img"
-        self._manifest(image_dir, [1.0, 2.0, 3.0, 4.0])
+        self._manifest(image_dir, [1.0, 2.0])
+        doc = (
+            "# T\n\n## 4. Содержание\n\n## 6. Полный текст (копия)\n"
+            "### Slide one\nПервый фрагмент текста.\n\n"
+            "### Slide two\nВторой фрагмент текста.\n\n"
+            "### Slide three\nТретий фрагмент текста.\n"
+        )
+        out, stats = pp.process_document(doc, None, str(image_dir), str(tmp_path / "s.md"))
+        # No em-dash stamp anywhere: the third heading was NOT given the second
+        # slide's time by a truncated ordinal walk.
+        assert EM not in out
+        assert stats["unmatched"] == ["Slide one", "Slide two", "Slide three"]
+
+    def test_fewer_times_than_headings_also_refuses(self, tmp_path):
+        """A manifest with FEWER times than headings must not stamp a partial walk."""
+        image_dir = tmp_path / "img"
+        self._manifest(image_dir, [10.0])
         out, _ = pp.process_document(
             self._doc(), None, str(image_dir), str(tmp_path / "summary.md")
         )
-        # The surplus times must not invent a heading or wrap onto another one:
-        # only the two real headings are stamped, in block 4 and block 6 each.
-        assert out.count(EM) == 4
+        assert EM not in out
 
     def test_without_time_sec_the_srt_path_is_unchanged(self, tmp_path):
         image_dir = tmp_path / "img"

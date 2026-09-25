@@ -54,6 +54,13 @@ _GPU_FAILURE = re.compile(
     re.IGNORECASE,
 )
 
+# The two lines whisper.cpp writes when it cannot DECODE the input it was handed
+# (a video container, for instance). whisper still exits 0 having written no
+# transcript, so these lines are the only evidence that the "success" is hollow.
+_AUDIO_READ_FAILURE = re.compile(
+    r"failed to read audio data|failed to read audio file"
+)
+
 # Cache for the per-exe capability probe, so one run reads --help once.
 _CAPABILITY_CACHE: dict[str, "Capabilities"] = {}
 
@@ -87,6 +94,15 @@ class Capabilities:
     builds, and passing an unknown flag ABORTS the run. whisper-cli --help lists
     exactly the flags the binary accepts, so it is read once and cached per exe
     path. A false negative merely omits a flag; a false positive fails the run.
+
+    ``max_context`` (``-mc``/``--max-context``) and ``entropy_thold``
+    (``-et``/``--entropy-thold``) are the decoder-loop controls: both were missing
+    from the probe, which is why a repetition loop could not be mitigated by the
+    very knobs that address it.
+
+    ``no_fallback`` is probed so the absence of ``-nf`` can be ASSERTED, not so it
+    can be used: see :func:`build_args` for why ``--no-fallback`` must never be
+    passed on a repetition-prone run.
     """
 
     checked: bool = False
@@ -97,6 +113,8 @@ class Capabilities:
     vad: bool = False
     vad_model: bool = False
     best_of: bool = False
+    max_context: bool = False
+    entropy_thold: bool = False
     no_fallback: bool = False
 
     def to_report(self) -> dict:
@@ -106,6 +124,11 @@ class Capabilities:
             "flashAttention": self.flash_attention,
             "threads": self.threads,
             "vad": self.vad,
+            "bestOf": self.best_of,
+            "maxContext": self.max_context,
+            "entropyThold": self.entropy_thold,
+            # Reported because its absence is a deliberate choice, not an oversight.
+            "noFallback": self.no_fallback,
         }
 
 
@@ -235,6 +258,19 @@ def timings(log_lines: Sequence[str] | None) -> Timings:
     return result
 
 
+def audio_read_failure(log_lines: Sequence[str] | None) -> list[str]:
+    """The log lines showing whisper could not read the audio, or ``[]``.
+
+    Surfaced in the error when a run exits 0 without writing a transcript: whisper
+    failing to decode the input is indistinguishable from success otherwise.
+    """
+    return [
+        line.strip()
+        for line in log_lines or []
+        if line.strip() and _AUDIO_READ_FAILURE.search(line)
+    ]
+
+
 def looks_like_gpu_failure(exit_code: int, log_lines: Sequence[str] | None) -> bool:
     """Does a non-zero exit LOOK like a GPU failure worth retrying?
 
@@ -294,6 +330,14 @@ def capabilities(whisper_exe: str | None) -> Capabilities:
             caps.vad_model = True
         if re.search(r"(?m)^\s*-bs\b|--beam-size\b|--best-of\b", raw):
             caps.best_of = True
+        # The two decoder-loop controls. ``-mc`` sets the max context the decoder
+        # may attend over and ``-et`` the entropy threshold; both are relevant to a
+        # whisper.cpp repetition loop, which the distilled ``large-v3-turbo``
+        # decoder is prone to and which the probe previously could not see.
+        if re.search(r"(?m)^\s*-mc\b|--max-context\b", raw):
+            caps.max_context = True
+        if re.search(r"(?m)^\s*-et\b|--entropy-thold\b", raw):
+            caps.entropy_thold = True
         if re.search(r"(?m)^\s*-nf\b|--no-fallback\b", raw):
             caps.no_fallback = True
 
