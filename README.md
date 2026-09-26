@@ -69,8 +69,11 @@ download. Never claim success without the self-test passing.
   registered `PYTHONPATH`) — registration alone only means the entry is in the file,
   not that the tools will appear. The merge replaces only our entry, so other MCP
   servers are preserved. The entry is a plain stdio `command`/`args` server and needs
-  no `"type"` field (checked against client 3.84.0); after a setup or a window reload,
-  open a **new** task, because the client fixes its MCP tool list when a task starts.
+  no `"type"` field (checked against client 3.84.0). **The Zoombie role grants the
+  `mcp` group**, without which the client never offers the tools to that mode —
+  `allowedMcpServers` is deliberately omitted, because an absent value means "any
+  server" and a list would exclude one added later. After a setup or a window reload,
+  open a **new** task: the client fixes its MCP tool list when a task starts.
   **MCP is the transport the skills use**: each skill calls
   the MCP tool of the same name with JSON arguments, and only falls back to the
   `zoombie.cmd` launcher when those tools are unavailable. The MCP path calls the

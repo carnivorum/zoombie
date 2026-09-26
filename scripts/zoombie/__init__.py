@@ -87,6 +87,11 @@ MARKER_KEY = "cvrm-zoombie-version"
 # 1.3.0: the prompt picks the working language from the user's prompt at the start
 # of the task, and treats a mostly-non-English prompt that borrows English terms
 # as non-English.
-ROLE_VERSION = "1.3.0"
+# 1.4.0: the role GRANTS THE `mcp` GROUP. Without it the client never offers the MCP
+# tools to this mode, so the summarize flow was dead in Zoombie mode however well
+# the server was registered -- the two-machine symptom that read as a broken MCP
+# config. `allowedMcpServers` stays OMITTED (the client reads absent as "any"),
+# so a server the user adds later is not silently excluded.
+ROLE_VERSION = "1.4.0"
 
 __all__ = ["SKILL_VERSION", "MARKER_KEY", "ROLE_VERSION"]

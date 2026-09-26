@@ -13,6 +13,13 @@
 #   read     read sources and artifacts
 #   command  the ingest skills shell out to zoombie.cmd, so the role can consume
 #            a video or a PDF itself (each run still needs user approval)
+#   mcp      reach the MCP tools (the zoombie server, and any other). Without this
+#            group the client never OFFERS them to the role, so the summarize flow
+#            is dead in this mode no matter how well the server is registered --
+#            the defect that made "MCP is not available" look like a config fault.
+#            Omitted `allowedMcpServers` (rather than listed) is deliberate: the
+#            client reads an absent value as "any server", and an explicit list
+#            would silently exclude a server the user adds later.
 #   modes    new_task and switch_mode live here; this is what lets the role brief
 #            Code mode as an Analyst Intern. It changes WHO acts, never WHAT this
 #            role may touch.
@@ -76,6 +83,7 @@ customModes:
       - read
       - command
       - modes
+      - mcp
       - - edit
         - fileRegex: \.(md|markdown|txt|csv|tsv|html|htm)$
           description: Analytical artifacts only - reports, briefs, notes, data tables and static report pages

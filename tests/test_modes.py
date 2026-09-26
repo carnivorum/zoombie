@@ -41,6 +41,7 @@ OUR_ITEMS = """\
       - read
       - command
       - modes
+      - mcp
       - - edit
         - fileRegex: \\.(md|markdown|txt|csv|tsv|html|htm)$
           description: Analytical artifacts only
@@ -264,6 +265,34 @@ class TestWriteBoundary:
         assert "      - modes" in source.items_text
         # edit must be the STRUCTURED form, never an unrestricted string.
         assert "\n      - edit\n" not in source.items_text
+
+    def test_the_shipped_role_grants_the_mcp_group(self):
+        """The REAL artifact, not the fixture: this is what the installer deploys.
+
+        Without the `mcp` group the client never OFFERS the MCP tools to the role, so
+        the summarize flow is dead in Zoombie mode however well the server is
+        registered -- the two-machine symptom that read as "MCP is not available".
+        """
+        repo_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        source = modes.read_source(os.path.join(repo_root, "modes", "zoombie.yaml"))
+        assert "      - mcp" in source.items_text, (
+            "the zoombie role must grant the `mcp` group, or its MCP tools are "
+            "never offered to it"
+        )
+
+    def test_the_shipped_role_does_not_pin_allowed_mcp_servers(self):
+        """An absent `allowedMcpServers` means ANY server; a list would narrow it.
+
+        The client reads an undefined allow-list as "any"; naming servers would
+        silently exclude one the user adds later, which is the opposite of the
+        requirement that ANY server be permitted.
+        """
+        repo_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        source = modes.read_source(os.path.join(repo_root, "modes", "zoombie.yaml"))
+        assert "allowedMcpServers" not in source.items_text, (
+            "listing servers would exclude one the user adds later; omit the key "
+            "so the client allows any"
+        )
 
 
 # ---------------------------------------------------------------------------
