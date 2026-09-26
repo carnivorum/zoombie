@@ -137,6 +137,38 @@ class TestInventory:
             "Add them here so the hand-off cross-check covers them."
         )
 
+    def test_description_is_a_valid_unquoted_yaml_scalar(self):
+        """The front matter must PARSE, or the client silently drops the skill.
+
+        This is the guard for a real outage: four skills stopped loading because a
+        description contained ``: `` (colon-space), which is invalid inside a plain
+        (unquoted) YAML scalar. The client's front-matter parser threw, its catch
+        logged to the console, and the skill was simply never registered -- the
+        suite stayed green because nothing parsed the front matter the way the
+        client does.
+
+        The client reads the description as a plain scalar, so two sequences are
+        forbidden in it: ``: `` (a mapping indicator) and `` #`` (a comment
+        indicator). A description needing either must be quoted instead.
+        """
+        for path in _skill_paths():
+            skill = os.path.basename(os.path.dirname(path))
+            match = re.search(r"(?m)^description:\s*(.+)$", _read(path))
+            assert match, f"{skill}: no 'description:' in the front matter"
+            description = match.group(1).strip()
+            # A quoted scalar is always safe; only a plain one is constrained.
+            if description[:1] in ("'", '"'):
+                continue
+            assert ": " not in description and not description.endswith(":"), (
+                f"{skill}: the description contains ': ' (colon-space), which is "
+                "invalid in an unquoted YAML scalar -- the client would fail to "
+                "parse the front matter and DROP this skill. Rephrase, or quote it."
+            )
+            assert " #" not in description, (
+                f"{skill}: the description contains ' #', which starts a YAML "
+                "comment -- the client would truncate or drop it."
+            )
+
     def test_every_description_fits_the_client_limit(self):
         """The extension silently drops a skill whose description exceeds 1024 chars.
 
