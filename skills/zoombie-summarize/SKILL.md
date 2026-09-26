@@ -40,7 +40,7 @@ Call the `summarize` MCP tool once per step and follow `data.next`:
 |------|------|--------|
 | source | `summarize {source: "<url-or-path>"}` | nothing; the tool downloads/transcribes/renders into a run scratch and proposes a name |
 | name | `summarize {step:"name", run, name}` | **ask the user** the name (below) |
-| slides | `summarize {step:"slides", run, slides, times}` | **ask the user** the slides question (below) |
+| slides | `summarize {step:"slides", run, slides, times}` | **ask the user** the slides question; then review the proposed frames and keep/drop |
 | prose | `summarize {step:"prose", run, title, summary_text, criticism, sections}` | write the title, the short summary, an optional criticism, and the topic headings |
 | verify | `summarize {step:"verify", run}` | nothing; the tool gates the tree and deletes the run scratch |
 
@@ -56,9 +56,16 @@ combined four-way question.
 1. **The name.** The tool returns `data.proposed`. Offer it as the default and
    let the user accept it or supply their own; a name the user TYPES wins. Pass
    the answer as `name`.
-2. **Slides** (video only, and only when a `###`-per-topic copy is wanted for a
-   slide deck). Ask whether to extract slide frames; if the user has exact
-   timestamps, pass them as `times`. Answer with `slides: "true"` or `"false"`.
+2. **Slides** (video only). Ask whether to extract slide frames; if the user has
+   exact timestamps, pass them as `times`. Answer with `slides: "true"` or `"false"`.
+
+   Auto-detect PROPOSES frames and drops non-sequential repeats (`-GlobalDedup`),
+   but a talking-head video still yields webcam frames. The result lists them under
+   `data.slides.frames` with ids (`fNNN`) and timestamps; `data.next` then points
+   back at `step:"slides"`. **Look at the frames and drop the faces**: re-run with
+   `keep: "f001,f003,..."`, or `drop: "f002,..."`, naming ids or timestamps, never a
+   path. Then call `step:"prose"`. Skipping this leaves presenters' faces in the
+   document.
 
 ## Where the output goes
 

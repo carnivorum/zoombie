@@ -256,6 +256,47 @@ def _dedup_candidates(
     return kept, skipped
 
 
+def _dedup_global(candidates: list[dict], distance: int) -> tuple[list[dict], list[dict]]:
+    """Collapse NON-SEQUENTIAL duplicates: a repeat of an already-kept picture.
+
+    ``_dedup_candidates`` dedups *within* a run, so a picture that recurs LATER --
+    the presenter's face cutting back between two slides, a title card shown twice --
+    survives as a separate run and is kept. On a talking-head-heavy video that leaves
+    dozens of near-identical faces (the Ford run kept 32, nearly all the same webcam
+    frame). This second pass keeps the FIRST occurrence of a picture and drops later
+    ones that are within ``distance`` of it, whatever run they came from.
+
+    It is OPT-IN (``-GlobalDedup``) because it deliberately overrides the
+    covered-run guarantee ("every run keeps one frame"), which exists to protect an
+    image-only slide. That guarantee is right for a slide deck and wrong for webcam
+    noise, so the choice is the caller's -- the summarize flow turns it on.
+    """
+    kept: list[dict] = []
+    skipped: list[dict] = []
+    kept_hashes: list[tuple[int | None, float]] = []
+    for candidate in candidates:
+        digest = candidate.get("sourceHash")
+        if digest is None:
+            kept.append(candidate)
+            continue
+        match = next(
+            (seconds for other, seconds in kept_hashes
+             if other is not None and slides.hamming(digest, other) <= distance),
+            None,
+        )
+        if match is not None:
+            skipped.append({
+                "reason": "global-dedup",
+                "timeSec": candidate["timeSec"],
+                "runIndex": candidate["runIndex"],
+                "detail": f"same picture as the kept frame at {match} s (a non-sequential repeat)",
+            })
+            continue
+        kept.append(candidate)
+        kept_hashes.append((digest, candidate["timeSec"]))
+    return kept, skipped
+
+
 # --------------------------------------------------------------------------- #
 # extraction + the non-destructive OCR pass
 # --------------------------------------------------------------------------- #
@@ -543,6 +584,13 @@ def run(args) -> Outcome:
                 hashes, runs, args.sample_rate, cues, duration, args.sample_interval
             )
             candidates, dedup_skipped = _dedup_candidates(candidates, args.hash_distance)
+            if getattr(args, "global_dedup", False):
+                candidates, global_skipped = _dedup_global(candidates, args.hash_distance)
+                dedup_skipped = dedup_skipped + global_skipped
+                process.log(
+                    f"  global dedup: dropped {len(global_skipped)} non-sequential "
+                    f"repeat(s); {len(candidates)} distinct picture(s) remain"
+                )
 
         # Stamp every PROPOSED candidate with its stable id BEFORE the agent's
         # selection runs. The id means "the N-th frame the detector proposed" and is

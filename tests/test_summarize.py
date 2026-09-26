@@ -21,7 +21,7 @@ from zoombie.lib.errors import ZoombieError
 def _seed_run(tmp_path, monkeypatch, *, source: str, internal: bool,
               proposed: str = "Proposed Name", transcript: str = "intro words\n\nbody words\n"):
     """Create a run scratch dir the name/prose/verify steps can consume."""
-    monkeypatch.setenv("ZOOMBIE_WORKSPACE_ROOT", str(tmp_path))
+    monkeypatch.chdir(tmp_path)
     run = tmp_path / ".tmp" / "zoombie-summarize" / "abc123"
     run.mkdir(parents=True)
     if internal:
@@ -88,7 +88,7 @@ class TestSteps:
             sz.run(_args(step="prose", run=run, title="T"))
 
     def test_an_unknown_run_is_refused(self, tmp_path, monkeypatch):
-        monkeypatch.setenv("ZOOMBIE_WORKSPACE_ROOT", str(tmp_path))
+        monkeypatch.chdir(tmp_path)
         with pytest.raises(ZoombieError, match="no run"):
             sz.run(_args(step="name", run=str(tmp_path / "nope")))
 
@@ -125,7 +125,27 @@ class TestSteps:
 
 
 class TestArchive:
-    def test_an_existing_summary_is_archived_and_reported(self, tmp_path, monkeypatch):
+    def test_an_existing_summary_is_archived_at_the_start(self, tmp_path, monkeypatch):
+        """The archive is the USER's file, taken at the NAME step (task start)."""
+        folder = tmp_path / "item"
+        folder.mkdir()
+        source = str(folder / "b.mp4")
+        (folder / "b.mp4").write_bytes(b"\x00")
+        (folder / "summary.md").write_text("# Old\n", encoding="utf-8")
+        run, _dest = _seed_run(tmp_path, monkeypatch, source=source, internal=True)
+        named = sz.run(_args(step="name", run=run))
+        archived = named.data["archived"]
+        assert archived is not None
+        assert os.path.basename(archived["to"]).startswith("summary_")
+        # The snapshot holds the file as the USER left it, moved away already.
+        assert (folder / "summary.md").exists() is False
+        assert open(archived["to"], encoding="utf-8").read().startswith("# Old")
+
+        outcome = sz.run(_args(step="prose", run=run, title="New", summary_text="s"))
+        assert (folder / "summary.md").read_text(encoding="utf-8").startswith("# New")
+
+    def test_a_second_prose_run_does_not_archive_again(self, tmp_path, monkeypatch):
+        """Prose can run many times; only the name step snapshots the user's file."""
         folder = tmp_path / "item"
         folder.mkdir()
         source = str(folder / "b.mp4")
@@ -133,12 +153,11 @@ class TestArchive:
         (folder / "summary.md").write_text("# Old\n", encoding="utf-8")
         run, _dest = _seed_run(tmp_path, monkeypatch, source=source, internal=True)
         sz.run(_args(step="name", run=run))
-        outcome = sz.run(_args(step="prose", run=run, title="New", summary_text="s"))
-        archived = outcome.data["archived"]
-        assert archived is not None
-        assert os.path.basename(archived["to"]).startswith("summary_")
-        assert (folder / "summary.md").read_text(encoding="utf-8").startswith("# New")
-        assert os.path.isfile(archived["to"])
+        sz.run(_args(step="prose", run=run, title="First", summary_text="a"))
+        sz.run(_args(step="prose", run=run, title="Second", summary_text="b"))
+        archives = [n for n in os.listdir(folder) if n.startswith("summary_")]
+        assert len(archives) == 1, archives
+        assert (folder / "summary.md").read_text(encoding="utf-8").startswith("# Second")
 
 
 class TestCleanup:
@@ -156,6 +175,34 @@ class TestCleanup:
         # Only the document, the media and img/ remain.
         assert os.path.isfile(folder / "summary.md")
         assert os.path.isfile(folder / "b.mp4")
+
+    def test_verify_prunes_the_item_sidecars_and_reading_copies(self, tmp_path, monkeypatch):
+        """A finished item keeps only the inlined figures, not the run's sidecars."""
+        folder = tmp_path / "item"
+        folder.mkdir()
+        source = str(folder / "b.mp4")
+        (folder / "b.mp4").write_bytes(b"\x00")
+        run, _dest = _seed_run(tmp_path, monkeypatch, source=source, internal=True)
+        # Simulate what the slides step leaves in the item's img/.
+        img = folder / "img"
+        img.mkdir()
+        (img / "001 - p01.png").write_bytes(b"\x89PNG")
+        (img / "manifest.json").write_text("{}", encoding="utf-8")
+        (img / "README.md").write_text("# x\n", encoding="utf-8")
+        readings = img / "readings"
+        readings.mkdir()
+        (readings / "001.q3.jpg").write_bytes(b"j")
+
+        sz.run(_args(step="name", run=run))
+        sz.run(_args(step="prose", run=run, title="T", summary_text="s"))
+        outcome = sz.run(_args(step="verify", run=run))
+
+        assert "prunedSidecars" in outcome.data
+        assert not (img / "manifest.json").exists()
+        assert not (img / "README.md").exists()
+        assert not readings.exists()
+        # The figure the document references survives.
+        assert (img / "001 - p01.png").is_file()
 
 
 class TestWorkspaceHelper:
@@ -178,6 +225,23 @@ class TestWorkspaceHelper:
         assert internal is True
         assert destination == str(tmp_path / "lore")
 
+    def test_a_sibling_workspace_is_external(self, tmp_path):
+        """A path under a DIFFERENT workspace routes out -- never treated as internal.
+
+        The toolchain knows ONE root (the current workspace). A sibling project --
+        ``repos/zoombie`` while the source lives in ``repos/kb`` -- must be external,
+        exactly like a URL, so it can never be mis-routed into a folder it does not
+        belong to because the toolchain "recognised" it from another run.
+        """
+        here = tmp_path / "zoombie"
+        here.mkdir()
+        elsewhere = tmp_path / "kb" / "Crimson" / "video.mp4"
+        destination, internal = workspace.destination_dir(
+            str(elsewhere), workspace.KIND_SUMMARIES, root=str(here)
+        )
+        assert internal is False
+        assert destination.startswith(str(here / "_unsorted" / "summaries"))
+
     def test_destination_dir_routes_a_url_out(self, tmp_path):
         destination, internal = workspace.destination_dir(
             "https://example.com/watch?v=abc", workspace.KIND_SUMMARIES,
@@ -193,7 +257,7 @@ class TestDownloadRouting:
     def test_a_url_lands_under_unsorted_download(self, tmp_path, monkeypatch):
         from zoombie.commands import download
 
-        monkeypatch.setenv("ZOOMBIE_WORKSPACE_ROOT", str(tmp_path))
+        monkeypatch.chdir(tmp_path)
         directory, internal = download.destination(_args(
             source="https://example.com/watch?v=abc", name="A Talk"
         ))
@@ -203,7 +267,7 @@ class TestDownloadRouting:
     def test_an_internal_source_keeps_its_folder(self, tmp_path, monkeypatch):
         from zoombie.commands import download
 
-        monkeypatch.setenv("ZOOMBIE_WORKSPACE_ROOT", str(tmp_path))
+        monkeypatch.chdir(tmp_path)
         source = tmp_path / "lore" / "clip.mp4"
         directory, internal = download.destination(_args(source=str(source)))
         assert internal is True
@@ -212,7 +276,7 @@ class TestDownloadRouting:
     def test_an_explicit_download_dir_wins(self, tmp_path, monkeypatch):
         from zoombie.commands import download
 
-        monkeypatch.setenv("ZOOMBIE_WORKSPACE_ROOT", str(tmp_path))
+        monkeypatch.chdir(tmp_path)
         target = tmp_path / "elsewhere"
         directory, internal = download.destination(_args(
             source="https://example.com/watch?v=abc", download_dir=str(target)

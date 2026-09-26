@@ -276,7 +276,7 @@ class TestItemLayout:
         self, tmp_path, monkeypatch
     ):
         """A source INSIDE the workspace keeps its own folder (routing rule)."""
-        monkeypatch.setenv("ZOOMBIE_WORKSPACE_ROOT", str(tmp_path))
+        monkeypatch.chdir(tmp_path)
         source = tmp_path / "audio.wav"
         assert stt.item_dir_for(None, str(source)) == str(tmp_path)
         assert stt.resolve_output_base(str(source), None) == str(tmp_path / "transcript")

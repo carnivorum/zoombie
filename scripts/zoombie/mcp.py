@@ -165,7 +165,7 @@ KNOWN_OPTIONS: dict[str, dict] = {
         "times": "str", "lang": "str", "scale": "int", "min_px": "int",
         "min_frame_bytes": "int", "min_text_chars": "int", "min_slide_sec": "float",
         "sample_rate": "float", "sample_interval_sec": "float", "diff_threshold": "float",
-        "hash_distance": "int",
+        "hash_distance": "int", "global_dedup": "bool",
         # The agent's final keep/drop. Handles are frame ids (``f005``) or their
         # timestamps -- NEVER a path: the agent decides, the tool moves the files.
         "keep": "str", "drop": "str", "keep_file": "str", "drop_file": "str",
@@ -178,7 +178,7 @@ KNOWN_OPTIONS: dict[str, dict] = {
     "summarize": {
         "step": "str", "run": "str", "name": "str", "slides": "str", "times": "str",
         "title": "str", "summary_text": "str", "criticism": "str", "sections": "str",
-        "no_media": "bool", "language": "str",
+        "no_media": "bool", "language": "str", "keep": "str", "drop": "str",
     },
     "items": {"root": "str", "depth": "int", "recurse": "bool", "json": "bool", "title": "str", "date": "str"},
     "modes": {"target": "str", "check": "bool", "apply": "bool"},
@@ -735,6 +735,8 @@ def tool_schemas() -> list[dict]:
                 "criticism": {"type": "string", "description": "optional criticism sub-block"},
                 "sections": {"type": "string", "description": "JSON array of {heading, at} topic-change sections for block 6"},
                 "no_media": {"type": "boolean", "description": "do not keep the source media in the item"},
+                "keep": {"type": "string", "description": "slide frames to KEEP (ids fNNN or timestamps); re-run step slides"},
+                "drop": {"type": "string", "description": "slide frames to DROP (same handles as keep)"},
                 "language": {"type": "string"},
             },
             [],

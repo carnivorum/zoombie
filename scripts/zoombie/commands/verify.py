@@ -222,10 +222,15 @@ def _check_section6(md_path: str, text: str, problems: list[dict]) -> None:
         return
 
     # The heading LINE, not the body: the declaration belongs in the title, where a
-    # reader meets it before the text.
+    # reader meets it before the text. ``bounds[0]`` is the offset JUST PAST the
+    # heading's newline, so the heading line ENDS at ``body_start - 1`` and its
+    # start is the previous newline. Searching from ``body_start`` itself would begin
+    # on the body's first line, so a document whose heading DOES declare the copy was
+    # reported as undeclared (the real end-to-end run hit this).
     body_start = bounds[0]
-    heading_start = text.rfind("\n", 0, body_start) + 1
-    heading = text[heading_start:body_start if body_start > heading_start else len(text)]
+    heading_end = body_start - 1 if body_start > 0 else 0
+    heading_start = text.rfind("\n", 0, heading_end) + 1
+    heading = text[heading_start:max(heading_start, heading_end)]
     heading = heading.split("\n", 1)[0].strip().lower()
     if not any(token in heading for token in DECLARATION_TOKENS):
         problems.append(
@@ -254,17 +259,34 @@ def _de_extend(path: str, extended_root: str, real_root: str) -> str:
     return os.path.join(real_root, os.path.relpath(path, extended_root))
 
 
+# An ARCHIVED summary: ``summary_<yyyyMMdd_HHmm>.md`` (optionally `` (2)``). It is a
+# historical snapshot the summarize flow kept when it overwrote a summary, and its
+# figure links point at whatever ``img/`` held at the time. It must NOT be checked:
+# a live check would flag every historical link as a missing image and fail a tree
+# that is actually sound.
+_ARCHIVED_SUMMARY_RE = re.compile(r"^summary_\d{8}_\d{4}( \(\d+\))?\.md$", re.IGNORECASE)
+
+
+def _is_archived_summary(name: str) -> bool:
+    """True for the ``summary_<stamp>.md`` snapshots a re-summarize leaves behind."""
+    return bool(_ARCHIVED_SUMMARY_RE.match(name))
+
+
 def _collect_markdown(root: str, recurse: bool) -> list[str]:
-    """Every ``*.md`` in the scanned scope, sorted for a stable report."""
+    """Every LIVE ``*.md`` in the scanned scope, sorted for a stable report.
+
+    Archived summaries (``summary_<stamp>.md``) are skipped: they are frozen
+    snapshots, and their links legitimately dangle once the live ``img/`` changed.
+    """
     found: list[str] = []
     if recurse:
         for walk_root, _dirs, files in os.walk(paths.to_extended(root)):
             for name in files:
-                if name.lower().endswith(".md"):
+                if name.lower().endswith(".md") and not _is_archived_summary(name):
                     found.append(_de_extend(os.path.join(walk_root, name), paths.to_extended(root), root))
     else:
         for entry in paths.list_dir(root, files=True):
-            if entry.name.lower().endswith(".md"):
+            if entry.name.lower().endswith(".md") and not _is_archived_summary(entry.name):
                 found.append(entry.path)
     return sorted(found)
 

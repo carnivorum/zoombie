@@ -396,6 +396,15 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     slides_cmd.add_argument(
+        "-GlobalDedup", "--global-dedup", dest="global_dedup", action="store_true",
+        help=(
+            "ALSO drop a frame that repeats an earlier kept picture (a non-sequential "
+            "duplicate: a presenter's face cutting back between slides). Overrides the "
+            "covered-run guarantee, so use it for a talking-head-heavy video, not a "
+            "slide deck"
+        ),
+    )
+    slides_cmd.add_argument(
         "-MinSlideSec", "--min-slide-sec", dest="min_slide_seconds", type=float,
         default=slides.DEFAULT_MIN_SLIDE_SECONDS,
         help=(
@@ -549,6 +558,16 @@ def build_parser() -> argparse.ArgumentParser:
     summarize.add_argument(
         "-Times", "--times", dest="times", default=None,
         help="exact slide timestamps for -Slides true (HH:MM:SS or SS)",
+    )
+    # The agent's FINAL keep/drop over the detector's proposals, threaded straight
+    # to `slides`. Frames are named by id (``fNNN``) or timestamp, NEVER a path.
+    summarize.add_argument(
+        "-Keep", "--keep", dest="keep", default=None,
+        help="slide frames to KEEP (ids like f005 or their timestamps); re-run -Step slides",
+    )
+    summarize.add_argument(
+        "-Drop", "--drop", dest="drop", default=None,
+        help="slide frames to DROP (same handles as -Keep)",
     )
     summarize.add_argument("-Title", "--title", dest="title", default=None)
     summarize.add_argument(

@@ -36,7 +36,7 @@ import uuid
 from .. import SKILL_VERSION
 from ..cli import Outcome, build_parser
 from ..item import paths as item_paths
-from ..lib import paths, process, workspace
+from ..lib import paths, process, reading, workspace
 from ..lib.errors import ZoombieError
 
 __all__ = ["run"]
@@ -250,24 +250,33 @@ def _step_name(args) -> Outcome:
         # A local source inside the workspace: the media is the source itself.
         placed = paths.absolute(state["source"])
 
-    # Move any figures the source step extracted into the item's visible img/, so
-    # the document's links and the files travel together.
-    run_images = os.path.join(run, item_paths.IMAGE_DIR_NAME)
-    if paths.is_dir(run_images):
-        target_images = item_paths.image_dir(final)
-        paths.ensure_dir(target_images)
-        for entry in paths.list_dir(run_images, files=True):
-            paths.copy_file(entry.path, os.path.join(target_images, entry.name))
+    # Figures are NOT published here. They are extracted into the run scratch by the
+    # slides step and published by the prose step, which knows the final keep/drop
+    # selection. Publishing early would copy frames the agent later drops.
 
     state["destinationFinal"] = final
     state["media"] = placed or media
+
+    # Archive the existing summary ONCE, at the START of the task: the snapshot must
+    # be the file as the USER left it, not an intermediate the run itself produced.
+    # The later steps (prose can run several times) only ever overwrite the live
+    # summary, so a re-run of the task archives exactly one copy.
+    archived = _archive_existing(final)
+    state["archived"] = archived
     _write_run(run, state)
 
+    why = (
+        f"the previous summary was archived to {os.path.basename(archived['to'])} "
+        "-- tell the user; then ask whether to extract slide frames (a separate "
+        "question) and call step slides with -Slides true/false"
+        if archived else
+        "ask the user whether to extract slide frames (a separate question), then "
+        "call step slides with -Slides true/false"
+    )
     return Outcome(ok=True, data={
         "step": "name", "run": run, "itemDir": final, "media": placed,
-        "next": _next("slides", {"-Run": run},
-                      "ask the user whether to extract slide frames (a separate "
-                      "question), then call step slides with -Slides true/false"),
+        "archived": archived,
+        "next": _next("slides", {"-Run": run}, why),
     })
 
 
@@ -290,10 +299,28 @@ def _step_slides(args) -> Outcome:
     if want:
         if not media or not paths.is_file(media):
             raise ZoombieError("summarize: no retained media to extract slides from.")
-        image_dir = item_paths.image_dir(item_dir)
+        # Extract into the RUN SCRATCH, never straight into the item. Two reasons:
+        # the item's img/ may hold a previous run's frames with no manifest (we prune
+        # the sidecars at verify), which slides would refuse as "foreign"; and the
+        # kept set is not known until a keep/drop pass. The prose step publishes the
+        # final set into the item's img/.
+        image_dir = os.path.join(run, item_paths.IMAGE_DIR_NAME)
         argv = ["slides", "-Source", media, "-Output", run, "-ImageDir", image_dir]
         if args.times:
             argv += ["-Times", args.times]
+        # Talking-head-heavy video detection: a video that samples into many runs of
+        # the SAME picture (a webcam that keeps cutting back between slides) yields
+        # dozens of near-identical frames. -GlobalDedup collapses those to the first
+        # occurrence, which is what an auto-detect run over a webinar needs. Off for
+        # an explicit-timestamp run (the user pointed at exact slides).
+        if not args.times:
+            argv += ["-GlobalDedup"]
+        # The agent's FINAL keep/drop, threaded from a prior slides call. The
+        # detector only PROPOSES; the agent, which can see the frames, decides.
+        if getattr(args, "keep", None):
+            argv += ["-Keep", args.keep]
+        if getattr(args, "drop", None):
+            argv += ["-Drop", args.drop]
         if args.work_root:
             argv += ["-WorkRoot", args.work_root]
         outcome = _dispatch("slides", argv)
@@ -301,19 +328,41 @@ def _step_slides(args) -> Outcome:
             return outcome
         data = outcome.data or {}
         images = data.get("images") or {}
+        vision = data.get("visionFrames") or []
         frames = {
             "requested": True,
             "extracted": images.get("count", 0),
             "imageDir": image_dir,
             "detected": images.get("detected"),
+            "proposed": images.get("proposed", images.get("count", 0)),
+            # The proposed frames, so the agent can SEE them and name a keep/drop.
+            # Each carries its stable id (fNNN) and the reading-copy path, exactly
+            # what slides reports -- the summarize flow must not hide the proposals.
+            "frames": [
+                {"id": frame.get("id"), "path": frame.get("path"),
+                 "timeSec": frame.get("timeSec"), "timecode": frame.get("timecode")}
+                for frame in vision
+            ],
+            "selection": images.get("selection"),
         }
 
+    # The recommended next step is `prose` for an explicit-timestamp or an
+    # already-selected run, but a first auto-detect run has proposals the agent
+    # should look at: `why` tells it to keep/drop them (or proceed) before prose.
+    proposals = bool(frames.get("frames")) and not (getattr(args, "keep", None) or getattr(args, "drop", None))
+    why = (
+        f"review the {len(frames.get('frames') or [])} proposed frame(s) above (by id "
+        "fNNN or timestamp): call step slides again with -Keep/-Drop to prune "
+        "talking-head frames, or call step prose to accept them all"
+        if proposals else
+        "write the title, the short summary, an optional criticism and the "
+        "topic-change section headings (with an anchor phrase for each), then call "
+        "step prose; the backend assembles block 6"
+    )
     return Outcome(ok=True, data={
         "step": "slides", "run": run, "itemDir": item_dir, "slides": frames,
-        "next": _next("prose", {"-Run": run},
-                      "write the title, the short summary, an optional criticism and "
-                      "the topic-change section headings (with an anchor phrase for "
-                      "each), then call step prose; the backend assembles block 6"),
+        "next": _next("slides" if proposals else "prose",
+                      {"-Run": run} if proposals else {"-Run": run}, why),
     })
 
 
@@ -415,6 +464,34 @@ def _split_transcript(text: str, sections: list[dict], fallback_title: str) -> l
     return pairs
 
 
+def _publish_figures(run: str, item_dir: str) -> int:
+    """Move the run scratch's figures into the item's visible ``img/``.
+
+    The image directory is REBUILT: a previous run's frames (which have no manifest,
+    because verify prunes the sidecars) are cleared first, so a re-run never leaves
+    old and new frames side by side. Only the run's kept frames are copied -- the
+    agent's keep/drop already narrowed them. Returns the number published.
+    """
+    source = os.path.join(run, item_paths.IMAGE_DIR_NAME)
+    if not paths.is_dir(source):
+        return 0
+    target = item_paths.image_dir(item_dir)
+    if paths.is_dir(target):
+        paths.remove(target, recursive=True)
+    paths.ensure_dir(target)
+    published = 0
+    for entry in paths.list_dir(source, files=True):
+        # The frames AND the manifest: postprocess reads the manifest to place each
+        # figure by its anchor, so it MUST travel with the frames. The README and a
+        # readings/ subdirectory are the run's scratch, not the item's deliverable,
+        # and are not copied (verify prunes any that slip through anyway).
+        if entry.name.lower().endswith(".png") or entry.name == item_paths.MANIFEST_NAME:
+            paths.copy_file(entry.path, os.path.join(target, entry.name))
+            if entry.name.lower().endswith(".png"):
+                published += 1
+    return published
+
+
 def _relative_link(from_dir: str, target: str) -> str:
     """A forward-slashed, percent-encoded relative link from a directory."""
     from ..lib.textnorm import percent_encode_dest
@@ -486,7 +563,18 @@ def _step_prose(args) -> Outcome:
             parts.append("")
     document = "\n".join(parts).rstrip("\n") + "\n"
 
-    archived = _archive_existing(item_dir)
+    # Publish the figures: move the KEPT set from the run scratch into the item's
+    # visible img/, REPLACING any frames a previous run left. The item is the
+    # deliverable, so a re-run must not accumulate old frames beside new ones, and
+    # pruning the sidecars at verify means a stale img/ has no manifest to tell us
+    # what is ours -- so the whole image directory is rebuilt here.
+    _publish_figures(run, item_dir)
+
+    # NO archive here: the name step already snapshotted the user's file at the START
+    # of the task. The prose step only writes the live summary, so re-running it
+    # (an iterative prose pass) overwrites the live document without piling up
+    # snapshots of intermediate work.
+    archived = state.get("archived")
     summary = item_paths.summary_path(item_dir)
     with open(paths.to_extended(summary), "w", encoding="utf-8", newline="\n") as handle:
         handle.write(document)
@@ -520,6 +608,35 @@ def _step_prose(args) -> Outcome:
 # --------------------------------------------------------------------------- #
 
 
+# The files a finished item must NOT keep: the run's image sidecars and the
+# agent-facing reading copies. The figures the document links survive; these are
+# mechanical and were only needed while the run was in progress.
+_ITEM_THROWAWAY = (item_paths.MANIFEST_NAME, "README.md")
+
+
+def _prune_item_sidecars(item_dir: str) -> list[str]:
+    """Delete the run's image sidecars and reading copies from a finished item.
+
+    The contract is that a finished item holds ONLY ``summary.md``, the kept media
+    and the figures the document inlines. The manifest and the image README are
+    scratch, and ``img/readings/`` holds the compressed copies the agent read once.
+    This runs at ``verify`` so a successful task leaves exactly the deliverable.
+    Best effort: a busy or foreign file is reported by absence, never fatal.
+    """
+    removed: list[str] = []
+    image_dir = item_paths.image_dir(item_dir)
+    for name in _ITEM_THROWAWAY:
+        target = os.path.join(image_dir, name)
+        if paths.is_file(target):
+            paths.remove_quietly(target)
+            removed.append(target)
+    readings = os.path.join(image_dir, reading.READING_DIR_NAME)
+    if paths.is_dir(readings):
+        paths.remove_quietly(readings, recursive=True)
+        removed.append(readings)
+    return removed
+
+
 def _step_verify(args) -> Outcome:
     run = args.run
     state = _read_run(run)
@@ -532,9 +649,14 @@ def _step_verify(args) -> Outcome:
     ok = bool(report.get("ok", outcome.ok if outcome else False))
 
     cleaned = False
+    pruned: list[str] = []
     if ok:
-        # Deterministic cleanup: the run scratch is throwaway, so removing it is
-        # the last act of a successful task. A failure keeps it for inspection.
+        # Deterministic cleanup, in this order: first thin the ITEM (sidecars and
+        # reading copies are throwaway once the document is verified), then remove
+        # the run scratch. A failure keeps both for inspection.
+        pruned = _prune_item_sidecars(item_dir)
+        for path in pruned:
+            process.log(f"  removed {path}", "step")
         paths.remove(run, recursive=True)
         cleaned = True
         process.log(f"  removed the run scratch {run}", "step")
@@ -543,7 +665,7 @@ def _step_verify(args) -> Outcome:
         ok=ok,
         data={
             "step": "verify", "run": run, "itemDir": item_dir,
-            "verify": report, "cleaned": cleaned,
+            "verify": report, "cleaned": cleaned, "prunedSidecars": pruned,
             "next": _next("verify", {"-Run": run},
                           "the tree is clean; the run is finished"
                           if ok else "fix the reported problems and re-run verify"),

@@ -321,3 +321,52 @@ class TestReportOrdering:
 
 # The block-6 image-count advisory was removed with the ``.data/`` layout: with the
 # manifest gone, the ordinal heading-to-image convention has nothing to compare.
+
+
+class TestSection6Declaration:
+    """The heading-line lookup is a real bug source, so it is pinned directly."""
+
+    def test_a_declared_copy_heading_is_not_flagged(self, tmp_path):
+        """A heading that DOES declare the copy must not be reported.
+
+        Regression for the end-to-end Ford run: the heading lookup started one
+        offset too late (on the body's first line), so a document whose ``## 6.``
+        heading declared "копия" was reported as undeclared.
+        """
+        root = build_tree(tmp_path)
+        summary = (root / "summary.md").read_text(encoding="utf-8")
+        (root / "summary.md").write_text(
+            summary.replace(
+                "## 6. Полное содержание транскрипта",
+                "## 6. Полный текст источника (копия, очищенная от артефактов)",
+            ),
+            encoding="utf-8",
+        )
+        report = vf.verify_tree(str(root))
+        assert all(a["kind"] != vf.KIND_SECTION6_UNDECLARED for a in report["advisories"])
+
+    def test_an_archived_summary_is_not_checked(self, tmp_path):
+        """A ``summary_<stamp>.md`` snapshot must not fail a live tree.
+
+        Regression for the end-to-end Ford re-run: the archive kept when a summary
+        was overwritten links to frames the current img/ no longer holds, so checking
+        it flagged every figure as missing and refused to clean the run scratch.
+        """
+        root = build_tree(tmp_path)
+        # An archive whose figure no longer exists beside the live document.
+        (root / "summary_20260926_1551.md").write_text(
+            CLEAN.replace("img/001%20-%20p01.png", "img/gone.png"), encoding="utf-8"
+        )
+        report = vf.verify_tree(str(root))
+        assert report["ok"] is True, report["problems"]
+        assert report["filesChecked"] == 2  # live summary.md + other-summary.md only
+
+    def test_an_undeclared_heading_is_still_reported(self, tmp_path):
+        root = build_tree(tmp_path)
+        summary = (root / "summary.md").read_text(encoding="utf-8")
+        (root / "summary.md").write_text(
+            summary.replace("## 6. Полное содержание транскрипта", "## 6. Текст"),
+            encoding="utf-8",
+        )
+        report = vf.verify_tree(str(root))
+        assert any(a["kind"] == vf.KIND_SECTION6_UNDECLARED for a in report["advisories"])

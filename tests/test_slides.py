@@ -531,6 +531,33 @@ class TestDedupAcrossTheUnion:
         assert [c["frameIndex"] for c in kept] == [3, 2]
 
 
+class TestGlobalDedup:
+    """The OPT-IN pass that collapses non-sequential duplicates (talking heads)."""
+
+    def test_a_repeated_representative_is_dropped(self):
+        # Two runs, SAME picture: the within-run pass keeps both (covered run),
+        # but the global pass keeps only the first.
+        kept, skipped = slides_cmd._dedup_global(
+            [_candidate(0, 3, True, 0), _candidate(1, 7, True, 0)], distance=0
+        )
+        assert [c["runIndex"] for c in kept] == [0]
+        assert skipped[0]["reason"] == "global-dedup"
+
+    def test_distinct_representatives_both_survive(self):
+        kept, skipped = slides_cmd._dedup_global(
+            [_candidate(0, 3, True, 0), _candidate(1, 7, True, (1 << 64) - 1)], distance=0
+        )
+        assert len(kept) == 2
+        assert skipped == []
+
+    def test_a_frame_with_no_hash_is_kept(self):
+        """"Cannot tell" is never a duplicate -- an unreadable frame survives."""
+        kept, _skipped = slides_cmd._dedup_global(
+            [_candidate(0, 3, True, 0), _candidate(1, 7, True, None)], distance=0
+        )
+        assert len(kept) == 2
+
+
 class TestExtractFrames:
     """Drive the real selector with ffmpeg/OCR stubbed out."""
 

@@ -29,7 +29,6 @@ from urllib.parse import unquote
 from . import paths
 
 __all__ = [
-    "WORKSPACE_ENV_VAR",
     "UNSORTED_DIR_NAME",
     "KIND_SUMMARIES",
     "KIND_DOWNLOAD",
@@ -40,10 +39,6 @@ __all__ = [
     "sanitize_name",
     "unique_name",
 ]
-
-# Override for the workspace root. Unset means "the process working directory",
-# which is where the MCP client starts the server.
-WORKSPACE_ENV_VAR = "ZOOMBIE_WORKSPACE_ROOT"
 
 # The single folder under the workspace root that collects output for sources
 # that are NOT already part of the workspace. Deliberately visible (no dot): a
@@ -69,21 +64,29 @@ DEFAULT_NAME_LENGTH = 120
 
 
 def workspace_root() -> str:
-    """Absolute path of the workspace root.
+    """Absolute path of THE current workspace root: always the working directory.
 
-    ``ZOOMBIE_WORKSPACE_ROOT`` wins when set (and non-empty); otherwise the
-    process working directory is used, because the MCP client spawns the server
-    with the project as its cwd. The path is returned absolute and prefix-free,
-    which is the form every other helper and the JSON output expect.
+    There is exactly ONE root and it is the process cwd -- the project the MCP
+    client (or the shell) started in. It is NOT configurable by an environment
+    variable: an override would let a run silently treat a DIFFERENT project as its
+    own, which is precisely the mis-routing this design forbids (writing inside a
+    foreign workspace). VS Code already gates writes outside the opened folder, so
+    an override is both unsafe and a workflow stopper.
+
+    A path is therefore either inside THIS root or external; a sibling project
+    (``repos/kb`` while the cwd is ``repos/zoombie``) is external and routes to
+    ``_unsorted``, exactly like a URL.
     """
-    override = os.environ.get(WORKSPACE_ENV_VAR, "").strip()
-    if override:
-        return paths.absolute(override)
     return paths.absolute(os.getcwd())
 
 
 def inside_workspace(path: str, root: str | None = None) -> bool:
-    """True when ``path`` is inside the workspace (the root itself counts).
+    """True when ``path`` is inside the CURRENT workspace (the root itself counts).
+
+    ``root`` defaults to :func:`workspace_root` -- the ONE root in force for this
+    process. A path under a DIFFERENT workspace (a sibling project, another repo)
+    is NOT inside this one and is treated as external; that is the whole point of
+    the single-root rule (:func:`workspace_root`).
 
     Both sides are made absolute and case-normalized before the prefix test, so
     ``C:/../repos/kb/Crimson/x.mp4`` and ``<ws>\\Crimson\\x.mp4`` compare equal
