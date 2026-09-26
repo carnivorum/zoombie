@@ -160,7 +160,12 @@ def build_parser() -> argparse.ArgumentParser:
     # --- download ---------------------------------------------------------
     download = subparsers.add_parser("download", help="download a video or its audio")
     _add_source_output(download)
-    download.add_argument("-DownloadDir", "--download-dir", dest="download_dir", default=None)
+    download.add_argument("-DownloadDir", "--download-dir", dest="download_dir", default=None,
+                          help="explicit destination folder (default: the source's folder "
+                               "when it is inside the workspace, else "
+                               "_unsorted/download/<name>)")
+    download.add_argument("-Name", "--name", dest="name", default=None,
+                          help="the folder name under _unsorted/download (default: the title)")
     download.add_argument("-AudioOnly", "--audio-only", dest="audio_only", action="store_true")
     download.add_argument("-Format", "--format", dest="format", default="wav",
                           choices=["wav", "mp3", "m4a", "flac"])

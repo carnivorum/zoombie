@@ -1,4 +1,4 @@
-"""Tests for the stepwise ``summarize`` flow.
+"""Tests for the stepwise ``summarize`` flow and the download routing.
 
 Step 0 (``source``) drives ``pipeline`` and therefore whisper, so these tests
 SEED the run state directly - a ``run.json`` plus a ``transcript.txt`` - and then
@@ -185,3 +185,37 @@ class TestWorkspaceHelper:
         )
         assert internal is False
         assert destination == str(tmp_path / "_unsorted" / "summaries" / "A Talk")
+
+
+class TestDownloadRouting:
+    """The standalone download tool uses the SAME workspace rule as summarize."""
+
+    def test_a_url_lands_under_unsorted_download(self, tmp_path, monkeypatch):
+        from zoombie.commands import download
+
+        monkeypatch.setenv("ZOOMBIE_WORKSPACE_ROOT", str(tmp_path))
+        directory, internal = download.destination(_args(
+            source="https://example.com/watch?v=abc", name="A Talk"
+        ))
+        assert internal is False
+        assert directory == str(tmp_path / "_unsorted" / "download" / "A Talk")
+
+    def test_an_internal_source_keeps_its_folder(self, tmp_path, monkeypatch):
+        from zoombie.commands import download
+
+        monkeypatch.setenv("ZOOMBIE_WORKSPACE_ROOT", str(tmp_path))
+        source = tmp_path / "lore" / "clip.mp4"
+        directory, internal = download.destination(_args(source=str(source)))
+        assert internal is True
+        assert directory == str(tmp_path / "lore")
+
+    def test_an_explicit_download_dir_wins(self, tmp_path, monkeypatch):
+        from zoombie.commands import download
+
+        monkeypatch.setenv("ZOOMBIE_WORKSPACE_ROOT", str(tmp_path))
+        target = tmp_path / "elsewhere"
+        directory, internal = download.destination(_args(
+            source="https://example.com/watch?v=abc", download_dir=str(target)
+        ))
+        assert internal is False
+        assert directory == str(target)

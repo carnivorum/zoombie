@@ -308,7 +308,8 @@ $zoombie = @(
 ) | Where-Object { Test-Path $_ } | Select-Object -First 1
 
 & $zoombie doctor                                         # report tool status
-& $zoombie download -Source "<url>" -DownloadDir "<dir>" [-AudioOnly] [-Format wav]
+& $zoombie download -Source "<url>" [-DownloadDir "<dir>"] [-Name "<name>"] [-AudioOnly] [-Format wav]
+                                                          # default dest: _unsorted/download/<name>
 & $zoombie extract  -Source "<video>" -Output "<out>" [-Format wav|mp3|m4a|flac]
 & $zoombie transcribe -Source "<audio>" -Output "<item-folder>" [-Language auto] [-NoSrt] [-NoGpu] [-NoFlashAttn] [-Threads N] [-AllowCpuFallback] [-StrictGpu]
 & $zoombie readpdf  -Source "<pdf>" -Output "<basename>" [-Ocr | -Vision "<dir>"] [-Images] [-ImagesOnly] [-ImageDir "<dir>"] [-MinPx N] [-MinPt N] [-Pages "1-5,8"]

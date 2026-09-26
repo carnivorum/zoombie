@@ -160,7 +160,7 @@ KNOWN_OPTIONS: dict[str, dict] = {
     "modes": {"target": "str", "check": "bool", "apply": "bool"},
     "mcp": {"target": "str", "check": "bool", "apply": "bool"},
     "clean": {"work_root": "str", "clean_scratch": "bool"},
-    "download": {"download_dir": "str", "format": "str", "audio_only": "bool"},
+    "download": {"download_dir": "str", "format": "str", "audio_only": "bool", "name": "str"},
     "extract": {"format": "str"},
 }
 
@@ -648,7 +648,7 @@ def tool_schemas() -> list[dict]:
     tools_out: list[dict] = [
         schema("doctor", "Report tool status.", {}, []),
         schema("clean", "Remove scratch dirs.", {**source_output, "clean_scratch": {"type": "boolean", "description": "sweep every toolchain-owned scratch dir"}}, []),
-        schema("download", "Download a video or its audio.", {**source_output, "download_dir": {"type": "string"}, "audio_only": {"type": "boolean", "description": "download the audio track only"}, "format": {"type": "string", "enum": ["wav", "mp3", "m4a", "flac"]}}, ["source"]),
+        schema("download", "Download a video or its audio. The destination follows the summarize rule: a source inside the workspace keeps its folder; a URL lands under _unsorted/download/<name>. Override with download_dir, or refine the name with name.", {**source_output, "download_dir": {"type": "string"}, "name": {"type": "string", "description": "folder name under _unsorted/download (default: the title)"}, "audio_only": {"type": "boolean", "description": "download the audio track only"}, "format": {"type": "string", "enum": ["wav", "mp3", "m4a", "flac"]}}, ["source"]),
         schema("extract", "Extract audio from a video.", {**source_output, "format": {"type": "string", "enum": ["wav", "mp3", "m4a", "flac"]}}, ["source"]),
         schema("unpack", "Extract an NSIS installer or a 7z archive into a folder (data, never executed).", {**source_output, "strip": {"type": "integer"}, "include": {"type": "array", "items": {"type": "string"}}}, ["source", "output"]),
         schema("transcribe", "Transcribe audio to text (blocks; use start/status/result).", {**source_output, **gpu, "language": {"type": "string"}, "from_time": {"type": "string"}, "to_time": {"type": "string"}}, ["source"]),

@@ -1,18 +1,39 @@
-"""``download``: fetch a video (or its audio) with yt-dlp."""
+"""``download``: fetch a video (or its audio) with yt-dlp.
+
+The destination follows the SAME workspace rule as ``summarize``: a source
+INSIDE the workspace keeps its own folder, and a URL (or a file outside it) is
+routed to ``<workspace>/_unsorted/download/<name>/``. An explicit ``-DownloadDir``
+still wins, and ``-Name`` refines the extrapolated folder name.
+"""
 
 from __future__ import annotations
 
 import os
 
 from ..cli import Outcome
-from ..lib import env as env_mod, paths, process, ytdlp
+from ..lib import env as env_mod, paths, process, workspace, ytdlp
+
+
+def destination(args) -> tuple[str, bool]:
+    """The folder a download goes into, and whether the source was in-workspace.
+
+    An explicit ``-DownloadDir`` is honoured verbatim. Otherwise
+    :func:`zoombie.lib.workspace.destination_dir` applies the one routing rule, so
+    a URL lands under ``_unsorted/download/<name>`` and never in the workspace root.
+    """
+    explicit = getattr(args, "download_dir", None)
+    if explicit:
+        return paths.absolute(explicit), False
+    return workspace.destination_dir(
+        args.source, workspace.KIND_DOWNLOAD, name=getattr(args, "name", None)
+    )
 
 
 def run(args) -> Outcome:
     environment = env_mod.resolve()
     python = environment.require("python", "python")
 
-    directory = args.download_dir or os.path.join(os.getcwd(), "downloads")
+    directory, internal = destination(args)
     if not paths.is_dir(directory):
         if args.dry_run:
             process.log(f"would create {directory}", "step")
@@ -38,7 +59,8 @@ def run(args) -> Outcome:
     if args.dry_run:
         return Outcome(
             ok=True,
-            data={"dryRun": True, "dir": directory, "args": argv[2:]},
+            data={"dryRun": True, "dir": directory, "internal": internal,
+                  "args": argv[2:]},
         )
 
     process.run_checked(argv, what="yt-dlp")
@@ -46,5 +68,6 @@ def run(args) -> Outcome:
     produced = ytdlp.newest_download(directory) or {"file": None, "size": 0}
     return Outcome(
         ok=True,
-        data={"dir": directory, "file": produced["file"], "size": produced["size"]},
+        data={"dir": directory, "internal": internal,
+              "file": produced["file"], "size": produced["size"]},
     )

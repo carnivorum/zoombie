@@ -87,6 +87,10 @@ flowchart TD
 | 3 prose | summarize step prose | assemble block 6 from the transcript split at each section start, write skeleton, run postprocess apply | step verify |
 | 4 verify | summarize step verify | run verify; on ok delete run scratch | terminal |
 
+The standalone `download` tool applies the SAME routing (a `_unsorted/download/<name>/`
+destination, overridable with `-DownloadDir` and refinable with `-Name`), so a bare
+download and the summarize flow agree on where output goes.
+
 The agent supplies the title (H1), the short summary (block 3), an optional criticism,
 and the topic-change section headings with an anchor phrase each. The backend splits
 the transcript and emits the verbatim block-6 copy, so the agent never retypes it.
