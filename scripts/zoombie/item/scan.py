@@ -1,22 +1,27 @@
-"""One scan of a workspace, shared by ``items`` and ``index``.
+"""One scan of a workspace, shared by ``items``.
 
 Two commands need to know what a directory holds -- the enumeration the agent
 calls, and the library index a human reads -- and if each parsed the tree itself
 they would eventually disagree about what an item is. So the tree is read here
 once, and both render from the result.
 
-Recognition is :func:`zoombie.item.paths.is_item` (a ``summary.md`` or a ``.data/``
-directory); metadata falls back through ``item.json``, then a legacy folder name,
-then the summary's H1. **No part of this module requires a folder name to parse**,
-which is what lets a user name their folders anything at all.
+Recognition is :func:`zoombie.item.paths.is_item` (a ``summary.md``); the title
+comes from the summary's own H1, and the number from the naming convention
+measured over the siblings. **No part of this module requires a folder name to
+parse**, which is what lets a user name their folders anything at all.
+
+A finished item now holds only its document, its media and its ``img/`` figures
+-- there is no ``.data/`` sidecar to report -- so the record is correspondingly
+smaller.
 """
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
 
 from ..lib import paths, process
-from . import meta, paths as item_paths, registry
+from . import paths as item_paths, registry
 
 __all__ = ["ScanResult", "scan"]
 
@@ -26,6 +31,8 @@ SOURCE_EXTENSIONS = (
     ".mp3", ".wav", ".m4a", ".flac", ".ogg", ".opus", ".aac",
     ".pdf",
 )
+
+_H1_RE = re.compile(r"^#[ \t]+(.+?)[ \t]*$", re.MULTILINE)
 
 
 @dataclass
@@ -52,34 +59,22 @@ class ScanResult:
         }
 
 
-def _source_of(item_dir: str, stored: dict | None) -> dict:
+def _source_of(item_dir: str) -> dict:
     """The source media at the item root, as ``{"file", "kind", "present"}``.
 
-    Read from the media actually on disk rather than trusted from metadata: a user
-    may delete a 900 MB video and keep the summary, and a scan that reported the
-    file as present would be lying about the folder in front of them.
+    Read from the media actually on disk, never trusted from a sidecar: a user may
+    delete a 900 MB video and keep the summary, and a scan that reported the file
+    as present would be lying about the folder in front of them.
     """
-    files = [entry.name for entry in paths.list_dir(item_dir, files=True)]
-    media = [
-        name
-        for name in files
-        if name.lower().endswith(SOURCE_EXTENSIONS)
-    ]
-    media.sort()
-    sidecar = (stored or {}).get("source") or {}
+    media = sorted(
+        entry.name
+        for entry in paths.list_dir(item_dir, files=True)
+        if entry.name.lower().endswith(SOURCE_EXTENSIONS)
+    )
     if media:
-        return {
-            "file": media[0],
-            "kind": sidecar.get("kind") or _kind_of(media[0]),
-            "present": True,
-            "extra": media[1:],
-        }
-    return {
-        "file": sidecar.get("file"),
-        "kind": sidecar.get("kind"),
-        "present": False,
-        "extra": [],
-    }
+        return {"file": media[0], "kind": _kind_of(media[0]), "present": True,
+                "extra": media[1:]}
+    return {"file": None, "kind": None, "present": False, "extra": []}
 
 
 def _kind_of(file_name: str) -> str:
@@ -93,62 +88,47 @@ def _kind_of(file_name: str) -> str:
 def _holds_source_material(item_dir: str) -> bool:
     """True when a non-item folder holds source material but no summary.
 
-    Such a folder is a legacy or in-progress item -- a curated library produced
-    before the item model, or a download awaiting its write-up -- and the index
-    should say so rather than describe it as an unrelated folder.
+    Such a folder is a download awaiting its write-up, and the index should say so
+    rather than describe it as an unrelated folder.
     """
     for entry in paths.list_dir(item_dir, files=True):
-        lower = entry.name.lower()
-        if lower.endswith(SOURCE_EXTENSIONS):
-            return True
-        if lower.endswith(".srt") or lower.endswith(".txt"):
+        if entry.name.lower().endswith(SOURCE_EXTENSIONS):
             return True
     return False
 
 
+def _title_of(item_dir: str) -> str:
+    """The summary's H1, or the folder name when it has none."""
+    summary = item_paths.summary_path(item_dir)
+    if paths.is_file(summary):
+        try:
+            with open(paths.to_extended(summary), "r", encoding="utf-8-sig") as handle:
+                match = _H1_RE.search(handle.read())
+        except OSError:
+            match = None
+        if match and match.group(1).strip():
+            return match.group(1).strip()
+    return ""
+
+
 def _item_record(item_dir: str, name: str) -> dict:
     """One item, described in the shape the CLI publishes."""
-    resolved = meta.fields(item_dir, name)
-    warnings: list[str] = []
-    if resolved["number"] is None:
-        warnings.append("no number in item.json or the folder name")
-    if resolved["date"] is None:
-        warnings.append("no date in item.json or the folder name")
-    if not resolved["stored"]:
-        warnings.append("no .data/item.json")
-
-    data_dir = item_paths.data_dir(item_dir)
     return {
         "name": name,
         "path": item_dir,
-        "number": resolved["number"],
-        "date": resolved["date"],
-        "title": resolved["title"],
+        "title": _title_of(item_dir) or name,
         "summary": paths.is_file(item_paths.summary_path(item_dir)),
-        "source": _source_of(item_dir, resolved["stored"]),
-        "transcript": {
-            "txt": paths.is_file(item_paths.transcript_path(item_dir, "txt")),
-            "srt": paths.is_file(item_paths.transcript_path(item_dir, "srt")),
-        },
+        "source": _source_of(item_dir),
         "images": item_paths.image_count(item_dir),
-        "hasManifest": paths.is_file(item_paths.manifest_path(item_dir)),
-        "dataDir": data_dir if paths.is_dir(data_dir) else None,
-        "warnings": warnings,
     }
 
 
 def _children(root: str) -> ScanResult:
     """The immediate children of ``root``: items, non-items, and the naming verdict.
 
-    Private, and deliberately so: :func:`scan` is the entry point, and the only
-    caller that wants one level is :func:`scan` itself while recursing. Exposing
-    both -- as ``scan_root`` and ``scan_children`` were -- is what let the recursive
-    totals go stale, because a second public way in had to remember to fix up what
-    the first had already computed.
-
     Non-items are **reported with a reason, never silently dropped** -- a
     mis-recognized folder that vanishes from the index is the failure mode this
-    whole redesign exists to remove.
+    design exists to remove.
     """
     result = ScanResult(root=root)
     names = registry.child_names(root)
@@ -162,42 +142,14 @@ def _children(root: str) -> ScanResult:
                 {
                     "name": name,
                     "path": item_dir,
-                    # ``media`` distinguishes a folder that HOLDS source material
-                    # (a media file or a transcript) but no summary yet -- a
-                    # legacy or in-progress item -- from an unrelated folder. The
-                    # index uses it to say which, so a curated pre-item-model
-                    # folder is not lumped in with ``scripts``/``plans``.
                     "kind": "media" if _holds_source_material(item_dir) else "folder",
-                    "reason": "no summary.md and no .data/ directory",
+                    "reason": "no summary.md",
                 }
             )
 
-    # The naming verdict is measured over the ITEMS plus the other siblings, so a
-    # workspace of plainly-named item folders reports "title-only" rather than
-    # being read as convention-less just because those folders are ours.
     verdict = registry.measure(names)
     result.naming = verdict.to_dict()
     result.naming["itemCount"] = len(result.items)
-
-    # ...but a STRONG verdict is CAPPED to weak unless the items are also a real
-    # SHARE of the folders that were measured. A directory of source folders
-    # (``scripts``, ``tests``, ``plans``) is "plainly named" too, and reporting
-    # that as a strong convention would have the toolchain confidently proposing
-    # names for a folder that holds no items at all -- but the same is true of
-    # nine source folders beside one real item, which a mere "zero items" test
-    # could not catch. The convention is still reported (detecting ``a``/``b``/``c``
-    # in a target directory is the point), just as a weak signal to put to the
-    # user, and the reason is recorded so a caller can explain the downgrade.
-    if verdict.confidence == "strong":
-        if not result.items:
-            result.naming["confidence"] = "weak"
-            result.naming["cappedBecauseNoItems"] = True
-        elif not _items_are_a_share(len(result.items), verdict.total):
-            result.naming["confidence"] = "weak"
-            result.naming["cappedBecauseFewItems"] = True
-
-    # The successor number considers existing items, not arbitrary siblings, so a
-    # stray folder named "99 - notes" cannot push the next item to 100.
     result.naming["nextNumber"] = _successor_number(
         result.items, result.naming.get("convention")
     )
@@ -210,65 +162,28 @@ def _children(root: str) -> ScanResult:
 def _successor_number(items: list[dict], convention_id: str | None) -> int | None:
     """The next item number, or ``None`` when numbering is not in use.
 
-    ``registry.next_number`` starts at 1 when nothing is numbered, and reporting
-    that ``1`` under a measured ``title-only`` convention is misleading: it
-    invites a caller to invent a number the workspace does not use. So the number
-    is suppressed when the convention is ``title-only`` AND no existing item
-    carries one. A workspace that IS numbered keeps its successor even when the
-    folders are plainly named, so a real number is never hidden.
+    Suppressed under a ``title-only`` convention with no numbered items, so a
+    caller is never invited to invent a number the workspace does not use.
     """
-    existing = [item["number"] for item in items]
-    has_numbers = any(isinstance(value, int) for value in existing)
-    if convention_id == "title-only" and not has_numbers:
+    existing = [registry.LEGACY_FOLDER_RE.match(item["name"]) for item in items]
+    numbers = [int(match.group(1)) for match in existing if match]
+    if convention_id == "title-only" and not numbers:
         return None
-    return registry.next_number(existing)
-
-
-def _items_are_a_share(item_count: int, sample_count: int, *, share: float = 0.5) -> bool:
-    """True when the items are at least ``share`` of the folders measured.
-
-    The naming verdict is measured over EVERY sibling, because a workspace of
-    plainly-named item folders must read as ``title-only``. That means the sample
-    set is larger than the item set whenever there are non-item folders, and a
-    strong convention can be read from folders that are OURS rather than the
-    user's -- ``scripts``, ``tests`` and ``plans`` share a shape just as surely as
-    three dated items do.
-
-    Requiring the items to be half the samples is the honest boundary: below it
-    the verdict describes the toolchain's own directories more than it describes
-    the library, so it is reported weakly and the reason is recorded.
-
-    ``sample_count`` of zero cannot arise here -- a strong verdict needs agreeing
-    samples -- but the guard keeps the arithmetic total rather than dividing by a
-    count that a future refactor could leave empty.
-    """
-    if sample_count <= 0:
-        return False
-    return item_count >= sample_count * share
+    return registry.next_number(numbers)
 
 
 def _relative(root: str, path: str) -> str:
-    """``path`` relative to ``root``, with forward slashes and no leading separator.
-
-    Computed by string slicing rather than :func:`os.path.relpath` because ``root``
-    here is the prefix the path was BUILT from, so the two always agree. Normalizing
-    the separator matters: a caller prints this value, and a mixed ``one/two\\three``
-    reads as a mistake.
-    """
+    """``path`` relative to ``root``, with forward slashes and no leading separator."""
     return path[len(root):].lstrip("\\/").replace("\\", "/")
 
 
 def _sort_key(item: dict) -> tuple:
-    """Items in reading order: number, then date, then title.
-
-    A missing number sorts last rather than first -- an unnumbered item is not
-    item #0, and a dateless one (`""`) still sorts consistently against dated ones.
-    """
-    number = item["number"]
+    """Items in reading order: number, then title."""
+    match = registry.LEGACY_FOLDER_RE.match(item["name"])
+    number = int(match.group(1)) if match else None
     return (
         0 if isinstance(number, int) else 1,
         number if isinstance(number, int) else 0,
-        item["date"] or "",
         item["title"].lower(),
     )
 
@@ -276,26 +191,15 @@ def _sort_key(item: dict) -> tuple:
 def scan(root: str, depth: int = 1) -> ScanResult:
     """Scan ``root``: the items it holds, the non-items, and the naming verdict.
 
-    ``depth`` is how many levels of children to consider. The default of 1 looks at
-    ``root``'s immediate children, which is what a library is; ``depth=2`` also
-    looks inside each non-item child for a nested collection, and so on. There is
-    one function rather than a shallow one and a recursive one because the totals
-    (``itemCount``, ``nextNumber``) are computed from whatever was found, and a
-    second entry point is how those two drifted apart.
-
-    A ``depth`` below 1 is read as 1 rather than recursing forever: the value
-    arrives from a CLI flag, and a negative one must not become an infinite walk.
-
-    A directory that is itself an item is reported as one and **not descended
-    into** at any depth -- an item's ``.data/`` is its internals, not a nested
-    workspace. That rule is what keeps a deeper scan from reporting every image
-    directory as a skippable folder.
+    ``depth`` is how many levels of children to consider; ``depth=2`` also looks
+    inside each non-item child for a nested collection. A directory that is itself
+    an item is reported as one and **not descended into** at any depth -- an item's
+    ``img/`` is its material, not a nested workspace.
     """
     depth = max(1, depth)
     result = _children(root)
 
     if depth <= 1:
-        # One level: what ``_children`` computed IS the answer.
         result.naming["nextNumber"] = _successor_number(
             result.items, result.naming.get("convention")
         )
@@ -311,22 +215,11 @@ def scan(root: str, depth: int = 1) -> ScanResult:
             found["relative"] = _relative(root, found["path"])
             result.items.append(found)
 
-    # Every item gets a ``relative`` key once the scan goes deeper than one level,
-    # including the ones found DIRECTLY under the root. Those come from ``_children``
-    # with no such key, so without this a caller would be handed a list where some
-    # records carry ``relative`` and some do not -- and the key's whole purpose is to
-    # let a caller address a nested item without reconstructing the path.
     for item in result.items:
         if "relative" not in item:
             item["relative"] = _relative(root, item["path"])
 
     result.items.sort(key=_sort_key)
-
-    # Recomputed over EVERYTHING found, not just the immediate children. Leaving
-    # these stale under-reports a deeper scan twice over: the count is short, and
-    # the next number ignores nested items -- so a library whose item 7 lives one
-    # folder down would be handed 7 again. The confidence cap reads ``itemCount``
-    # too, so a stale value would also downgrade a genuinely strong verdict.
     result.naming["itemCount"] = len(result.items)
     result.naming["nextNumber"] = _successor_number(
         result.items, result.naming.get("convention")
@@ -337,16 +230,8 @@ def scan(root: str, depth: int = 1) -> ScanResult:
 def log_scan(result: ScanResult) -> None:
     """Human-readable progress on stderr; stdout stays the one JSON line."""
     for item in result.items:
-        # Under a title-only convention the number and date are absent, and
-        # ``-: - «title»`` reads as a broken record. Fall back to the folder
-        # name, which is the one identifier every item always has.
-        if item["number"] is None and item["date"] is None:
-            label = item["name"]
-        else:
-            number = item["number"] if item["number"] is not None else "-"
-            label = f"{number}: {item['date'] or '-'} {item['title']}"
         process.log(
-            f"  {label} "
+            f"  {item['name']} "
             f"summary={'yes' if item['summary'] else 'no'} "
             f"images={item['images']} "
             f"source={item['source']['file'] or '-'}"

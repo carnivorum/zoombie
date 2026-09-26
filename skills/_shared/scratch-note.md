@@ -1,4 +1,10 @@
-**Scratch is the CLI's job, not yours.** A run puts its own intermediate files
+**Scratch is the CLI's job, not yours.** The `summarize` flow keeps a whole run's
+throwaway - the transcript, the `.srt`, the origin sidecar, the OCR report, the
+image manifest and the reading copies - in a run scratch dir under the workspace
+`/.tmp/zoombie-summarize/<run>/`, and deletes it at the `verify` step on success.
+Do not create, move or delete those files yourself.
+
+A run puts its own other intermediate files
 under the toolchain's ASCII scratch root (`zoombie-env\work\<guid>` for $job work
 dirs, `zoombie-env\tmp\<prefix>-<guid>` for downloads/extraction) and **removes
 them as it finishes** — including after a failure. You do not delete toolchain

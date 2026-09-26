@@ -336,12 +336,12 @@ class TestRoleBehaviour:
             assert field in items, f"the intern brief lost '{field}'"
         assert "Analyst Intern" in items
 
-    def test_points_at_the_ingest_and_summary_skills(self, items):
-        """The role must name the skills, not just say 'use the tools'."""
-        for name in ("zoombie-transcribe-video", "zoombie-transcribe-audio",
-                     "zoombie-download-video", "zoombie-extract-audio",
-                     "zoombie-images-to-md", "zoombie-summarize", "zoombie postprocess"):
-            assert name in items, f"the role no longer points at {name}"
+    def test_points_at_the_summary_skill_and_flow(self, items):
+        """The role must name the one skill and the flow it drives."""
+        assert "zoombie-summarize" in items, "the role no longer points at zoombie-summarize"
+        for step in ("source", "name", "slides", "prose", "verify"):
+            assert step in items, f"the role no longer names the summarize step {step!r}"
+        assert "postprocess" in items, "the role no longer names the mechanical pass"
 
     def test_separates_the_two_document_shapes(self, items):
         """The analysis skeleton and the library 6-block format must not blend.

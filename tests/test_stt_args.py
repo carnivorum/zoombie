@@ -108,12 +108,12 @@ class TestBuildArgs:
 class TestSidecar:
     def test_writes_the_documented_keys(self, tmp_path):
         base = str(tmp_path / "transcript")
-        artifact = stt.write_source_sidecar(
-            base, _request(), _report(), extension_count=2
-        )
+        artifact = stt.write_source_sidecar(base, _request(), _report())
         assert artifact is not None
         path = artifact["path"]
-        assert os.path.basename(path) == "transcript.source.json"
+        # The sidecar is RUN-LOCAL: a plain source.json beside the transcript, not
+        # a <base>.source.json, so it is deleted with the run scratch.
+        assert os.path.basename(path) == "source.json"
         with open(path, encoding="utf-8") as handle:
             payload = json.load(handle)
         assert set(payload) == {
@@ -163,7 +163,7 @@ class TestSidecar:
 
         monkeypatch.setattr("builtins.open", boom)
         artifact = stt.write_source_sidecar(
-            str(tmp_path / "transcript"), _request(), _report(), extension_count=2
+            str(tmp_path / "transcript"), _request(), _report()
         )
         assert artifact is None
 
@@ -171,11 +171,9 @@ class TestSidecar:
         """The sidecar is named in the report's artifacts object."""
         base = str(tmp_path / "transcript")
         report = stt.Report(output_base=base)
-        report.artifacts["sidecar"] = stt.write_source_sidecar(
-            base, _request(), report, extension_count=2
-        )
+        report.artifacts["sidecar"] = stt.write_source_sidecar(base, _request(), report)
         data = report.to_data()
-        assert data["artifacts"]["sidecar"]["path"].endswith(".source.json")
+        assert data["artifacts"]["sidecar"]["path"].endswith("source.json")
 
     def test_the_sidecar_is_written_after_the_timings_are_known(self, tmp_path, monkeypatch):
         """Regression: the sidecar was written BEFORE the timing block.
@@ -236,7 +234,7 @@ class TestSidecar:
         )
         report = stt.transcribe(_Env(), request)
 
-        with open(f"{base}.source.json", encoding="utf-8") as handle:
+        with open(os.path.join(os.path.dirname(base), "source.json"), encoding="utf-8") as handle:
             payload = json.load(handle)
         # 5.0s of audio decoded in 1000ms => a realtime factor of 0.2.
         assert payload["durationSec"] == 5.0
@@ -262,24 +260,26 @@ class TestReportShape:
 
 
 class TestItemLayout:
-    """``-Output`` names the item folder; the artifacts always go to ``.data/``.
+    """``-Output`` names the destination folder; the artifacts land directly in it.
 
-    This is the fix for the split the field reported: the transcribe/pipeline
-    skills documented ``<item>/.data/transcript.*`` while the producers wrote
-    flat beside ``summary.md``. The layout is unconditional -- there is no flat
-    mode left -- so a transcript can never again land at the item root.
+    With the ``.data/`` sidecar directory gone, a transcription's artifacts are
+    RUN-LOCAL: the summarize flow points ``-Output`` at a run scratch dir, and a
+    bare ``transcribe`` writes into whatever folder the caller names (or the
+    source's own folder, or ``_unsorted/summaries/<name>`` when it is external).
     """
 
-    def test_output_names_the_item_folder_and_artifacts_go_to_data(self, tmp_path):
+    def test_output_names_the_folder_and_artifacts_go_there(self, tmp_path):
         base = stt.resolve_output_base(str(tmp_path / "audio.wav"), str(tmp_path / "item"))
-        assert base == str(tmp_path / "item" / ".data" / "transcript")
+        assert base == str(tmp_path / "item" / "transcript")
 
-    def test_omitting_output_uses_the_source_folder_as_the_item(self, tmp_path):
+    def test_omitting_output_uses_the_source_folder_when_it_is_in_the_workspace(
+        self, tmp_path, monkeypatch
+    ):
+        """A source INSIDE the workspace keeps its own folder (routing rule)."""
+        monkeypatch.setenv("ZOOMBIE_WORKSPACE_ROOT", str(tmp_path))
         source = tmp_path / "audio.wav"
         assert stt.item_dir_for(None, str(source)) == str(tmp_path)
-        assert stt.resolve_output_base(str(source), None) == str(
-            tmp_path / ".data" / "transcript"
-        )
+        assert stt.resolve_output_base(str(source), None) == str(tmp_path / "transcript")
 
     def test_a_trailing_separator_names_the_same_item(self, tmp_path):
         """``C:\\ws\\item`` and ``C:\\ws\\item\\`` must resolve to one folder."""
@@ -292,8 +292,8 @@ class TestItemLayout:
         base = stt.resolve_output_base(str(tmp_path / "audio.wav"), str(tmp_path / "item"))
         assert base == stt.transcript_base(str(tmp_path / "item"))
 
-    def test_both_item_dir_and_output_base_write_under_data(self, tmp_path, monkeypatch):
-        """Both fields set: the artifacts go to ``<item>/.data/``, not flat.
+    def test_both_item_dir_and_output_base_write_into_the_folder(self, tmp_path, monkeypatch):
+        """Both fields set: the artifacts go into the destination folder.
 
         Regression for Defect 1. ``pipeline`` and ``transcribe`` pass a correctly
         resolved ``output_base`` AND a non-empty ``item_dir``; the old precedence
@@ -347,21 +347,12 @@ class TestItemLayout:
         )
         report = stt.transcribe(_Env(), request)
 
-        written = tmp_path / "item" / ".data" / "transcript.txt"
-        assert written.is_file(), "the artifact must land under <item>/.data/"
-        flat = tmp_path / "item.txt"
-        assert not flat.exists(), "no artifact may be written flat off the item folder"
-        assert report.output_base == str(item / ".data" / "transcript")
+        written = tmp_path / "item" / "transcript.txt"
+        assert written.is_file(), "the artifact must land in the item folder"
+        assert report.output_base == str(item / "transcript")
 
-    def test_the_reported_output_base_resolves_inside_data(self, tmp_path):
-        """The contract assertion the failing run violated.
-
-        ``Report.to_data()`` emits both ``outputBase`` and ``itemDir``, and on the
-        failing run they were the SAME STRING -- which contradicts the contract that
-        ``outputBase`` must end with ``.data/transcript`` whenever ``itemDir`` is set.
-        The transcribe-video skill tells a caller to read both; comparing them is what
-        would have caught the split, so this test does exactly that comparison.
-        """
+    def test_the_reported_output_base_sits_in_the_item_folder(self, tmp_path):
+        """``Report.to_data()`` echoes both ``outputBase`` and ``itemDir``."""
         item = r"C:\ws\My Item"
         base = stt.resolve_output_base(r"C:\media\audio.wav", item)
         request = stt.Request(audio_path=r"C:\media\audio.wav", output_base=base,
@@ -372,12 +363,7 @@ class TestItemLayout:
         )
         data = report.to_data()
         assert data["itemDir"] == item
-        assert data["outputBase"] != data["itemDir"], (
-            "outputBase must not be the item folder itself; on the failing run it was"
-        )
-        assert os.path.normcase(data["outputBase"]).startswith(
-            os.path.normcase(os.path.join(item, ".data"))
-        )
+        assert data["outputBase"] == os.path.join(item, "transcript")
 
 
 class TestEffectiveOutputBase:
@@ -396,24 +382,24 @@ class TestEffectiveOutputBase:
 
 
 class TestEnsureItemDir:
-    def test_output_named_item_gets_a_data_dir(self, tmp_path):
+    def test_output_named_folder_is_created(self, tmp_path):
         item = tmp_path / "item"
         assert stt.ensure_item_dir(str(item), str(item)) is True
-        assert (item / ".data").is_dir()
+        assert item.is_dir()
 
-    def test_no_output_leaves_the_parent_alone(self, tmp_path):
-        """A bare transcribe must not litter the source's folder with .data/."""
+    def test_no_output_creates_nothing(self, tmp_path):
+        """A bare transcribe must not create a folder the caller did not name."""
         item = tmp_path / "loose"
         assert stt.ensure_item_dir(None, str(item)) is False
-        assert not (item / ".data").exists()
+        assert not item.exists()
 
-    def test_created_data_dir_makes_the_folder_an_item(self, tmp_path):
+    def test_creating_the_folder_does_not_make_it_an_item(self, tmp_path):
+        """Only a summary.md makes an item now -- an empty folder is not one."""
         from zoombie.item import paths as item_paths
 
         item = tmp_path / "item"
-        assert not item_paths.is_item(str(item))
         stt.ensure_item_dir(str(item), str(item))
-        assert item_paths.is_item(str(item))
+        assert not item_paths.is_item(str(item))
 
 
 class TestScratchAudioHonesty:
@@ -470,10 +456,9 @@ class TestTranscribeCommand:
     def test_guard_refuses_before_any_work(self, tmp_path, monkeypatch):
         source = tmp_path / "input.wav"
         source.write_bytes(b"RIFF")
-        # The guard now checks the ITEM layout: -Output names the folder, so an
-        # existing transcript lives at <item>/.data/transcript.txt.
-        (tmp_path / ".data").mkdir()
-        (tmp_path / ".data" / "transcript.txt").write_text("old\n", encoding="utf-8")
+        # -Output names the folder, so an existing transcript lives at
+        # <folder>/transcript.txt.
+        (tmp_path / "transcript.txt").write_text("old\n", encoding="utf-8")
 
         monkeypatch.setattr(
             transcribe_cmd.env_mod, "resolve", lambda *_a, **_k: object()
@@ -491,8 +476,7 @@ class TestTranscribeCommand:
         """The guard checks the WINDOW-qualified base, not the full transcript."""
         source = tmp_path / "input.wav"
         source.write_bytes(b"RIFF")
-        (tmp_path / ".data").mkdir()
-        (tmp_path / ".data" / "transcript.txt").write_text("old\n", encoding="utf-8")
+        (tmp_path / "transcript.txt").write_text("old\n", encoding="utf-8")
 
         seen: dict = {}
 
@@ -531,7 +515,7 @@ class TestTranscribeCommand:
         item = tmp_path / "item"
         transcribe_cmd.run(_args(source=str(source), output=str(item)))
         assert seen["request"].item_dir == str(item)
-        assert os.path.dirname(seen["request"].output_base) == str(item / ".data")
+        assert seen["request"].output_base == str(item / "transcript")
 
     def test_force_reaches_the_request(self, tmp_path, monkeypatch):
         source = tmp_path / "input.wav"
@@ -655,7 +639,7 @@ class TestMissingTranscriptFailure:
         assert "failed to read audio data" in message
         # NO sidecar is written on a failed run: a sidecar describing a transcript
         # that does not exist is the contradiction this fix removes.
-        assert not os.path.isfile(f"{base}.source.json")
+        assert not os.path.isfile(os.path.join(os.path.dirname(base), "source.json"))
         assert not os.path.isfile(f"{base}.txt")
 
     def test_srt_null_with_a_live_sidecar_is_impossible(self, tmp_path, monkeypatch):
@@ -677,7 +661,7 @@ class TestMissingTranscriptFailure:
         base, request = self._base_and_request(tmp_path, source)
         with pytest.raises(StepFailedError):
             stt.transcribe(_env(tmp_path), request)
-        assert not os.path.isfile(f"{base}.source.json")
+        assert not os.path.isfile(os.path.join(os.path.dirname(base), "source.json"))
 
     def test_pipeline_with_a_wav_is_unaffected_by_the_refusal(self, tmp_path, monkeypatch):
         """``pipeline`` extracts a WAV, so the video refusal must not fire for it."""

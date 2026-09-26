@@ -1,6 +1,6 @@
 """Small file primitives every command shares.
 
-Extracted so ``items``, ``index``, ``migrate`` and ``postprocess`` cannot drift in
+Extracted so ``items``, ``summarize`` and ``postprocess`` cannot drift in
 how they read a document: the encoding, the BOM tolerance and the line endings are
 decided once here rather than re-chosen at each call site.
 

@@ -7,8 +7,8 @@ issued means the payload is stale - re-issue the command rather than reading it.
 
 ### `data.next` - the recommended next step
 
-The pipeline commands (`slides`, `readimages`, `readpdf`, `postprocess`) add one
-key *inside* `data`:
+The pipeline commands (`slides`, `readimages`, `readpdf`, `postprocess`) and every
+`summarize` step add one key *inside* `data`:
 
 ```
 data.next = { command, args, why, attach: [...], budget: { images, bytes } }
@@ -31,3 +31,13 @@ data.next = { command, args, why, attach: [...], budget: { images, bytes } }
 `attach_limit: N` raises the cap for a deliberately small set; it is a transport
 guarantee, so `force` does not bypass it. Reaching more than 8 means NARROWING
 the request (e.g. `slides` with explicit `times`), not raising the cap.
+
+### `summarize` - the step machine
+
+`summarize` is called once per step, and each result's `data.next` names the next
+`step`. Carry the `run` value forward: it is the run scratch path, and it is the
+whole session state. Steps run in order - `source`, `name`, `slides`, `prose`,
+`verify` - and an out-of-order call is refused. `data.archived` on the `prose`
+step means a previous `summary.md` was renamed to `summary_<yyyyMMdd_HHmm>.md`;
+report that path to the user. `verify` deletes the run scratch on success, so
+after it only `summary.md`, the kept media and `img/` remain.

@@ -3,14 +3,8 @@
 This is the *only* sanctioned way to ask "what summaries exist here?". The point is
 token economy: an agent that lists directories and opens each ``summary.md`` to
 learn what it holds spends thousands of tokens to find out that three items exist.
-One call returns the same facts -- number, date, title, whether a summary,
-transcript, source or images are present, and what number the next item takes --
-in a single JSON line.
-
-It is also the resolution of a contradiction in the previous inputs: the
-``library`` module documented that a skill calls :func:`scan_library` directly,
-while the summarize skill forbade hand-assembling a Python command. Now there is a
-command to call, so neither text has to be wrong.
+One call returns the same facts -- title, whether a summary, source or images are
+present, and what number the next item takes -- in a single JSON line.
 
 **Read-only, always.** Nothing here writes, creates or renames: the naming verdict
 is a *measurement* (:mod:`zoombie.item.registry`) and the proposal is a

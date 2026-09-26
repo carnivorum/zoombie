@@ -121,8 +121,8 @@ scripts/
     mcp.py                      the MCP facade over the same command modules
     commands/
       doctor.py  download.py  extract.py  readpdf.py
-      transcribe.py  pipeline.py  clean.py
-      postprocess.py  verify.py  library.py (zoombie index)
+      transcribe.py  pipeline.py  summarize.py (the step machine)  clean.py
+      postprocess.py  verify.py  items.py
       slides.py (video -> slide frames)  readimages.py (images -> Markdown)
       unpack.py (installer/archive -> files)  modes.py  mcp.py (register tooling)
     lib/
@@ -156,12 +156,8 @@ scripts/
       syncfiles.py  apply the hash plan: write changed/missing, remove remote-missing
 tests/                          unit tests (python -m pytest tests)
 skills/
-  zoombie-download-video/SKILL.md     thin wrapper -> zoombie download
-  zoombie-extract-audio/SKILL.md      thin wrapper -> zoombie extract
-  zoombie-transcribe-audio/SKILL.md   thin wrapper -> zoombie transcribe
-  zoombie-transcribe-video/SKILL.md   thin wrapper -> zoombie pipeline
-  zoombie-images-to-md/SKILL.md       thin wrapper -> zoombie readpdf / readimages
-  zoombie-summarize/SKILL.md          writes summary.md -> zoombie postprocess / index
+  zoombie-summarize/SKILL.md          the ONE skill: drives the summarize step machine
+  _shared/                            include bodies expanded at deploy time
 ```
 
 The installed toolchain lives outside the repo, at an ASCII path:
@@ -319,9 +315,9 @@ $zoombie = @(
 & $zoombie readimages -Source "<image-or-dir>" -Output "<basename>" [-Ocr] [-Lang eng] [-ImageDir "<dir>"]
 & $zoombie slides -Source "<video>" -Output "<item-dir>" [-Times "00:01:00,00:05:30"] [-TimesFile "<path>"] [-Srt "<file>"] [-Scale N] [-MinSlideSec S] [-HashDistance N]
 & $zoombie pipeline -Source "<url-or-file>" -Output "<item-folder>" [-DownloadDir "<dir>"] [-NoSrt]
+& $zoombie summarize -Source "<url-or-file>"              # step 0 of the front door; follow data.next
 & $zoombie postprocess -Md "<summary.md>" [-Srt "<file>"] [-ImageDir "<dir>"] [-Apply]   # anchors, timestamps, index, images
 & $zoombie verify   -Dir "<library-root>" [-Recurse] [-Json]                               # exit 1 on problems
-& $zoombie index    -Dir "<library-root>" [-Output "<path>"] [-Json] [-Apply]             # regenerate README.md
 & $zoombie clean                                          # remove per-job scratch dirs
 & $zoombie clean -CleanScratch                            # sweep all toolchain scratch (a killed run's leftover)
 ```
@@ -337,29 +333,27 @@ so the CLI is comfortable from a non-Windows-style invocation too.
 
 Two commands are **dry run by default** and write ONLY with `-Apply`, because a
 skill calls them and must never be able to corrupt a document by accident:
-`postprocess` and `index`.
+`postprocess`.
 
-### Transcription output: into the item's `.data/`
+### Transcription output: into the destination folder
 
-`-Output` on `transcribe` and `pipeline` names the **item folder**, not a
-basename. The artifacts always land in that folder's `.data/` subdirectory —
-`transcript.txt`, `transcript.srt` and `source.json` — which is the documented
-item layout. Nothing derived is written at the item root, and (for `pipeline`) the
-retained media sits at the item root beside `summary.md`. Omitting `-Output`
-defaults the item to the source file's own folder.
+`-Output` on `transcribe` and `pipeline` names a **destination folder**, not a
+basename; the artifacts (`transcript.txt`, `transcript.srt`, `source.json`) land
+directly in it. In the summarize flow that folder is the run scratch, so the
+artifacts are throwaway; a bare `transcribe` writes them where the user named.
 
 `transcribe` and `pipeline` emit subtitles **by default**:
 
 | Flag | Effect |
 |------|--------|
-| *(none)* | `.data/transcript.srt` is written beside the transcript |
+| *(none)* | `transcript.srt` is written beside the transcript |
 | `-NoSrt` | suppress the `.srt` (the timings are then lost) |
 | `-Srt` | **legacy no-op alias**, kept so existing callers keep working — it can never remove the default |
 
-Every run also writes a `.data/source.json` origin sidecar recording where the
-input came from. `pipeline` exposes no `-Format`: its audio is always a 16 kHz
-mono WAV, which is the only thing whisper.cpp consumes. `-Format` lives on
-`download` and `extract`, where it is honoured.
+Every run also writes a `source.json` origin sidecar recording where the input
+came from. `pipeline` exposes no `-Format`: its audio is always a 16 kHz mono WAV,
+which is the only thing whisper.cpp consumes. `-Format` lives on `download` and
+`extract`, where it is honoured.
 
 ### `readpdf`: images and their sidecar
 
@@ -545,14 +539,14 @@ installed skill is self-contained and an agent never resolves an include at
 runtime. The action is decided by comparing the expanded text, so editing a
 shared block redeploys without a version bump.
 
+There is exactly **one** skill, `zoombie-summarize`. The individual stages —
+download, extract, transcribe, PDF/image → Markdown — survive as **MCP-only
+tools**, and the summarize flow drives them for you, so an agent never chains
+skills by hand.
+
 | Skill | Produces |
 |-------|----------|
-| `zoombie-download-video` | a video (or its audio) via `zoombie download` |
-| `zoombie-extract-audio` | a whisper-ready WAV via `zoombie extract` |
-| `zoombie-transcribe-audio` | a transcript (+ SRT) via `zoombie transcribe` |
-| `zoombie-transcribe-video` | the whole chain via `zoombie pipeline` |
-| `zoombie-images-to-md` | Markdown (+ images) via `zoombie readpdf` / `zoombie readimages` |
-| `zoombie-summarize` | a 6-block `summary.md` in an item folder — the **front door**: for a raw video/audio/PDF/images it produces the source material itself, so one skill answers "make me a document" |
+| `zoombie-summarize` | a 6-block `summary.md` — the **front door** and the only skill: a step machine (`source` → `name` → `slides` → `prose` → `verify`) that downloads/transcribes/renders a raw source itself, splits the verbatim block-6 copy from the transcript, archives any existing summary, and verifies the result |
 
 `zoombie-images-to-md` converts a PDF, a loose image, or a folder of images to
 Markdown. **A text PDF is read directly and costs nothing** — only a page with no
@@ -573,34 +567,29 @@ the user's own choice — it is never parsed — laid out as:
 <item>/                  any name
     summary.md           the document, at the root
     <source media>       the video/audio/PDF, when kept
-    .data/               everything derived
-        img/             figures + manifest.json + README.md
-        transcript.txt, transcript.srt, source.json, item.json
+    img/                 the figures the document inlines (VISIBLE)
 ```
 
-The item's `number`, `date` and `title` live in `.data/item.json`, not in the
-folder name, so a library can use whatever naming its owner prefers. `zoombie
-items` measures that naming and reports what the directory already does — the
-convention, its confidence, the sample count and the next number — so naming a new
-item follows the directory's own convention and falls back to
-`<DD.MM.YYYY> - <title>` only when there is no evidence. Block 6 is a **verbatim
-copy** of the source with recognition artefacts cleaned out, not a recap, and its
-heading says so. `zoombie migrate` moves a pre-item library onto the layout, dry
-run by default.
+Only those three things survive a run. The transcript, the `.srt`, the origin
+sidecar and the OCR report are throwaway: they live in a run scratch under the
+workspace `/.tmp/zoombie-summarize/<run>/` and are deleted at the verify step.
+An existing `summary.md` is never destroyed — it is archived to
+`summary_<yyyyMMdd_HHmm>.md` and the path reported. The title is the document's
+own H1. `zoombie items` measures the directory's naming and reports the convention,
+its confidence and the next number, so a new name follows the directory's own
+convention and falls back to `<DD.MM.YYYY> - <title>` only with no evidence. Block
+6 is a **verbatim copy** of the source with recognition artefacts cleaned out, not
+a recap, and its heading says so.
 
 It writes the prose itself; everything mechanical -- anchors, heading timestamps
 from the SRT, the regenerated block-4 index, link repair and inline-image
-re-insertion -- is done by `zoombie postprocess`, so a re-run cannot drift. It
-offers to reindex the whole library with `zoombie index`, which rebuilds the
-library `README.md` from the same deterministic scan the `items` command uses.
+re-insertion -- is done by `zoombie postprocess`, so a re-run cannot drift.
 
 | Command | Does |
 |---------|------|
 | `zoombie items` | scan a workspace for items; one JSON line, read-only |
 | `zoombie items -Depth N` | how many levels below the root to search; `1` is the default |
 | `zoombie items -Recurse` | alias for `-Depth 2`: also look inside non-item subfolders |
-| `zoombie index` | render the library `README.md` from the same scan |
-| `zoombie migrate` | move a library onto the `.data/` item layout |
 | `zoombie postprocess` | the mechanical passes over a `summary.md` |
 | `zoombie verify` | self-check a tree; advisories are reported but do not fail it |
 

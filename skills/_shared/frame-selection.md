@@ -30,9 +30,9 @@ The loop is: **run `slides`, look, decide, re-run `slides` with your verdict.**
 
 ### The tool owns every file — you only name frames
 
-**Never delete, move, rename, copy or hand-edit anything under `.data/`, and never
-edit `manifest.json` or the frames yourself.** Naming a frame in `keep`/`drop` is
-the ONLY way you may influence which frames exist: the tool applies the selection,
-prunes the dropped frames and rewrites the manifest. A frame path is never a valid
-`keep`/`drop` value. If a previous run confuses you, re-run `slides` with a
-corrected selection — do not "clean up" the directory.
+**Never delete, move, rename, copy or hand-edit anything under the run scratch
+`img/`, and never edit `manifest.json` or the frames yourself.** Naming a frame in
+`keep`/`drop` is the ONLY way you may influence which frames exist: the tool
+applies the selection, prunes the dropped frames and rewrites the manifest. A
+frame path is never a valid `keep`/`drop` value. If a previous run confuses you,
+re-run `slides` with a corrected selection — do not "clean up" the directory.

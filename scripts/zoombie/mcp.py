@@ -96,20 +96,21 @@ TOOL_COMMANDS: dict[str, str] = {
     "readpdf": "readpdf",
     "readimages": "readimages",
     "slides": "slides",
+    "summarize": "summarize",
     "postprocess": "postprocess",
     "verify": "verify",
-    "index": "library",
     "items": "items",
-    "migrate": "migrate",
     "modes": "modes",
     "mcp": "mcp",
 }
 
 # The stages that may block for a long time are the ones ``start``/``status``/
 # ``result`` exists for. A short, read-only verb is executed inline by
-# ``tools/call`` so a client does not have to poll to learn "no".
+# ``tools/call`` so a client does not have to poll to learn "no". ``summarize`` is
+# LONG because its source step can download AND transcribe in one call.
 LONG_TOOLS = frozenset(
-    {"pipeline", "transcribe", "download", "slides", "readpdf", "extract", "unpack"}
+    {"pipeline", "transcribe", "download", "slides", "readpdf", "extract", "unpack",
+     "summarize"}
 )
 
 # How many attachable images a single ``tools/call`` may return as image blocks.
@@ -150,9 +151,12 @@ KNOWN_OPTIONS: dict[str, dict] = {
         "report": "str", "apply": "bool",
     },
     "verify": {"dir": "str", "recurse": "bool", "json": "bool"},
-    "index": {"dir": "str", "output": "str", "json": "bool", "apply": "bool"},
+    "summarize": {
+        "step": "str", "run": "str", "name": "str", "slides": "str", "times": "str",
+        "title": "str", "summary_text": "str", "criticism": "str", "sections": "str",
+        "no_media": "bool", "language": "str",
+    },
     "items": {"root": "str", "depth": "int", "recurse": "bool", "json": "bool", "title": "str", "date": "str"},
-    "migrate": {"dir": "str", "json": "bool", "apply": "bool"},
     "modes": {"target": "str", "check": "bool", "apply": "bool"},
     "mcp": {"target": "str", "check": "bool", "apply": "bool"},
     "clean": {"work_root": "str", "clean_scratch": "bool"},
@@ -169,6 +173,10 @@ KNOWN_OPTIONS: dict[str, dict] = {
 OPTION_FLAGS: dict[str, dict[str, str]] = {
     "transcribe": {"from_time": "from", "to_time": "to"},
     "pipeline": {"from_time": "from", "to_time": "to"},
+    # ``-SummaryText`` is the block-3 text; its argparse destination is
+    # ``summary_text``, which the underscore-to-dash rule would wrongly turn into
+    # ``--summary-text``. The other summarize keys follow the generic rule.
+    "summarize": {"summary_text": "summary-text"},
 }
 
 
@@ -584,7 +592,7 @@ def tool_result(command: str, outcome, cap: int = IMAGE_ATTACH_CAP) -> dict:
                     "which frames are worth keeping, then re-run this tool with "
                     "keep:\"<ids or timestamps>\" (or drop:\"...\"). Name frames by "
                     "their id (fNNN) or timestamp -- never a file path: do NOT delete, "
-                    "move, rename or hand-edit anything under .data/. The tool applies "
+                    "move, rename or hand-edit anything under img/. The tool applies "
                     "the selection, prunes the dropped frames and rewrites the "
                     "manifest itself."
                 ),
@@ -675,11 +683,37 @@ def tool_schemas() -> list[dict]:
             },
             ["source"],
         ),
+        schema(
+            "summarize",
+            (
+                "Produce a summary.md step by step - the FRONT DOOR. Call once per step "
+                "and follow data.next: source (summarize a URL or path; produces the "
+                "source material), name (confirm the folder name; slides is a SEPARATE "
+                "question), slides (optional frames), prose (your title, summary, "
+                "optional criticism and section headings; the backend assembles block 6 "
+                "and archives any existing summary), verify (gate the tree and delete "
+                "the run scratch). Args: step, run (from the previous step), source, "
+                "name, slides, times, title, summary_text, criticism, sections."
+            ),
+            {
+                "source": {"type": "string", "description": "source file or URL (step source)"},
+                "step": {"type": "string", "enum": ["source", "name", "slides", "prose", "verify"]},
+                "run": {"type": "string", "description": "the run scratch path from the previous step"},
+                "name": {"type": "string", "description": "the confirmed folder name (step name)"},
+                "slides": {"type": "string", "description": "true/false: extract slide frames? (step slides)"},
+                "times": {"type": "string", "description": "exact slide timestamps"},
+                "title": {"type": "string", "description": "the document title (step prose)"},
+                "summary_text": {"type": "string", "description": "the short summary, block 3"},
+                "criticism": {"type": "string", "description": "optional criticism sub-block"},
+                "sections": {"type": "string", "description": "JSON array of {heading, at} topic-change sections for block 6"},
+                "no_media": {"type": "boolean", "description": "do not keep the source media in the item"},
+                "language": {"type": "string"},
+            },
+            [],
+        ),
         schema("postprocess", "Assign anchors, timestamps, index and images in a summary.md (dry run unless apply=true).", {"md": {"type": "string"}, "dir": {"type": "string"}, "recurse": {"type": "boolean"}, "srt": {"type": "string"}, "image_dir": {"type": "string"}, "report": {"type": "string"}, "apply": {"type": "boolean"}, "attach_limit": {"type": "integer"}}, []),
         schema("verify", "Check a produced summary tree (exit 1 on problems).", {"dir": {"type": "string"}, "recurse": {"type": "boolean"}, "json": {"type": "boolean"}}, []),
-        schema("index", "Regenerate the README.md index of a library (dry run unless apply=true).", {"dir": {"type": "string"}, "output": {"type": "string"}, "json": {"type": "boolean"}, "apply": {"type": "boolean"}}, ["dir"]),
         schema("items", "Scan a workspace for items and report them compactly.", {"root": {"type": "string"}, "depth": {"type": "integer"}, "recurse": {"type": "boolean"}, "json": {"type": "boolean"}}, []),
-        schema("migrate", "Move a library onto the .data/ item layout (dry run unless apply=true).", {"dir": {"type": "string"}, "json": {"type": "boolean"}, "apply": {"type": "boolean"}}, ["dir"]),
         schema("modes", "Deploy the Zoombie role into the global custom modes (dry run unless apply=true).", {"target": {"type": "string"}, "check": {"type": "boolean"}, "apply": {"type": "boolean"}, "force": {"type": "boolean"}}, []),
         schema("mcp", "Register the zoombie MCP server in the client's global MCP settings (dry run unless apply=true).", {"target": {"type": "string"}, "check": {"type": "boolean"}, "apply": {"type": "boolean"}, "force": {"type": "boolean"}}, []),
     ]
@@ -858,70 +892,47 @@ def _read_json(path: str) -> dict | None:
 
 
 def facet_next(item: str) -> dict:
-    """``zoombie.facets.next``: the pipeline position of an item.
+    """``zoombie.facets.next``: what to do next with an item.
 
-    Reads the item's own artifacts -- ``.data/ocr.json`` (the OCR text D writes)
-    and a placement ``manifest.json`` -- and pivots them through
-    :func:`zoombie.lib.next.build`, so the recommendation and its cap come from the
-    SAME code the CLI uses. It re-diagnoses nothing.
+    An item is recognized by its ``summary.md``; its figures live in the visible
+    ``img/``. This facet reports what is there and, through
+    :func:`zoombie.lib.next.build`, what the next step is -- reusing the ONE cap in
+    the codebase rather than inventing a second.
     """
     if not item:
         raise ValueError("facets.next requires an item path")
     root = paths.absolute(item)
     if not paths.is_dir(root):
         raise ValueError(f"item not found: {root}")
-    if not item_paths.is_item(root):
-        raise ValueError(f"not an item folder (no .data/): {root}")
 
-    data_dir = item_paths.data_dir(root)
-    ocr_block = _read_json(os.path.join(data_dir, "ocr.json"))
     image_dir = item_paths.image_dir(root)
-    manifest = _read_json(os.path.join(image_dir, "manifest.json"))
-
-    # ``.png`` only: the reading copies live in their own subdirectory, so they are
-    # invisible to this enumeration -- the frame list is unchanged by plan §12.
     frames = [entry for entry in paths.list_dir(image_dir, files=True)
               if entry.name.lower().endswith(".png")]
-    names = {entry.name for entry in frames}
-    # A compressed reading copy for a frame, when a run wrote one: advertised as the
-    # path and the budget size, so this facet over-reports nothing (plan §9/§12).
-    copies = reading.index_copies(reading.reading_dir(image_dir))
-    attachable: list[dict] = []
-    for name in sorted(names):
-        full = os.path.join(image_dir, name)
-        copy_path = copies.get(paths.without_extension(name))
-        if copy_path:
-            attachable.append({
-                "file": name, "path": copy_path,
-                "bytes": paths.file_size(copy_path),
-            })
-        else:
-            attachable.append({"file": name, "path": full, "bytes": paths.file_size(full)})
+    attachable = [
+        {"file": entry.name, "path": entry.path, "bytes": paths.file_size(entry.path)}
+        for entry in sorted(frames, key=lambda item: item.name)
+    ]
 
-    text_written = bool(ocr_block and ocr_block.get("used"))
+    has_summary = paths.is_file(item_paths.summary_path(root))
+    is_item = item_paths.is_item(root)
     block = next_mod.build(
         "postprocess",
-        {"-Md": os.path.join(root, "summary.md")},
+        {"-Md": item_paths.summary_path(root)} if has_summary else None,
         why=(
-            "the item has frames and (possibly) OCR text; write block-6 prose, then "
-            "run postprocess -Apply to inline the chosen figures"
+            "the item has figures; run postprocess -Apply to (re)inline them"
             if attachable else
-            "the item has no extracted frames under .data/img; run slides or readpdf "
-            "to produce them first"
+            "this folder is not an item yet; start a summarize run to produce one"
+            if not is_item else
+            "the item has no figures under img/"
         ),
         attachable=attachable,
         args_capped=len(attachable) > IMAGE_ATTACH_CAP,
     )
     return {
         "item": root,
-        "hasSummary": paths.is_file(os.path.join(root, "summary.md")),
-        "hasTranscript": paths.is_file(os.path.join(data_dir, "transcript.txt")),
-        "ocr": {
-            "artifact": os.path.join(data_dir, "ocr.json") if ocr_block else None,
-            "used": text_written,
-            "frames": len(ocr_block.get("frames", [])) if isinstance(ocr_block, dict) else 0,
-        },
-        "images": {"dir": image_dir, "count": len(attachable), "manifest": bool(manifest)},
+        "isItem": is_item,
+        "hasSummary": has_summary,
+        "images": {"dir": image_dir, "count": len(attachable)},
         "next": block,
         "asciiSafe": True,
     }

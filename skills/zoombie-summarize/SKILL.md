@@ -1,247 +1,142 @@
 ---
 name: zoombie-summarize
-cvrm-zoombie-version: 5.2.0
-description: Turn a source into a readable 6-block summary.md inside an item folder - the FRONT DOOR for any document. Accepts existing SOURCE material (a transcript, a PDF-derived Markdown, or text) OR a raw source (a video, an audio recording, a PDF, or images), producing the transcript or rendering itself before it writes the document. Use when the user wants a summary, notes, a digest, a write-up, or a readable document, from a raw recording or PDF as much as from material already on disk - you never have to chain skills. You write the prose yourself; the mechanical passes (anchors, heading timestamps from the SRT, the regenerated table of contents, link encoding, image re-insertion) are done by zoombie postprocess, so a re-run cannot drift.
+cvrm-zoombie-version: 6.0.0
+description: Produce a readable summary.md from any source - a video or audio recording, a URL, a PDF, or images - the FRONT DOOR for a document. Use when the user asks to summarize, make notes, a digest, a write-up, or a readable document from a recording or a file. One guided flow walks you from the source to the finished document - you supply the name, the title, the short summary and the topic headings, and the backend produces the transcript, splits it into the verbatim source copy, archives any existing summary, and verifies the result. Never hand-assemble ffmpeg, whisper or yt-dlp commands.
 ---
 
 # Skill: zoombie-summarize
 
-The **front door**: reach for it when the user wants a readable document. It turns
-source material (`.txt`, `.srt`, `.md`, images) into a DOCUMENT, and when that
-material does not exist yet it **produces it first** (step 3), so the user never
-chains skills by hand. The other five still work standalone for the source itself.
+The **front door** for a document, and the ONLY skill. It drives a stepwise
+`summarize` MCP tool: you call one step, it returns `data.next` naming the next
+step, and so on until `summary.md` exists and is verified.
 
-**You write the prose. You never hand-edit the mechanical parts.** Anchors,
-heading timestamps, the block-4 contents, percent-encoding and image placement
-are produced by the deterministic CLI. Editing them by hand is what makes a
-second run drift, and the CLI's byte-idempotency guarantee exists precisely so
-that re-running it is safe.
+**You supply choices and prose; the tool assembles the document.** You never
+retype the source text and never hand-edit the mechanical parts (anchors,
+timestamps, the block-4 contents, link encoding, image placement).
 
-## The 6-block contract
+## The document
 
-A `summary.md` is exactly six `##` sections, numbered:
+A `summary.md` is exactly six `##` sections, numbered; the passes address them by
+NUMBER, so the titles may be in any language:
 
 | # | Block | Who owns it |
 |---|-------|-------------|
-| 1 | Title | you (the heading and a line of framing) |
-| 2 | Source / provenance | you, linking the source artifact |
-| 3 | Short summary | you, optionally ending with a criticism sub-block |
-| 4 | Table of contents | **the CLI** — regenerated every run |
-| 5 | Related articles | you + the CLI's link repair |
-| 6 | **The source text, verbatim** (a copy, not a recap), with `###` subheadings | you write the headings and prose; **the CLI adds the anchors and timestamps** |
+| 1 | Title | you (the H1) |
+| 2 | Source / provenance | the tool (the media or origin link) |
+| 3 | Short summary | you, optionally ending with a `***Criticism***` sub-block |
+| 4 | Table of contents | **the tool** |
+| 5 | Related articles | you (may be empty) |
+| 6 | The source text, verbatim | you name the headings; **the tool splits the transcript and adds anchors + timestamps** |
 
-**Block 6 is a COPY of the source, not a summary of it** — the source text with
-recognition artefacts cleaned out (filler, duplicated cues, machine noise), and
-nothing condensed, paraphrased or re-ordered. A reader must be able to treat it as
-the source.
+Block 6 is a COPY of the source, not a recap; its heading must say so (the
+`## 6. ...` line the tool writes already does). The tool writes and runs
+`postprocess` for you, so the numbering, block 4 and the figures are correct.
 
-**The heading must SAY so**, because nothing else in the file does: a task on
-another machine read block 6 as a recap precisely because the heading gave no
-signal. Name the copy, in the document's language — e.g. `## 6. Полный текст
-источника (копия, очищенная от артефактов распознавания)`, or in English
-`## 6. Source text - verbatim copy, cleaned of recognition artifacts`. `verify`
-reports a heading that does not declare itself a copy.
+## The flow
 
-**The passes address sections by NUMBER, not by title** (`## 4.` is matched as
-`^##\s*4\.`), so a title in any language is safe. The numbering is what must
-survive; the Russian titles below are the repo's test convention:
+Call the `summarize` MCP tool once per step and follow `data.next`:
 
-```
-# <title>
+| Step | Call | You do |
+|------|------|--------|
+| source | `summarize {source: "<url-or-path>"}` | nothing; the tool downloads/transcribes/renders into a run scratch and proposes a name |
+| name | `summarize {step:"name", run, name}` | **ask the user** the name (below) |
+| slides | `summarize {step:"slides", run, slides, times}` | **ask the user** the slides question (below) |
+| prose | `summarize {step:"prose", run, title, summary_text, criticism, sections}` | write the title, the short summary, an optional criticism, and the topic headings |
+| verify | `summarize {step:"verify", run}` | nothing; the tool gates the tree and deletes the run scratch |
 
-## 1. Титул
-## 2. Источник
-## 3. Краткое содержание
-<the summary>
+`source` names a URL or a file. For a source that is ALREADY INSIDE the
+workspace (see the destination rule below) there is no name question: the
+destination is the source's own folder, so go straight to `slides`.
 
-***Критика***
-<one line per flaw>
+## The two questions, asked SEPARATELY
 
-## 4. Содержание
-## 5. Связанные статьи
-## 6. Полный текст источника (копия, очищенная от артефактов распознавания)
-```
+Ask **one** question, let the user answer, then ask the next. Never present a
+combined four-way question.
 
-### The criticism sub-block (block 3)
+1. **The name.** The tool returns `data.proposed`. Offer it as the default and
+   let the user accept it or supply their own; a name the user TYPES wins. Pass
+   the answer as `name`.
+2. **Slides** (video only, and only when a `###`-per-topic copy is wanted for a
+   slide deck). Ask whether to extract slide frames; if the user has exact
+   timestamps, pass them as `times`. Answer with `slides: "true"` or `"false"`.
 
-Block 3 may end with a criticism sub-block: the flaws worth flagging in the source
-— an unsupported claim, a stale figure, a one-sided framing.
+## Where the output goes
 
-**Bold-italic text, NOT a heading.** `assign_anchors` numbers every heading from
-`###` down, so a `####` would consume an `s-N` that nothing links to and `verify`
-fails on a dangling anchor. Form: a lone `***Criticism***` (or `***Критика***`)
-line, blank line either side, one line per flaw.
+The tool decides, and reports it as `data.destination` / `data.itemDir`:
 
-It is **optional and often absent.** Include it only when there is something
-material to say; when the source is sound, omit it.
+- a source **inside the workspace** -> `summary.md` lands LITERALLY beside the
+  media, in the source's own folder, whose name is unchanged;
+- a URL, or a file **outside** the workspace -> `<workspace>/_unsorted/summaries/<name>/`.
 
-### Slides (video sources only): ask first
+A finished item holds only `summary.md`, the kept media, and a visible **`img/`**
+folder holding exactly the figures the document inlines. Everything else (the
+transcript, the `.srt`, the origin sidecar, the OCR report, the manifest,
+reading copies) is throwaway in a run scratch dir and is deleted at `verify`.
 
-For a **video** source, ask before anything expensive: (1) "should I also try to
-extract slides?"; (2) if yes, "do you have exact timestamps?" — **yes** runs the
-`slides` tool with `times: "..."` (one frame each, the minimal set), **no** runs
-`slides` in auto-detect mode, which PROPOSES frames. `postprocess` with
-`apply: true` then embeds them. Frames land in `.data/img/`; stage any scratch
-under the workspace `/.tmp/`.
+## Never destroy an existing summary
 
-`slides` **promotes, never drops on text**: every stable run keeps ≥1 frame, so an
-image-only slide is never lost; `data.images.skippedReasons` names the structural
-and duplicate drops. OCR runs **once per run** into **`<item>/.data/ocr.json`**
-(`data.ocr.artifact`) — score usefulness from that text, not from char count.
-
-<!-- zoombie:include frame-selection -->
-<!-- /zoombie:include -->
-
-**Block-6 convention:** the heading is led by the **narration** under each `###`
-(`anchor_text`, the placement anchor) plus `timeSec` for the stamp.
-
-**Read the kept frames with your OWN vision — OCR cannot read a chart for you.**
-Open each path in `data.visionFrames` (the compressed reading copy) and write what
-the slide SAYS — title, bullets, table — into the block-6 **body**. The heading
-stays led by the narration (so the anchor resolves); the slide's content goes in
-the body.
-
-### Block-6 subsections: on TOPIC CHANGE, not one per slide
-
-A `###` is a **topic boundary in the narration**, not a slide boundary (one per
-slide gave 124 headings for a 96-slide deck). **Block 4 indexes level-3 headings
-only**; every heading still gets its `s-N` anchor and stamp, but `####`-and-deeper
-stay out of the contents. Use `####` for a sub-point within a topic.
-
-### What `postprocess` does to that skeleton
-
-1. Numbers every `###`-and-deeper block-6 heading and prefixes `<a id="s-N"></a>`.
-2. Stamps each heading `HH:MM:SS — ` from the sibling SRT. A manifest's `timeSec`
-   is used **only when heading count == image count**; on a mismatch the ordinal
-   association is refused (it would shift every stamp) and the SRT search is used.
-3. Regenerates block 4 as an indented index linking `#s-N`, **level-3 only**.
-4. Percent-encodes link destinations and de-brackets link labels.
-5. Re-inserts images from `.data/img/manifest.json`. A figure with a degenerate
-   `anchor_text` (a repeated whisper-loop phrase, or under a 3-word floor) is
-   **not placed** — reported in `data.files[].imagesSkippedDetail`, counted in
-   `skipped`. Do not hand-place it.
-6. Collapses blank runs and ensures exactly one trailing newline.
-
-Each pass works on a *range* rebuilt from the document, never by appending, so
-**a second `apply: true` on an unchanged file leaves it byte-identical.** That is
-the acceptance criterion, and it is why re-running is always safe.
+If the destination already holds a `summary.md`, the tool RENAMES it to
+`summary_<yyyyMMdd_HHmm>.md` (its last-edit time) and reports it in
+`data.archived`. **Tell the user where the previous document went** - do not
+silently continue. Because a long instruction ("summarize X and rewrite the
+criticism as ...") is a deliberate second pass, confirm with the user before
+overwriting.
 
 ## Run this (MCP tool first)
 
 <!-- zoombie:include cli-resolve -->
 <!-- /zoombie:include -->
 
-Call the `postprocess` MCP tool with the target as JSON arguments. The mechanical
-pass is **dry run by default, and `apply: true` is what writes**:
+Call the `summarize` MCP tool with the step's JSON arguments:
 
 ```json
-{"md": "<item>\\summary.md"}
-{"md": "<item>\\summary.md", "apply": true}
-{"dir": "<library>", "apply": true, "recurse": true}
+{"source": "<url-or-path>"}
+{"step": "name", "run": "<run>", "name": "<confirmed-name>"}
+{"step": "slides", "run": "<run>", "slides": "true", "times": "00:01:00,00:05:30"}
+{"step": "prose", "run": "<run>", "title": "<title>", "summary_text": "<short summary>",
+ "sections": "[{\"heading\": \"Вступление\", \"at\": \"first words of the section\"}]"}
+{"step": "verify", "run": "<run>"}
 ```
 
-`srt` and `image_dir` are optional: the default is the item layout, so the sibling
-`.data/transcript.srt` and the `.data/img/` manifest are found for you. Pass them
-only to override.
+CLI fallback only:
+`& $cli summarize -Source "<url-or-path>"`, then `-Step name -Run "<run>" -Name "..."`, etc.
 
-The `index` tool rebuilds the library index from a deterministic scan, and
-`verify` checks a finished tree (exit code 1 on problems: dangling links, missing
-anchors, broken image references):
-
-```json
-{"dir": "<library>"}
-{"dir": "<library>", "apply": true}
-```
-
-CLI fallback only: `& $cli postprocess -Md "<item>\summary.md" -Apply`.
+<!-- zoombie:include repo-fallback -->
+<!-- /zoombie:include -->
 
 <!-- zoombie:include json-contract -->
 <!-- /zoombie:include -->
 
-<!-- zoombie:include scratch-note -->
-<!-- /zoombie:include -->
-
-Read `data` for what changed. Do **not** hand-assemble a Python command.
+Read `data.next` after every call. Do **not** hand-assemble a whisper, ffmpeg or
+yt-dlp command, and do not write `summary.md` yourself.
 
 ## Procedure
 
-1. **Inspect the project** and find the library root and the source artifacts.
-   If the work came from another skill, it named them: `.data/transcript.txt`
-   (wording), `.data/transcript.srt` (timing) and `.data/source.json` (origin)
-   from `transcribe`/`pipeline`, or a `<base>.md` plus an image directory from
-   `readpdf`/`readimages`. For a video you may also have `<item>/.data/img` from
-   `slides` — ask about that below before writing any prose.
-
-2. **Confirm the destination - and MEASURE before you propose.** An item is a
-   folder of ANY name; the name carries no meaning to the toolchain and is never
-   parsed, so you never have to fit a format. Its shape is fixed:
-
-   ```
-   <item>/                  ← any name; the user's choice
-       summary.md           ← the document you write
-       <source media>       ← the video/audio/PDF, when kept
-       .data/               ← derived material, never hand-edited
-           img/             ← figures + manifest.json + README.md
-           transcript.txt, transcript.srt, source.json, item.json
-   ```
-
-   `.data/` is created by `transcribe`/`pipeline` the moment `output` names the
-   item, so a folder that has only been transcribed is already a recognised item.
-   You do not create `.data/`; you write `summary.md` and run `postprocess`.
-
-   Read what the workspace already does instead of imposing a convention:
-
-   ```json
-   {"root": "<target>", "title": "<the item's title>"}
-   ```
-
-   `items` reports the naming convention it MEASURED in that directory, with a
-   confidence and a sample count, and `title` renders concrete name proposals
-   from it. Follow the directory's own convention. With no evidence at all, the
-   recommendation is `<DD.MM.YYYY> - <title>`; say that is the default. Then
-   present the proposals and wait for the user to choose.
-
-   **Use the number you were given.** Copy `nextNumber` from the scan; never
-   invent a number, write `NN`, or silently pick a date.
-
-3. **Produce the source material, if the item has none.** When the user handed you
-   a RAW source (not something already transcribed or rendered), run the producing
-   tool into the item folder you just confirmed, then carry on — one call produces
-   the SOURCE; you still write the prose yourself. Never chain `download`/`extract`
-   by hand: `pipeline` IS that chain.
-   - a video or a URL → `pipeline`; an audio file → `transcribe`;
-   - a PDF → `readpdf` (add `ocr: true`, or `vision: "<dir>"`, only for a scan);
-   - images → `readimages`.
-   Skip this step when the source material ALREADY exists.
-
-4. **Write the prose** for the blocks you own: 1, 2, 3, and the block-6 headings
-   with their content. Put the origin link in block 2 — for a video whose local
-   file was deleted, `<base>.source.json` still carries the URL (its `url` is
-   `null` with a `urlReason` when the only input was a deleted scratch file: say
-   the origin was not durable rather than inventing a link).
-   Block-6 subsections follow **topic change, not slides** — see above.
-
-5. **Run the `postprocess` tool** with the confirmed paths and `apply: true`.
-
-6. **Verify.** Re-read the result and confirm the anchors resolve and block 4
-   indexes what block 6 actually contains.
-
-7. **Offer the reindex**, do not assume it: `index` with `apply: true` rebuilds
-   the library `README.md`. Then offer `verify` as the check.
+1. **Inspect the project** once (workspace layout, where media already lives).
+2. **Start** with `summarize {source}`. Read `data.proposed`, `data.internal` and
+   `data.destination`. If `internal` is true, skip to step 4 (slides).
+3. **Ask the name**, separately, then call `step:"name"`.
+4. **Ask the slides question**, separately, then call `step:"slides"`.
+5. **Write the prose.** Read the source text if you need to (the run scratch has
+   it), then give the tool the title, the short summary, an optional criticism,
+   and the section headings — each with an `at` phrase quoted from the transcript
+   at the point that topic starts. The tool splits block 6 there, so you never
+   paste the body.
+6. **Call `step:"verify"`.** On success the run scratch is removed. Report the
+   `summary.md` path, the `img/` figures, and any `data.archived` path.
 
 ## Rules
 
-- **Never edit what the tool owns.** If anchors, timestamps, contents or image
-  placement are wrong, fix the *input* or the *prose* and re-run `postprocess`.
-  The frame set is the same rule: name frames in `keep`/`drop`, never touch the
-  files (see the frame-selection block above).
-  Hand-patching block 4 or an `<a id>` breaks the idempotency guarantee.
-- **One document per item.** `summary.md`, the kept media, and `.data/`.
-  Everything under `.data/` is a sidecar or derived material — never hand-edit it.
-- **The name is the user's.** Do not rename a folder to satisfy a convention, and
-  do not read meaning from one: the number, date and title live in
-  `.data/item.json`.
-- **Dry run first** when the document exists, so you can show the diff first.
-- **Produce the source once; never re-do it.** If the item has no source material,
-  produce it once into the confirmed item folder (step 3). Do not re-transcribe or
-  re-convert material that ALREADY exists — read it instead.
+- **Never edit what the tool owns.** If an anchor, a timestamp or a figure is
+  wrong, fix the input (the section heading or its `at`) and re-run.
+- **One document per item.** `summary.md`, the kept media, `img/`.
+- **Never overwrite silently.** An existing summary is archived and reported;
+  tell the user.
+- **Produce the source once.** Re-running a step is safe; do not re-do the
+  source material by hand.
+
+<!-- zoombie:include scratch-note -->
+<!-- /zoombie:include -->
+
+<!-- zoombie:include shell-note -->
+<!-- /zoombie:include -->

@@ -115,13 +115,14 @@ class TestWindowNaming:
         assert stt.window_tag(_request(tmp_path, from_time="00:46:30"), 2790.0) == \
             "00-46-30 - end"
 
-    def test_base_stays_inside_data(self, tmp_path):
+    def test_base_stays_inside_the_folder(self, tmp_path):
         item = str(tmp_path / "item")
         base = stt.window_output_base(
             item, _request(tmp_path, from_time="00:46:30", to_time="00:58:00"), 2790.0
         )
-        assert base == str(tmp_path / "item" / ".data" / "transcript - 00-46-30 - 00-58-00")
-        assert os.path.dirname(os.path.dirname(base)) == item
+        assert base == str(tmp_path / "item" / "transcript - 00-46-30 - 00-58-00")
+        # The artifacts sit directly in the destination folder (no ``.data/``).
+        assert os.path.dirname(base) == item
 
 
 class TestTimestampOffsetting:

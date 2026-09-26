@@ -79,11 +79,10 @@ def _retain_source(
 ) -> str | None:
     """Copy the source media to the item root; return where, or ``None``.
 
-    The item contract says the source sits at the item root next to ``summary.md``
-    -- NOT in ``.data/``, which holds derived material only -- so this is addressed
-    at ``item_dir`` directly and is a COPY, not a move: the download directory is
-    still cleaned up afterwards, and a failure to copy must not lose the original
-    while the transcription is already written.
+    The item contract says the source sits at the item root next to ``summary.md``,
+    so this is addressed at ``item_dir`` directly and is a COPY, not a move: the
+    download directory is still cleaned up afterwards, and a failure to copy must
+    not lose the original while the transcription is already written.
 
     Only media the pipeline ITSELF produced (the URL-download path) is copied in.
     A user-supplied local ``-Source`` is NEVER duplicated: the user already owns the
@@ -239,14 +238,12 @@ def run(args) -> Outcome:
     work = paths.new_ascii_dir(work_root)
     audio_out = os.path.join(work, "audio.wav")
 
-    # ``-Output`` names the ITEM folder; the artifacts go to ``<item>/.data/`` and
-    # the retained media to the item root, so both are measured against the budget.
+    # ``-Output`` names the destination folder; the artifacts land in it and the
+    # retained media at its root, so both are measured against the budget.
     item_dir = stt.item_dir_for(args.output, video_path)
     base = stt.resolve_output_base(video_path, args.output)
-    # Create ``<item>/.data/`` now, before the download/ffmpeg work: a bare
-    # transcribe/pipeline run then produces a RECOGNISED item, so ``items``/``index``
-    # see it and the documented "transcribe -> then summarize" order holds. See
-    # :func:`zoombie.lib.stt.ensure_item_dir` for why this is the choice made.
+    # Create the destination folder now, before the download/ffmpeg work, so the
+    # artifacts have somewhere to land.
     stt.ensure_item_dir(args.output, item_dir)
     paths.assert_fits(item_dir, "The pipeline item folder")
     # Room for ``.source.json`` (the longest appended suffix) plus the dot.

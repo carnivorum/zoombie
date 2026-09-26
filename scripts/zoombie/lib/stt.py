@@ -32,6 +32,7 @@ from dataclasses import dataclass, field
 from .. import SKILL_VERSION
 from ..item import paths as item_paths
 from . import cublas, env as env_mod, paths, process, scratch, slides, srt as srt_mod, whisper
+from . import workspace
 from .errors import StepFailedError, ZoombieError
 
 
@@ -71,11 +72,10 @@ class Request:
 
     audio_path: str
     output_base: str
-    # The item folder the artifacts belong to. The stage ALWAYS writes into
-    # ``<item_dir>/.data/`` when this is set, which is what keeps a transcript
-    # beside its siblings rather than flat at the item root. Empty means a direct
-    # programmatic caller that did not name an item, and the flat ``output_base``
-    # is used instead.
+    # The destination folder the artifacts belong to. The stage writes its
+    # artifacts directly into it (they are RUN-LOCAL: a summarize run points this
+    # at its scratch dir and deletes it at the verify step). Empty means a direct
+    # programmatic caller that named no folder, and ``output_base`` is used as-is.
     item_dir: str = ""
     language: str = "auto"
     # Accepted no-op alias for the old -Srt flag: the SRT is written by default
@@ -332,7 +332,7 @@ def window_tag(request: Request, start: float) -> str:
 
 
 def window_output_base(item_dir: str, request: Request, start: float) -> str:
-    """``<item>/.data/transcript - <from> - <to>`` -- the window's base.
+    """``<item>/transcript - <from> - <to>`` -- the window's base.
 
     The artifacts still hang off :func:`transcript_base`, so the item layout and
     the path budget are unchanged; only the suffix is qualified. That is what
@@ -447,8 +447,8 @@ def transcribe(environment: env_mod.Env, request: Request) -> Report:
         raise ZoombieError(f"Work root must be ASCII: {work_root}")
     paths.assert_fits(work_root, "The work root (-WorkRoot)", slack=80)
 
-    # The artifacts land in the item's ``.data/`` directory: ``output_base`` IS
-    # ``<item>/.data/transcript``. The caller resolves that from ``-Output`` (see
+    # The artifacts land in the destination folder: ``output_base`` IS
+    # ``<item>/transcript``. The caller resolves that from ``-Output`` (see
     # :func:`resolve_output_base`).
     #
     # PRECEDENCE lives in :func:`effective_output_base` (``output_base`` wins over
@@ -824,9 +824,7 @@ def transcribe(environment: env_mod.Env, request: Request) -> Report:
     # realtime factor and the device actually used, all of which are only known
     # after the timing block above. Writing before that point recorded
     # ``durationSec``/``realtimeFactor`` as null and the device as the default.
-    report.artifacts["sidecar"] = write_source_sidecar(
-        output_base, request, report, extension_count=len(extensions)
-    )
+    report.artifacts["sidecar"] = write_source_sidecar(output_base, request, report)
     return report
 
 
@@ -925,25 +923,22 @@ def write_source_sidecar(
     output_base: str,
     request: Request,
     report: Report,
-    *,
-    extension_count: int,
 ) -> dict | None:
-    """Write ``<base>.source.json`` beside the artifacts. Best-effort, never fatal.
+    """Write ``source.json`` in the artifact directory. Best-effort, never fatal.
 
-    Same error discipline as :func:`preserve_logs`: a sidecar that cannot be
-    written is a warning, and the transcript stays the deliverable. ``-NoSrt``
-    removes ``.srt`` from ``output_base``'s suffixes, so the length check is
-    computed from the suffixes actually produced rather than a fixed worst case.
+    The sidecar is RUN-LOCAL: it sits beside the transcript in the run scratch
+    (a plain ``source.json``, not a ``<base>.source.json``), where the composition
+    reads it for block 2's origin link and where the scratch sweep removes it with
+    everything else. Same error discipline as :func:`preserve_logs`: a sidecar that
+    cannot be written is a warning, and the transcript stays the deliverable.
     """
     output_dir = os.path.dirname(output_base)
     if output_dir:
         paths.ensure_dir(output_dir)
-    destination = f"{output_base}.source.json"
+    destination = os.path.join(output_dir or ".", item_paths.SOURCE_NAME)
     try:
-        # "..source.json" = 13 characters for the shortest case (TXT + sidecar);
-        # add 4 more for the ".srt" suffix when it is produced.
-        slack = 13 + (0 if extension_count <= 1 else 4)
-        paths.assert_fits(destination, "The origin-metadata sidecar path", slack=slack)
+        # Room for a max-length name beside it in the same directory.
+        paths.assert_fits(destination, "The origin-metadata sidecar path", slack=13)
         with open(paths.to_extended(destination), "w", encoding="utf-8") as handle:
             json.dump(source_metadata(request, report), handle, ensure_ascii=False, indent=2)
             handle.write("\n")
@@ -975,49 +970,37 @@ def preserve_logs(output_base: str, whisper_log: str, retry_log: str) -> str | N
 
 
 def ensure_item_dir(output: str | None, item_dir: str) -> bool:
-    """Create ``<item>/.data/`` when ``-Output`` named an item; return whether.
+    """Create the destination folder when ``-Output`` named one; return whether.
 
-    The ORDERING CONTRADICTION, decided here: three skills document "transcribe ->
-    then summarize", but a correct run created neither ``summary.md`` nor ``.data/``
-    and :func:`zoombie.item.paths.is_item` requires one of the two -- so the folder
-    was unrecognised by ``items``/``index`` until the summary existed, which does not
-    fit the documented order. The choice is to **create ``.data/`` at ``-Output``
-    time**, because:
-
-    * the artifacts are about to be written INTO it, so creating it is not a new
-      side effect, only an earlier one -- the directory was already an inevitability
-      of the run;
-    * recognition then follows the DOCUMENTED order rather than contradicting it, so
-      the three skills need no behaviour inversion;
-    * the alternative (document "``.data/`` appears only after the summary") leaves
-      a correct intermediate state indistinguishable from a folder the user just
-      dropped media into, which is exactly the ambiguity ``is_item`` exists to
-      resolve.
-
-    Only a directory the user explicitly named with ``-Output`` is created; the
-    ``item_dir`` defaulted from the source file's own folder is NOT touched, so a
-    bare transcribe of a loose audio file never litters its parent with a ``.data/``.
+    The artifacts are written directly into the destination now, so the folder
+    must exist before the first write. Only a directory the user explicitly named
+    with ``-Output`` is created here; a destination defaulted from the source
+    file's own folder already exists.
     """
     if not output:
         return False
-    target = item_paths.data_dir(item_dir)
-    paths.assert_fits(target, "The item's .data directory", slack=24)
-    paths.ensure_dir(target)
+    paths.assert_fits(item_dir, "The item directory", slack=24)
+    paths.ensure_dir(item_dir)
     return True
 
 
 def item_dir_for(output: str | None, source: str) -> str:
-    """The item folder a transcription targets.
+    """The destination folder a transcription targets.
 
-    ``-Output`` designates the item folder itself, not a basename: the artifacts
-    are always written under ``<item>/.data/``. :func:`os.path.normpath` settles
-    the spelling -- it drops a trailing separator so ``<ws>\\item`` and
-    ``<ws>\\item\\`` name one folder, while PRESERVING a drive root (``C:\\``),
-    which a naive ``rstrip`` would reduce to a drive-relative ``C:``. An omitted
-    ``-Output`` defaults the item to the source file's own directory -- the natural
-    "summarise this recording where it already lives" case.
+    Routing is :func:`zoombie.lib.workspace.destination_dir`: a source INSIDE the
+    workspace keeps its own folder (the item is the source's folder), and a source
+    outside it lands under ``_unsorted/summaries/<name>/``. An explicit ``-Output``
+    overrides the extrapolated name but never the routing decision, so a caller
+    that names a folder gets that folder. :func:`os.path.normpath` settles the
+    spelling -- it drops a trailing separator while PRESERVING a drive root
+    (``C:\\``), which a naive ``rstrip`` would reduce to a drive-relative ``C:``.
     """
-    chosen = output or os.path.dirname(paths.absolute(source))
+    if output:
+        chosen = output
+    else:
+        chosen, _internal = workspace.destination_dir(
+            source, workspace.KIND_SUMMARIES
+        )
     return os.path.normpath(paths.absolute(chosen))
 
 
@@ -1037,18 +1020,23 @@ def effective_output_base(output_base: str, item_dir: str) -> str:
 
 
 def transcript_base(item_dir: str) -> str:
-    """``<item>/.data/transcript`` -- the fixed base every artifact hangs off."""
-    return item_paths.transcript_path(item_dir, "").rstrip(".")
+    """``<item>/transcript`` -- the base every artifact hangs off.
+
+    A fixed stem, because an item holds one source and a reader must find the
+    transcript without knowing the source name. These artifacts are THROWAWAY
+    (the summary's block 6 is the durable copy), so ``item_dir`` here is the run
+    scratch dir during a summarize, or a plain destination for a bare
+    ``transcribe``.
+    """
+    return os.path.join(item_dir, item_paths.TRANSCRIPT_STEM)
 
 
 def resolve_output_base(source: str, output: str | None) -> str:
     """Resolve the whisper output base for one transcription.
 
-    The base is ALWAYS ``<item>/.data/transcript``: an item's transcript has a
-    fixed name, because the item holds one source and a reader must be able to find
-    it without knowing the source name. The historical flat form (``<base>.txt``
-    beside ``summary.md``) is gone -- it is what scattered a transcript and its
-    ``.srt`` at the item root, out of step with the documented ``.data/`` layout.
+    The base is ALWAYS ``<item>/transcript``: a run's transcript has a fixed name,
+    because the folder holds one source and a reader must find it without knowing
+    the source name.
 
     Derived from :func:`item_dir_for` rather than defaulting separately, so the
     base the overwrite guard checks is exactly the base the artifacts are written

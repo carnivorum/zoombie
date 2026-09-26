@@ -17,7 +17,7 @@ def run(args) -> Outcome:
     if not paths.is_file(args.source):
         raise ZoombieError(f"Input not found: {args.source}")
 
-    # ``-Output`` names the ITEM folder; the artifacts go to ``<item>/.data/``.
+    # ``-Output`` names the destination folder; the artifacts land in it.
     item_dir = stt.item_dir_for(args.output, args.source)
     base = stt.resolve_output_base(args.source, args.output)
     stt.ensure_item_dir(args.output, item_dir)

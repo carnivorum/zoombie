@@ -114,29 +114,9 @@ class TestMissingImage:
         assert cli.main(["verify", "-Dir", str(root)]) == 1
 
 
-class TestImageFolderSidecars:
-    def test_a_missing_manifest_is_reported(self, tmp_path):
-        root = build_tree(tmp_path)
-        (root / "img" / "manifest.json").unlink()
-        report = vf.verify_tree(str(root))
-        assert vf.KIND_MISSING_MANIFEST in kinds(report)
-
-    def test_a_missing_readme_is_reported(self, tmp_path):
-        root = build_tree(tmp_path)
-        (root / "img" / "README.md").unlink()
-        report = vf.verify_tree(str(root))
-        assert vf.KIND_MISSING_README in kinds(report)
-
-    def test_an_image_dir_not_referenced_by_any_link_is_still_checked(self, tmp_path):
-        """A link-only walk is blind to an img/ no Markdown happens to point at."""
-        root = build_tree(tmp_path)
-        summary = (root / "summary.md").read_text(encoding="utf-8")
-        (root / "summary.md").write_text(
-            summary.replace("![001 - p01.png](img/001%20-%20p01.png)", ""), encoding="utf-8"
-        )
-        (root / "img" / "manifest.json").unlink()
-        report = vf.verify_tree(str(root))
-        assert vf.KIND_MISSING_MANIFEST in kinds(report)
+# The manifest/README sidecar checks were removed with the ``.data/`` layout: a
+# finished item keeps only the figures its document references, so there is no
+# sidecar to require. A dangling figure is still caught by ``missing-image``.
 
 
 class TestDeadAnchor:
@@ -339,70 +319,5 @@ class TestReportOrdering:
         assert first == second
 
 
-class TestSection6ImageCount:
-    """The advisory check: block-6 heading count vs the slide manifest count.
-
-    Named for what it detects -- a shifted stamp association -- and advisory
-    because a document written before the write-time guard is exactly what it
-    catches, so failing it would reject every pre-guard library.
-    """
-
-    def _slide_manifest(self, root, count, *, images=None, kind="slides"):
-        payload = {"count": count, "kind": kind}
-        if images is not None:
-            payload["images"] = images
-        (root / "img" / "manifest.json").write_text(
-            json.dumps(payload), encoding="utf-8"
-        )
-
-    def test_a_mismatch_is_reported_as_an_advisory(self, tmp_path):
-        # CLEAN has two anchored block-6 headings (s-1, s-2); declare three images.
-        root = build_tree(tmp_path)
-        self._slide_manifest(root, 3)
-        report = vf.verify_tree(str(root))
-
-        advisories = [a for a in report["advisories"]
-                      if a["kind"] == vf.KIND_SECTION6_IMAGE_COUNT]
-        assert len(advisories) == 1
-        advisory = advisories[0]
-        assert advisory["severity"] == vf.SEVERITY_WARNING
-        assert advisory["file"].endswith("summary.md")
-        assert "2 anchored headings" in advisory["detail"]
-        assert "3 images" in advisory["detail"]
-        # Advisory, so the tree still passes: a pre-guard document must not fail.
-        assert report["ok"] is True
-        assert vf.KIND_SECTION6_IMAGE_COUNT not in kinds(report)
-
-    def test_a_match_is_not_reported(self, tmp_path):
-        root = build_tree(tmp_path)
-        self._slide_manifest(root, 2)
-        report = vf.verify_tree(str(root))
-        assert all(a["kind"] != vf.KIND_SECTION6_IMAGE_COUNT
-                   for a in report["advisories"])
-
-    def test_the_images_length_is_the_fallback(self, tmp_path):
-        """A manifest carrying only ``images`` is still compared."""
-        root = build_tree(tmp_path)
-        self._slide_manifest(root, 0, images=[{"file": "a.png"}, {"file": "b.png"},
-                                              {"file": "c.png"}])
-        report = vf.verify_tree(str(root))
-        assert any(a["kind"] == vf.KIND_SECTION6_IMAGE_COUNT
-                   for a in report["advisories"])
-
-    def test_a_pdf_manifest_is_not_compared(self, tmp_path):
-        """A PDF summary has no one-heading-per-image convention, so it is skipped.
-
-        The stock ``build_tree`` writes a manifest WITHOUT ``kind: slides`` (the
-        PDF shape); comparing counts there would flag every PDF item.
-        """
-        root = build_tree(tmp_path)
-        report = vf.verify_tree(str(root))
-        assert all(a["kind"] != vf.KIND_SECTION6_IMAGE_COUNT
-                   for a in report["advisories"])
-
-    def test_no_manifest_is_not_reported(self, tmp_path):
-        root = build_tree(tmp_path)
-        (root / "img" / "manifest.json").unlink()
-        report = vf.verify_tree(str(root))
-        assert all(a["kind"] != vf.KIND_SECTION6_IMAGE_COUNT
-                   for a in report["advisories"])
+# The block-6 image-count advisory was removed with the ``.data/`` layout: with the
+# manifest gone, the ordinal heading-to-image convention has nothing to compare.

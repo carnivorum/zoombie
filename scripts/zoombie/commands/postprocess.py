@@ -985,13 +985,12 @@ def process_document(
 def _srt_for(md_path: str, srt_arg: str | None) -> str | None:
     """Resolve the SRT to read timings from.
 
-    An explicit ``-Srt`` always wins. Otherwise, for a ``summary.md``, the item
-    layout is tried (``<item>/.data/transcript.srt`` -- where ``transcribe`` and
-    ``pipeline`` now write), then the historical flat ``transcript.srt`` beside
-    the summary, so an item that predates the move still resolves its timing. A
-    non-summary ``<base>.md`` keeps its sibling ``<base>.srt``. The paths are
-    built with :func:`os.path.splitext` on the *file* name only, never
-    ``Path().stem``, which would mangle a folder that contains dots.
+    An explicit ``-Srt`` always wins (the summarize flow passes the run scratch's
+    ``transcript.srt`` here). Otherwise the sibling ``<base>.srt`` is tried, then
+    -- for a ``summary.md`` -- a sibling ``transcript.srt``, so a bare postprocess
+    on a hand-made item still resolves its timing. The paths are built with
+    :func:`os.path.splitext` on the *file* name only, never ``Path().stem``, which
+    would mangle a folder that contains dots.
     """
     if srt_arg:
         return srt_arg
@@ -999,10 +998,7 @@ def _srt_for(md_path: str, srt_arg: str | None) -> str | None:
     candidates = [os.path.join(stem + ".srt")]
     if os.path.basename(md_path).lower() == SUMMARY_NAME:
         item_root = os.path.dirname(md_path)
-        # The item layout first (``.data/transcript.srt``), then the historical
-        # side-by-side location, so either generation of item finds its timing.
-        candidates.append(item_paths.transcript_path(item_root, "srt"))
-        candidates.append(os.path.join(item_root, "transcript.srt"))
+        candidates.append(os.path.join(item_root, item_paths.TRANSCRIPT_STEM + ".srt"))
     for candidate in candidates:
         if paths.is_file(candidate):
             return candidate
@@ -1012,10 +1008,9 @@ def _srt_for(md_path: str, srt_arg: str | None) -> str | None:
 def _image_dir_for(md_path: str, explicit: str | None) -> str:
     """The image directory to read a manifest from for this document.
 
-    An explicit ``-ImageDir`` always wins. Otherwise the item layout is assumed:
-    ``<item>/.data/img``, which is where the toolchain writes figures. The
-    historical ``<item>/img`` is tried second so a document produced before the
-    item layout still resolves without being passed a flag.
+    An explicit ``-ImageDir`` always wins. Otherwise the visible ``<item>/img`` is
+    assumed. The historical ``<item>/.data/img`` is tried second, so a document
+    produced before the layout change still resolves without a flag.
     """
     if explicit:
         return explicit
@@ -1023,7 +1018,7 @@ def _image_dir_for(md_path: str, explicit: str | None) -> str:
     preferred = item_paths.image_dir(item_root)
     if paths.is_dir(preferred):
         return preferred
-    legacy = os.path.join(item_root, item_paths.IMAGE_DIR_NAME)
+    legacy = os.path.join(item_root, ".data", item_paths.IMAGE_DIR_NAME)
     if paths.is_dir(legacy):
         return legacy
     return preferred

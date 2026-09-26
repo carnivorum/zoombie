@@ -29,14 +29,10 @@ from zoombie.lib.errors import ZoombieError
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 SKILLS_DIR = os.path.join(REPO_ROOT, "skills")
 
-# Every skill handed off to, excluding the five whose absence is the point of
-# this file. Kept explicit so a rename is a deliberate edit here too.
+# Exactly ONE skill. The download/extract/transcribe/readpdf/readimages stages
+# survive as MCP-only tools, and the summarize flow drives them; there is no
+# second skill to hand off to. Kept explicit so re-adding one is a deliberate edit.
 EXPECTED_SKILLS = {
-    "zoombie-download-video",
-    "zoombie-extract-audio",
-    "zoombie-transcribe-audio",
-    "zoombie-transcribe-video",
-    "zoombie-images-to-md",
     "zoombie-summarize",
 }
 
@@ -517,14 +513,11 @@ class TestMcpFirst:
 
 
 class TestPickerRouting:
-    """The descriptions must route a request, not just describe a skill.
+    """The one skill must route a request and describe the step flow.
 
-    The failure this pins: zoombie-summarize, zoombie-transcribe-audio and
-    zoombie-transcribe-video each read as a plausible answer to "summarize this
-    recording", so an agent could pick summarize with no source material and
-    stall, or chain transcribe -> summarize and never learn the intended entry
-    point. The fix is that summarize ADVERTISES the raw-source case and every
-    producer POINTS at summarize as the one-shot document path.
+    With a single skill there is no hand-off to mis-route, so the property under
+    test is narrower: the description must admit a raw source (video, audio, PDF,
+    images) and the body must state the step machine and the overwrite safety.
     """
 
     def _description(self, name: str) -> str:
@@ -536,46 +529,26 @@ class TestPickerRouting:
     def test_summarize_is_the_front_door_for_a_raw_source(self):
         description = self._description("zoombie-summarize")
         assert "FRONT DOOR" in description
-        # It must accept a raw source, not only material already on disk.
-        assert "raw source" in description.lower()
         for source in ("video", "audio", "PDF", "image"):
             assert source.lower() in description.lower(), (
                 f"summarize's description must admit a raw {source} source"
             )
 
-    def test_summarize_no_longer_claims_only_existing_material(self):
-        assert "already have" not in self._description("zoombie-summarize")
+    def test_the_body_names_the_step_flow(self):
+        body = _read(os.path.join(SKILLS_DIR, "zoombie-summarize", "SKILL.md")).lower()
+        for step in ("source", "name", "slides", "prose", "verify"):
+            assert step in body, f"the summarize step {step!r} must be documented"
 
-    def test_every_producer_points_at_summarize(self):
-        for name in (
-            "zoombie-transcribe-audio",
-            "zoombie-transcribe-video",
-            "zoombie-images-to-md",
-            "zoombie-download-video",
-            "zoombie-extract-audio",
-        ):
-            description = self._description(name)
-            assert "zoombie-summarize" in description, (
-                f"{name} must point a document request at zoombie-summarize"
-            )
-            # A producer is for the FILE or the SOURCE, not the document.
-            assert "source" in description.lower() or "file" in description.lower()
-
-    def test_the_transcript_producers_declare_they_write_no_document(self):
-        for name in ("zoombie-transcribe-audio", "zoombie-transcribe-video"):
-            description = self._description(name)
-            assert "no summary" in description.lower() or "no readable document" in description.lower()
-
-    def test_summarize_has_a_step_that_produces_the_source(self):
+    def test_the_body_states_the_overwrite_safety(self):
         body = _read(os.path.join(SKILLS_DIR, "zoombie-summarize", "SKILL.md"))
-        assert "Produce the source material" in body
-        # The producing tools it may call must be named in that step.
-        for tool in ("pipeline", "transcribe", "readpdf", "readimages"):
-            assert f"`{tool}`" in body, f"summarize's front-door step must name {tool}"
+        assert "archived" in body.lower(), (
+            "the skill must tell the agent an existing summary is archived, not destroyed"
+        )
 
-    def test_summarize_no_longer_forbids_producing_the_source(self):
+    def test_the_body_describes_the_visible_img_folder(self):
         body = _read(os.path.join(SKILLS_DIR, "zoombie-summarize", "SKILL.md"))
-        assert "Do not re-transcribe or re-convert" not in body
+        assert "img/" in body
+        assert "no `.data`" in body.lower() or "no `.data/`" in body.lower() or "throwaway" in body.lower()
 
 
 class TestSkillBudget:

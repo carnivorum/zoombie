@@ -305,13 +305,14 @@ If the user prefers project-local skills, they are already versioned sources in
 [`skills/`](skills/); copy that folder into `<project>\.roo\skills\` by hand.
 Project skills shadow global ones with the same name.
 
-Verify Zoo sees the six skills: `zoombie-download-video`,
-`zoombie-extract-audio`, `zoombie-transcribe-audio`, `zoombie-transcribe-video`,
-`zoombie-images-to-md`, `zoombie-summarize`, each sourced as `global`. If one does
-not appear, confirm the path is exactly `<skills-root>\<name>\SKILL.md` and that
-the front matter parses. A rename (`zoombie-pdf-to-md` -> `zoombie-images-to-md`)
-leaves the old folder behind, so the installer prunes a deployed `zoombie-*` skill
-whose `SKILL.md` carries our marker but which no longer has a source.
+Verify Zoo sees the ONE skill, `zoombie-summarize`, sourced as `global`. If it
+does not appear, confirm the path is exactly
+`<skills-root>\zoombie-summarize\SKILL.md` and that the front matter parses. The
+installer prunes a deployed `zoombie-*` skill whose `SKILL.md` carries our marker
+but which no longer has a source, so the retired
+`zoombie-download-video`/`zoombie-extract-audio`/`zoombie-transcribe-audio`/
+`zoombie-transcribe-video`/`zoombie-images-to-md` folders are removed on upgrade.
+The stages they wrapped survive as MCP-only tools the summarize flow drives.
 
 ### The Zoombie role
 
@@ -392,20 +393,16 @@ choice and is never parsed by the toolchain.
 <item>/                  any name
     summary.md           the document
     <source media>       the video/audio/PDF, when kept
-    .data/               everything derived  (HIDDEN: dot-prefixed)
-        img/             figures + manifest.json + README.md
-        transcript.txt, transcript.srt, source.json, item.json
+    img/                 the figures the document inlines (VISIBLE)
 ```
 
-Two things are worth knowing before you go looking for files:
+One thing is worth knowing before you go looking for files:
 
-- **`.data/` is hidden.** Explorer and a default `Get-ChildItem` do not show it, so
-  images and transcripts appear to be missing when they are not. Use
-  `Get-ChildItem -Force` or `dir /a`, or let `zoombie items` report what is there.
-- **The item's number and date are in `.data/item.json`**, not in the folder name.
-  An older library that predates the item layout still works and can be moved onto
-  it with `zoombie migrate` (dry run by default; `-Apply` to write). The migration
-  never renames a folder and never renames a file inside `img/`.
+- **A finished item holds only those three things.** The transcript, the `.srt`,
+  the origin sidecar and the OCR report are throwaway: a summarize run keeps them
+  in a scratch dir under the workspace `/.tmp/zoombie-summarize/<run>/` and deletes
+  it at the verify step. There is no hidden `.data/` and no `item.json`; the title
+  is the document's own H1.
 
 To see what a workspace holds:
 
@@ -418,7 +415,7 @@ python -m zoombie items -Depth 2              REM also look one level further do
 ```
 
 A scan reads one level below the root unless `-Depth` says otherwise; `-Recurse` is
-an alias for `-Depth 2`. An item's `.data/` is never descended into, so image
+an alias for `-Depth 2`. An item's `img/` is never descended into, so image
 directories never appear as folders the toolchain could not recognize.
 
 ---

@@ -218,9 +218,9 @@ def build_parser() -> argparse.ArgumentParser:
     _add_source_output(
         transcribe,
         output_help=(
-            "the item folder that receives the transcripts; the artifacts land in "
-            "<item>/.data/ as transcript.txt, transcript.srt, source.json "
-            "(default: the source file's folder)"
+            "the destination folder; the artifacts land in it as transcript.txt, "
+            "transcript.srt, source.json (default: the source file's folder, or "
+            "_unsorted/summaries/<name> for an external source)"
         ),
     )
     _add_model(transcribe)
@@ -243,8 +243,9 @@ def build_parser() -> argparse.ArgumentParser:
     _add_source_output(
         pipeline,
         output_help=(
-            "the item folder; the transcripts land in <item>/.data/ and the retained "
-            "media at the item root (default: the source file's folder)"
+            "the destination folder; the transcripts land in it and the retained "
+            "media at its root (default: the source file's folder, or "
+            "_unsorted/summaries/<name> for a URL)"
         ),
     )
     _add_model(pipeline)
@@ -294,8 +295,8 @@ def build_parser() -> argparse.ArgumentParser:
     readpdf.add_argument(
         "-ImageDir", "--image-dir", dest="image_dir", default=None,
         help=(
-            "explicit image directory (default: <item>/.data/img when the output "
-            "folder is an item, else <base>.images)"
+            "explicit image directory (default: <item>/img when the output folder "
+            "is an item, else <base>.images)"
         ),
     )
     readpdf.add_argument(
@@ -346,7 +347,7 @@ def build_parser() -> argparse.ArgumentParser:
     _add_work(slides_cmd)
     slides_cmd.add_argument(
         "-ImageDir", "--image-dir", dest="image_dir", default=None,
-        help="explicit image directory (default: <Output>/.data/img)",
+        help="explicit image directory (default: <Output>/img)",
     )
     slides_cmd.add_argument(
         "-Times", "--times", dest="times", default=None,
@@ -358,7 +359,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     slides_cmd.add_argument(
         "-Srt", "--srt", dest="srt", default=None,
-        help="SRT used for the slide anchor text (default: <item>/.data/transcript.srt)",
+        help="SRT used for the slide anchor text (default: <Output>/transcript.srt)",
     )
     slides_cmd.add_argument(
         "-Scale", "--scale", dest="scale", type=int, default=slides.DEFAULT_SCALE_WIDTH,
@@ -455,7 +456,7 @@ def build_parser() -> argparse.ArgumentParser:
         help="read the -Drop selection from a UTF-8 file",
     )
     # Text is REPORTING, not a decision. OCR runs once per run and its text is
-    # written to .data/ocr.json for the agent to score; -NoTextGate disables it.
+    # written to <Output>/ocr.json for the agent to score; -NoTextGate disables it.
     slides_cmd.add_argument(
         "-NoTextGate", "--no-text-gate", dest="no_text_gate", action="store_true",
         help="disable the per-run OCR reporting pass (keep frames, write no ocr.json)",
@@ -485,8 +486,8 @@ def build_parser() -> argparse.ArgumentParser:
     )
     postprocess.add_argument(
         "-Srt", "--srt", dest="srt", default=None,
-        help="SRT for the heading timestamps (default: <item>/.data/transcript.srt, "
-             "or a sibling <base>.srt)",
+        help="SRT for the heading timestamps (default: a sibling <base>.srt or "
+             "<item>/transcript.srt)",
     )
     postprocess.add_argument(
         "-ImageDir", "--image-dir", dest="image_dir", default=None,
@@ -510,26 +511,61 @@ def build_parser() -> argparse.ArgumentParser:
         "-Json", "--json", action="store_true", help="report shape only; details stay in data"
     )
 
-    # --- index ------------------------------------------------------------
-    # Regenerates the library README.md from the item folders. Dry run by
-    # default for the same reason as postprocess: a skill calls it and must not
-    # be able to overwrite the index by accident.
-    index = subparsers.add_parser("index", help="regenerate the README.md index of a library")
-    index.add_argument(
-        "-Dir", "--dir", dest="dir", required=True, help="the library root folder"
+    # --- summarize --------------------------------------------------------
+    # The FRONT DOOR as a step machine: ONE verb, a `step` parameter, and each
+    # step returns data.next pointing at the following one. The agent supplies
+    # choices and prose; the backend assembles summary.md. See
+    # zoombie/commands/summarize.py for the step contract.
+    summarize = subparsers.add_parser(
+        "summarize", help="produce a summary.md step by step (the front door)"
     )
-    index.add_argument(
-        "-Output", "--output", dest="output", default=None,
-        help="index path (default: <Dir>/README.md)",
+    summarize.add_argument(
+        "-Source", "--source", dest="source", default=None,
+        help="source file or URL (step 0)",
     )
-    index.add_argument("-Json", "--json", action="store_true", help="quiet; the scan stays in data")
-    index.add_argument(
-        "-DryRun", "--dry-run", action="store_true",
-        help="accepted no-op: writing already requires -Apply",
+    summarize.add_argument(
+        "-Step", "--step", dest="step", default=None,
+        choices=["source", "name", "slides", "prose", "verify"],
+        help="which step to run; omit for step 0 (source)",
     )
-    index.add_argument(
-        "-Apply", "--apply", action="store_true", help="write the index (default: dry run)"
+    summarize.add_argument(
+        "-Run", "--run", dest="run", default=None,
+        help="the run scratch path reported by the previous step",
     )
+    summarize.add_argument(
+        "-Name", "--name", dest="name", default=None,
+        help="the confirmed folder name (step name)",
+    )
+    summarize.add_argument(
+        "-Slides", "--slides", dest="slides", default=None,
+        help="extract slide frames? true/false (step slides)",
+    )
+    summarize.add_argument(
+        "-Times", "--times", dest="times", default=None,
+        help="exact slide timestamps for -Slides true (HH:MM:SS or SS)",
+    )
+    summarize.add_argument("-Title", "--title", dest="title", default=None)
+    summarize.add_argument(
+        "-SummaryText", "--summary-text", dest="summary_text", default=None,
+        help="the short summary (block 3)",
+    )
+    summarize.add_argument(
+        "-Criticism", "--criticism", dest="criticism", default=None,
+        help="optional criticism sub-block (block 3)",
+    )
+    summarize.add_argument(
+        "-Sections", "--sections", dest="sections", default=None,
+        help="JSON array of {heading, at} topic-change sections for block 6",
+    )
+    summarize.add_argument(
+        "-NoMedia", "--no-media", dest="no_media", action="store_true",
+        help="do not keep the source media in the item (default: kept)",
+    )
+    summarize.add_argument(
+        "-Language", "--language", dest="language", default="auto",
+    )
+    _add_work(summarize)
+    _add_common(summarize)
 
     # --- items ------------------------------------------------------------
     # Enumerate the items in a workspace. Defaults to the CURRENT directory
@@ -565,26 +601,10 @@ def build_parser() -> argparse.ArgumentParser:
     )
     items.add_argument("-Json", "--json", action="store_true", help="quiet; the scan stays in data")
 
-    # --- migrate ----------------------------------------------------------
-    # Moves a pre-item-model library onto <item>/.data/. Dry run by default,
-    # like index and postprocess, and for a stronger reason: this one moves the
-    # user's files.
-    migrate = subparsers.add_parser(
-        "migrate", help="move a library onto the .data/ item layout (dry run by default)"
-    )
-    migrate.add_argument(
-        "-Dir", "--dir", dest="dir", required=True, help="the library root folder"
-    )
-    migrate.add_argument("-Json", "--json", action="store_true", help="quiet; the plan stays in data")
-    migrate.add_argument(
-        "-Apply", "--apply", action="store_true",
-        help="perform the moves (default: dry run)",
-    )
-
     # --- modes ------------------------------------------------------------
     # Redeploys the Zoombie role into the global custom_modes.yaml without a full
     # setup, so a prompt edit can ship on its own. Dry run by default for the same
-    # reason as postprocess/index: this edits a file the USER owns.
+    # reason as postprocess: this edits a file the USER owns.
     modes = subparsers.add_parser(
         "modes", help="deploy the Zoombie role into the global Zoo Code custom modes"
     )
@@ -669,15 +689,12 @@ def _dispatch(args: argparse.Namespace) -> Outcome:
     if args.command == "verify":
         from .commands import verify
         return verify.run(args)
-    if args.command == "index":
-        from .commands import library
-        return library.run(args)
+    if args.command == "summarize":
+        from .commands import summarize
+        return summarize.run(args)
     if args.command == "items":
         from .commands import items as items_cmd
         return items_cmd.run(args)
-    if args.command == "migrate":
-        from .commands import migrate
-        return migrate.run(args)
     if args.command == "modes":
         from .commands import modes
         return modes.run(args)

@@ -9,8 +9,6 @@ Checks, per Markdown file:
 
 * ``missing-image``  -- an ``![](…)`` whose destination points into an ``img/``
   folder that has no such file on disk.
-* ``missing-manifest`` / ``missing-readme`` -- an ``img/`` directory that does
-  not carry BOTH ``manifest.json`` and ``README.md``.
 * ``dead-anchor``    -- a block-4 ``#s-N`` link with no matching
   ``<a id="s-N">`` in the same file.
 * ``dead-link``      -- a block-5 relative link that resolves to nothing.
@@ -33,7 +31,6 @@ Two properties matter more than the checks themselves:
 
 from __future__ import annotations
 
-import json
 import os
 import re
 from urllib.parse import unquote
@@ -52,15 +49,10 @@ from .postprocess import (
 
 # Problem kinds, in the order they are reported.
 KIND_MISSING_IMAGE = "missing-image"
-KIND_MISSING_MANIFEST = "missing-manifest"
-KIND_MISSING_README = "missing-readme"
 KIND_DEAD_ANCHOR = "dead-anchor"
 KIND_DEAD_LINK = "dead-link"
 KIND_MISSING_SOURCE = "missing-source"
 KIND_SECTION6_UNDECLARED = "section6-not-declared"
-# Named for what it DETECTS: the number of anchored block-6 headings does not
-# match the number of images the manifest declares.
-KIND_SECTION6_IMAGE_COUNT = "section6-image-count-mismatch"
 
 # Problems are fatal by default: `verify` exit code 1 is a contract, and most of
 # what it reports (a dead anchor, a missing manifest) is a broken document. A check
@@ -69,10 +61,7 @@ KIND_SECTION6_IMAGE_COUNT = "section6-image-count-mismatch"
 SEVERITY_ERROR = "error"
 SEVERITY_WARNING = "warning"
 
-MANIFEST_NAME = item_paths.MANIFEST_NAME
-README_NAME = item_paths.IMAGE_README_NAME
 IMAGE_DIR_NAME = item_paths.IMAGE_DIR_NAME
-DATA_DIR_NAME = item_paths.DATA_DIR_NAME
 
 # Block 6 is a VERBATIM COPY of the source with recognition artefacts cleaned out.
 # It is not a recap, a digest or a summary of a summary -- and a task on another
@@ -200,70 +189,11 @@ def _check_links(md_path: str, text: str, problems: list[dict]) -> None:
             add(KIND_DEAD_LINK, dest_offset, f"[{label}]({dest}) -> {resolved}")
 
 
-def _slide_manifest_count(image_dir: str) -> int | None:
-    """The image count of a SLIDE manifest, or ``None`` for anything else.
-
-    The "one ``###`` per image" convention this check tests is specific to a slide
-    deck, whose manifest the ``slides`` command tags ``kind: "slides"``. A
-    PDF-derived summary has no such convention -- its ``###`` headings and its
-    figures are unrelated -- so comparing the two there would flag every PDF item
-    and hollow the check out. ``count`` is used when present, else the length of
-    ``images``; ``None`` means "no slide manifest here", the skip signal.
-    """
-    path = os.path.join(image_dir, MANIFEST_NAME)
-    if not paths.is_file(path):
-        return None
-    try:
-        with open(paths.to_extended(path), "r", encoding="utf-8") as handle:
-            payload = json.load(handle)
-    except (OSError, ValueError):
-        return None
-    if not isinstance(payload, dict) or payload.get("kind") != "slides":
-        return None
-    if isinstance(payload.get("count"), int):
-        return int(payload["count"])
-    images = payload.get("images")
-    return len(images) if isinstance(images, list) else None
-
-
-def _check_section6_counts(md_path: str, text: str, problems: list[dict]) -> None:
-    """Report a block-6 heading count that disagrees with the image manifest.
-
-    This is the check Defect 2's author asked for: ``postprocess`` associates
-    heading *k* with manifest image *k* **by ordinal**, valid only when the counts
-    match, and the Crimson item authored 124 headings for a 96-image manifest --
-    which shifted every stamp. The write-time guard now refuses that association,
-    so a mismatch here means the document predates the guard or was made by hand.
-
-    ADVISORY, for exactly that reason and consistent with the block-6 declaration
-    check: failing every pre-guard document would make ``verify`` useless as a gate.
-    The signal is what matters -- a count mismatch is how a stamped index goes
-    wrong in a way a reader cannot see.
-    """
-    bounds = md.block_range(text, SECTION6_RE)
-    if bounds is None:
-        return
-    headings = len(ANCHOR_RE.findall(text[bounds[0]:bounds[1]]))
-    image_dir = item_paths.image_dir(os.path.dirname(os.path.abspath(md_path)))
-    if not paths.is_dir(image_dir):
-        legacy = os.path.join(os.path.dirname(os.path.abspath(md_path)), IMAGE_DIR_NAME)
-        image_dir = legacy if paths.is_dir(legacy) else image_dir
-    expected = _slide_manifest_count(image_dir)
-    if expected is None or expected == headings:
-        return
-    problems.append(
-        {
-            "file": md_path,
-            "line": _line_of(text, bounds[0]),
-            "kind": KIND_SECTION6_IMAGE_COUNT,
-            "severity": SEVERITY_WARNING,
-            "detail": (
-                f"block 6 has {headings} anchored headings but the manifest "
-                f"declares {expected} images; the ordinal heading-to-image stamp "
-                "association cannot hold, so timestamps may be shifted"
-            ),
-        }
-    )
+# The manifest/README presence checks and the slide/manifest count check were
+# REMOVED with the ``.data/`` layout: a finished item keeps only the figures its
+# document actualy inlines, so there is no manifest to require and no ordinal
+# heading-to-image convention to compare. A figure the document references is
+# checked by ``missing-image``; a figure it does not reference is simply not there.
 
 
 def _check_section6(md_path: str, text: str, problems: list[dict]) -> None:
@@ -317,43 +247,6 @@ def _check_section6(md_path: str, text: str, problems: list[dict]) -> None:
         )
 
 
-def _image_dirs_to_check(root: str, recurse: bool) -> list[str]:
-    """Every image directory inside the scanned scope.
-
-    Enumerating the directories directly (rather than only the ones a link happens
-    to point at) is what catches an image directory whose manifest was never
-    written -- the case a link-only walk is blind to.
-
-    Both layouts are found, because a library mid-migration holds one of each: the
-    item layout's ``<item>/.data/img`` and the historical ``<item>/img``. The
-    non-recursive branch must look TWO levels down for the former, which is why it
-    walks the children of each immediate child rather than only the root's own.
-    """
-    candidates: list[str] = []
-    if recurse:
-        for walk_root, dirs, _files in os.walk(paths.to_extended(root)):
-            for name in dirs:
-                if name.lower() == IMAGE_DIR_NAME:
-                    candidates.append(
-                        _de_extend(os.path.join(walk_root, name), paths.to_extended(root), root)
-                    )
-    else:
-        # The scan root is checked too, because `-Dir <item>` is a normal way to
-        # run this and then the item IS the root. So are the immediate children, for
-        # a library of items. For each, the item layout is tried before the legacy
-        # one -- a tree mid-migration holds one of each.
-        bases = [root]
-        bases.extend(entry.path for entry in paths.list_dir(root, dirs=True))
-        for base in bases:
-            for candidate in (
-                item_paths.image_dir(base),
-                os.path.join(base, IMAGE_DIR_NAME),
-            ):
-                if paths.is_dir(candidate):
-                    candidates.append(candidate)
-    return sorted(set(candidates))
-
-
 def _de_extend(path: str, extended_root: str, real_root: str) -> str:
     """Strip a ``\\\\?\\`` prefix inherited from an ``os.walk`` over it."""
     if not path.startswith("\\\\?\\"):
@@ -377,33 +270,13 @@ def _collect_markdown(root: str, recurse: bool) -> list[str]:
 
 
 def verify_tree(root: str, recurse: bool = False) -> dict:
-    """Check every Markdown file and ``img/`` directory under ``root``.
+    """Check every Markdown file under ``root``.
 
     Returns the report shape the CLI emits: ``{root, filesChecked, problems,
     ok}``. Each problem is ``{file, line, kind, detail}``.
     """
     root = paths.absolute(root)
     problems: list[dict] = []
-
-    for image_dir in _image_dirs_to_check(root, recurse):
-        if not paths.is_file(os.path.join(image_dir, MANIFEST_NAME)):
-            problems.append(
-                {
-                    "file": image_dir,
-                    "line": 0,
-                    "kind": KIND_MISSING_MANIFEST,
-                    "detail": f"{image_dir} has no {MANIFEST_NAME}",
-                }
-            )
-        if not paths.is_file(os.path.join(image_dir, README_NAME)):
-            problems.append(
-                {
-                    "file": image_dir,
-                    "line": 0,
-                    "kind": KIND_MISSING_README,
-                    "detail": f"{image_dir} has no {README_NAME}",
-                }
-            )
 
     files = _collect_markdown(root, recurse)
     for md_path in files:
@@ -425,7 +298,6 @@ def verify_tree(root: str, recurse: bool = False) -> dict:
         # block 6 to declare anything about.
         if os.path.basename(md_path).lower() == item_paths.SUMMARY_NAME:
             _check_section6(md_path, text, problems)
-            _check_section6_counts(md_path, text, problems)
 
     # A deduplicated report, sorted so two runs are byte-comparable.
     unique: list[dict] = []

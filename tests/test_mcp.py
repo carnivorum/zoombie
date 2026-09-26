@@ -405,7 +405,7 @@ class TestCapShaping:
         )
         assert "keep:" in decide["text"]
         assert "never a file path" in decide["text"]
-        assert ".data/" in decide["text"]
+        assert "img/" in decide["text"]
 
     def test_the_keep_and_drop_arguments_reach_argparse(self):
         from zoombie import cli as cli_mod
@@ -762,9 +762,10 @@ class TestJobLifecycle:
 # --------------------------------------------------------------------------- #
 
 def _make_item(root) -> str:
-    """A minimal genuine item: a folder carrying ``.data/``."""
+    """A minimal genuine item: a folder carrying a ``summary.md`` and ``img/``."""
     item = root / "1 - 2020-05-06 - Пример"
-    (item / ".data" / "img").mkdir(parents=True)
+    (item / "img").mkdir(parents=True)
+    (item / "summary.md").write_text("# t\n", encoding="utf-8")
     return str(item)
 
 
@@ -799,7 +800,7 @@ class TestFacets:
 
     def test_next_on_an_item_recommends_postprocess(self, tmp_path):
         item = _make_item(tmp_path)
-        _attachable(os.path.join(item, ".data", "img"), 3)
+        _attachable(os.path.join(item, "img"), 3)
         block = mcp.facet_next(item)
         assert block["next"]["command"] == "postprocess"
         assert block["images"]["count"] == 3
@@ -807,50 +808,33 @@ class TestFacets:
 
     def test_next_caps_the_attach_list_by_reusing_next_build(self, tmp_path):
         item = _make_item(tmp_path)
-        _attachable(os.path.join(item, ".data", "img"), 12)
+        _attachable(os.path.join(item, "img"), 12)
         block = mcp.facet_next(item)
         assert len(block["next"]["attach"]) == next_mod.DEFAULT_ATTACH_CAP
         assert block["next"]["truncated"] is True
         assert len(block["next"]["overAttach"]) == 4
         assert block["next"]["count"] == 12
 
-    def test_reading_copies_are_advertised_but_do_not_change_the_frame_count(self, tmp_path):
-        """Plan §12: the JPEG copies live in ``readings/`` and are invisible to the
-        PNG enumeration, yet ``next.attach`` advertises them (with JPEG bytes)."""
+    def test_next_counts_only_png_frames(self, tmp_path):
+        """A non-PNG in ``img/`` is not a frame; only the ``.png`` files count."""
         item = _make_item(tmp_path)
-        img = os.path.join(item, ".data", "img")
+        img = os.path.join(item, "img")
         _attachable(img, 2)
-        readings = os.path.join(img, "readings")
-        os.makedirs(readings)
-        name = sorted(os.listdir(img))[0]
-        stem = os.path.splitext(name)[0]
         (tmp_path / "copy.bin").write_bytes(b"x" * 300)
         import shutil
 
-        shutil.copyfile(str(tmp_path / "copy.bin"), os.path.join(readings, f"{stem}.q3.jpg"))
-
+        shutil.copyfile(str(tmp_path / "copy.bin"), os.path.join(img, "notes.jpg"))
         block = mcp.facet_next(item)
-        # The PNG count is unchanged by the copies.
         assert block["images"]["count"] == 2
-        advertised = {entry["file"]: entry for entry in block["next"]["attach"]}
-        copy_entry = advertised[name]
-        assert copy_entry["path"].endswith(".q3.jpg")
-        assert copy_entry["bytes"] == 300
+        assert all(entry["file"].endswith(".png") for entry in block["next"]["attach"])
 
-    def test_next_reads_the_ocr_artifact(self, tmp_path):
-        item = _make_item(tmp_path)
-        with open(os.path.join(item, ".data", "ocr.json"), "w", encoding="utf-8") as handle:
-            json.dump({"used": True, "frames": [{"file": "001.png", "chars": 120}]}, handle)
-        block = mcp.facet_next(item)
-        assert block["ocr"]["used"] is True
-        assert block["ocr"]["frames"] == 1
-        assert block["ocr"]["artifact"].endswith("ocr.json")
-
-    def test_next_refuses_a_non_item(self, tmp_path):
+    def test_next_reports_a_non_item_without_raising(self, tmp_path):
+        """A plain folder is a valid path; the facet says it is not an item yet."""
         plain = tmp_path / "not-an-item"
         plain.mkdir()
-        with pytest.raises(ValueError):
-            mcp.facet_next(str(plain))
+        block = mcp.facet_next(str(plain))
+        assert block["isItem"] is False
+        assert block["hasSummary"] is False
 
     def test_next_refuses_a_missing_folder(self, tmp_path):
         with pytest.raises(ValueError):

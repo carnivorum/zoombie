@@ -145,15 +145,15 @@ def run(args) -> Outcome:
             images_dir = paths.absolute(args.image_dir)
         else:
             parent = os.path.dirname(base)
-            # Default to the ITEM layout -- ``<item>/.data/img`` -- because readpdf
-            # is the item producer: the figures it extracts belong to the summary
-            # written beside them, not to the PDF's own basename. That default is
-            # only right INSIDE an item, though: for a standalone conversion it
-            # would scatter a ``.data/img`` beside an unrelated folder that merely
-            # happens to be the PDF's parent. So the item layout is used only when
-            # the parent actually IS an item, and the historical ``<base>.images``
-            # is the fallback -- reported, because a caller wondering why the
-            # figures are not in ``.data/img`` must be able to read the reason.
+            # Default to the VISIBLE item layout -- ``<item>/img`` -- because
+            # readpdf is the item producer: the figures it extracts belong to the
+            # summary written beside them, not to the PDF's own basename. That
+            # default is only right INSIDE an item, though: for a standalone
+            # conversion it would scatter an ``img`` beside an unrelated folder
+            # that merely happens to be the PDF's parent. So the item layout is
+            # used only when the parent actually IS an item, and the historical
+            # ``<base>.images`` is the fallback -- reported, because a caller
+            # wondering why the figures are not in ``img`` must read the reason.
             if item_paths.is_item(parent):
                 images_dir = item_paths.image_dir(parent)
                 images_default_reason = "the output folder is an item"
@@ -161,7 +161,7 @@ def run(args) -> Outcome:
                 images_dir = f"{base}.images"
                 images_default_reason = (
                     "the output folder is not an item, so the historical "
-                    "<base>.images was used instead of <item>/.data/img"
+                    "<base>.images was used instead of <item>/img"
                 )
         # Slack covers the longest thing appended inside it: '<NNN> - pNN.png'.
         paths.assert_fits(images_dir, "The readpdf image directory", slack=16)

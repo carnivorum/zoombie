@@ -23,9 +23,15 @@ downloads/
 *.opus
 *.aac
 
-# Item internals: derived material (images, manifests, transcripts, item.json).
-# The one folder that IS generated wholesale, so a checkout stays small.
+# Item internals: derived material. The visible img/ folder holds only the
+# figures a summary actually inlines, so it IS a deliverable and is NOT ignored.
+# The legacy .data/ sidecar directory is ignored in case an older checkout still
+# carries one.
 **/.data/
+
+# Output for sources that are not already part of the workspace. A user's own
+# summaries live in their workspace, not in this repo, so ignore the whole tree.
+_unsorted/
 
 # Python bytecode from the PDF extractor (scripts/pdf/extract_pdf.py)
 __pycache__/

@@ -136,8 +136,8 @@ class TestNaming:
         assert not reading.is_reading_copy("holiday.jpg")
 
     def test_the_reading_dir_is_a_subdirectory_of_the_image_dir(self):
-        assert reading.reading_dir("C:/item/.data/img") == os.path.join(
-            "C:/item/.data/img", "readings"
+        assert reading.reading_dir("C:/item/img") == os.path.join(
+            "C:/item/img", "readings"
         )
 
 
@@ -344,7 +344,7 @@ class TestSlidesReadingCopies:
                                     jpeg_bytes=512)
         budget = outcome.data["next"]["budget"]
         png_total = sum(
-            paths.file_size(os.path.join(output, ".data", "img", entry["file"]))
+            paths.file_size(os.path.join(output, "img", entry["file"]))
             for entry in outcome.data["next"]["attach"]
         )
         # The stub copies are 2 header bytes + 512 + 2 trailer = 516 B each.
@@ -360,7 +360,7 @@ class TestSlidesReadingCopies:
         self, tmp_path, monkeypatch
     ):
         outcome, output = self._run(tmp_path, monkeypatch, ocr_text="prose")
-        img_dir = os.path.join(str(output), ".data", "img")
+        img_dir = os.path.join(str(output), "img")
         reading_dir = reading.reading_dir(img_dir)
         assert paths.is_dir(reading_dir)
         assert outcome.data["readingCopy"]["dir"] == reading_dir
@@ -376,20 +376,16 @@ class TestSlidesReadingCopies:
         from zoombie.item import paths as item_paths
 
         outcome, output = self._run(tmp_path, monkeypatch, ocr_text="prose")
-        img_dir = os.path.join(str(output), ".data", "img")
+        img_dir = os.path.join(str(output), "img")
         manifest = json.loads(
             open(os.path.join(img_dir, "manifest.json"), encoding="utf-8").read()
         )
         assert all(row["file"].lower().endswith(".png") for row in manifest["images"])
-        readme = open(os.path.join(img_dir, "README.md"), encoding="utf-8").read()
-        assert ".jpg" not in readme
         assert item_paths.image_count(str(output)) == len(manifest["images"]) == 2
 
     def test_a_rerun_is_idempotent_and_leaves_no_stale_copies(self, tmp_path, monkeypatch):
         outcome, output = self._run(tmp_path, monkeypatch, ocr_text="prose")
-        reading_dir = reading.reading_dir(
-            os.path.join(str(output), ".data", "img")
-        )
+        reading_dir = reading.reading_dir(os.path.join(str(output), "img"))
         first = sorted(os.listdir(reading_dir))
         # A second run over the same frame set must converge, not accumulate.
         from zoombie.commands import slides as slides_cmd
@@ -423,7 +419,7 @@ class TestSlidesReadingCopies:
             assert frame["path"].lower().endswith(".png")
             assert "readingPath" not in frame
         assert not paths.exists(
-            reading.reading_dir(os.path.join(str(output), ".data", "img"))
+            reading.reading_dir(os.path.join(str(output), "img"))
         )
 
     def test_postprocess_inlines_the_png_not_the_copy(self, tmp_path, monkeypatch):
@@ -431,7 +427,7 @@ class TestSlidesReadingCopies:
         import json
 
         outcome, output = self._run(tmp_path, monkeypatch, ocr_text="prose")
-        img_dir = os.path.join(str(output), ".data", "img")
+        img_dir = os.path.join(str(output), "img")
         manifest = json.loads(
             open(os.path.join(img_dir, "manifest.json"), encoding="utf-8").read()
         )

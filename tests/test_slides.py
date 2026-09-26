@@ -657,7 +657,7 @@ class TestDryRun:
 
         assert outcome.data["dryRun"] is True
         # No scratch, no sidecar, no OCR artifact -- nothing at all was written.
-        assert not (output / ".data").exists()
+        assert not (output / "img").exists()
         assert list(output.iterdir()) == []
 
 
@@ -787,11 +787,11 @@ class TestSelectionCommand:
         import json
 
         manifest = json.loads(
-            (output / ".data" / "img" / "manifest.json").read_text(encoding="utf-8")
+            (output / "img" / "manifest.json").read_text(encoding="utf-8")
         )
         assert manifest["count"] == 1
         # ... and the dropped PNGs were never written to the published directory.
-        pngs = sorted(p.name for p in (output / ".data" / "img").glob("*.png"))
+        pngs = sorted(p.name for p in (output / "img").glob("*.png"))
         assert len(pngs) == 1
 
     def test_the_proposed_ids_are_reported_even_when_the_agent_kept_one(self, tmp_path, monkeypatch):
@@ -818,7 +818,7 @@ class TestSelectionCommand:
         from zoombie.lib.errors import ZoombieError
 
         with pytest.raises(ZoombieError):
-            self._run(tmp_path, monkeypatch, drop=".data/img/002 - 00-00-20.png")
+            self._run(tmp_path, monkeypatch, drop="img/002 - 00-00-20.png")
 
     def test_the_attach_list_carries_the_id(self, tmp_path, monkeypatch):
         outcome, _out = self._run(tmp_path, monkeypatch)

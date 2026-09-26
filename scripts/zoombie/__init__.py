@@ -51,7 +51,14 @@ from __future__ import annotations
 # longer carries (stale skills, the pre-Port orphans). The version marker no
 # longer decides "up to date" for a skill: the expanded bytes do, which is what
 # makes -Check able to report a stale skill at all.
-SKILL_VERSION = "5.2.0"
+# 6.0.0: ONE skill and a stepwise front door. zoombie-summarize is the only skill;
+# download/extract/transcribe/readpdf/readimages are MCP-only tools the summarize
+# step machine (lib/workspace routing, commands/summarize) drives. The .data/
+# sidecar directory and item.json are gone: a finished item holds summary.md, the
+# kept media and a visible img/ folder, and every throwaway lives in a run scratch
+# under the workspace /.tmp and is deleted at verify. An existing summary is never
+# destroyed - it is archived to summary_<yyyyMMdd_HHmm>.md and the path reported.
+SKILL_VERSION = "6.0.0"
 
 # The version marker written into every SKILL.md we own, to prove ownership.
 MARKER_KEY = "cvrm-zoombie-version"

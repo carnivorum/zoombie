@@ -46,10 +46,11 @@ class TestImageDirDefault:
     def test_an_item_parent_uses_the_item_layout(self, tmp_path, monkeypatch):
         _env(monkeypatch, tmp_path)
         item_dir = tmp_path / "item"
-        (item_dir / ".data").mkdir(parents=True)
+        item_dir.mkdir(parents=True)
+        (item_dir / "summary.md").write_text("# t\n", encoding="utf-8")
 
-        outcome = readpdf.run(_args(tmp_path, output=item_dir / "summary"))
-        assert outcome.data["images"] == str(item_dir / ".data" / "img")
+        outcome = readpdf.run(_args(tmp_path, output=item_dir / "book"))
+        assert outcome.data["images"] == str(item_dir / "img")
         assert "item" in outcome.data["imagesDefaultReason"]
 
     def test_a_non_item_parent_falls_back_to_base_images(self, tmp_path, monkeypatch):
@@ -75,7 +76,7 @@ class TestImageDirDefault:
         (item_dir / "summary.md").write_text("# t\n", encoding="utf-8")
 
         outcome = readpdf.run(_args(tmp_path, output=item_dir / "book"))
-        assert outcome.data["images"] == str(item_dir / ".data" / "img")
+        assert outcome.data["images"] == str(item_dir / "img")
         assert "item" in outcome.data["imagesDefaultReason"]
 
     def test_an_explicit_image_dir_always_wins(self, tmp_path, monkeypatch):

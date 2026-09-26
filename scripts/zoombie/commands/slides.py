@@ -119,23 +119,18 @@ def _prepare_images_dir(images_dir: str, force: bool) -> int:
 
 
 def _default_image_dir(output_dir: str) -> str:
-    """``<output>/.data/img`` -- where ``postprocess`` finds figures by default."""
+    """``<output>/img`` -- where ``postprocess`` finds figures by default."""
     return item_paths.image_dir(output_dir)
 
 
 def _default_srt(output_dir: str) -> str | None:
-    """The sibling transcript SRT, in either layout, or ``None``.
+    """The run scratch's ``transcript.srt``, or ``None``.
 
-    The item layout is tried first, then the historical side-by-side location, so
-    whichever generation of item exists resolves its own narration.
+    During a summarize the transcript is produced into the SAME run scratch the
+    slides land in, so the narration SRT is the sibling ``transcript.srt``.
     """
-    for candidate in (
-        item_paths.transcript_path(output_dir, "srt"),
-        os.path.join(output_dir, "transcript.srt"),
-    ):
-        if paths.is_file(candidate):
-            return candidate
-    return None
+    candidate = os.path.join(output_dir, item_paths.TRANSCRIPT_STEM + ".srt")
+    return candidate if paths.is_file(candidate) else None
 
 
 # --------------------------------------------------------------------------- #
@@ -635,10 +630,11 @@ def run(args) -> Outcome:
         # agent reads the cheap text from here to score usefulness, and a caller that
         # only needs paths does not pay for 96 frames of text in the transport.
         ocr_artifact = None
-        data_dir = item_paths.data_dir(output_dir)
+        # The OCR report is RUN-LOCAL (the run scratch is ``output_dir`` during a
+        # summarize), read once to score usefulness and deleted with the scratch.
         if ocr_entries:
             ocr_artifact = slides.write_ocr_artifact(
-                data_dir, ocr_entries, source=args.source, lang=ocr_lang
+                output_dir, ocr_entries, source=args.source, lang=ocr_lang
             )
 
         # The reading copy (plan §12) is planned from each frame's OCR text, then

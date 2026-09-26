@@ -140,25 +140,27 @@ def contains_cyrillic(text: str) -> bool:
 def sibling_transcripts(source: str) -> list[str]:
     """Transcript/SRT files that could tell us which script the media uses.
 
-    Two layouts are probed, because both occur in practice:
+    Three locations are probed, because all occur in practice:
 
-    * an ITEM -- ``<item>/.data/transcript.txt`` / ``.srt`` beside the source
-    * a STANDALONE file -- ``<base>.txt`` / ``.srt`` named after the source
+    * a RUN SCRATCH / item -- ``transcript.txt`` / ``.srt`` in the source's own
+      folder (the summarize run scratch, or an item's plain transcript);
+    * a STANDALONE file -- ``<base>.txt`` / ``.srt`` named after the source;
+    * a legacy item -- ``<item>/.data/transcript.txt`` / ``.srt``.
 
-    The item paths are spelled with a local join rather than importing
-    ``zoombie.item.paths``: that module imports ``zoombie.lib.paths`` only, but
-    keeping this module free of package sibling imports is what lets ``ocr`` stay
-    usable from the import-light contexts ``pdf.py`` needs.
+    The paths are spelled with a local join rather than importing
+    ``zoombie.item.paths``: keeping this module free of package sibling imports is
+    what lets ``ocr`` stay usable from the import-light contexts ``pdf.py`` needs.
     """
     if not source:
         return []
     base = os.path.splitext(source)[0]
+    parent = os.path.dirname(source)
     candidates: list[str] = []
-    # Sibling-of-source files (a standalone transcript).
+    # Sibling-of-source files, and the run scratch's fixed ``transcript`` stem.
     for extension in ("srt", "txt"):
         candidates.append(f"{base}.{extension}")
-    # Item layout: <item>/.data/transcript.<ext>, where source may be <item>/media.
-    parent = os.path.dirname(source)
+        candidates.append(os.path.join(parent, f"transcript.{extension}"))
+    # Legacy item layout: <item>/.data/transcript.<ext>.
     for item_dir in (parent, os.path.dirname(parent)):
         if not item_dir:
             continue

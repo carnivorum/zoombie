@@ -31,25 +31,30 @@ import re
 from dataclasses import dataclass, field
 from typing import Sequence
 
-from ..lib import io, paths
+from ..lib import paths
 
 __all__ = [
+    "LEGACY_FOLDER_RE",
     "Convention",
     "Verdict",
     "CONVENTIONS",
     "CONVENTION_IDS",
     "DEFAULT_CONVENTION_ID",
-    "LIBRARY_RECORD_NAME",
     "date_display",
     "date_iso",
     "measure",
     "next_number",
     "child_names",
-    "read_record",
-    "write_record",
     "propose",
     "render",
+    "item_directory",
 ]
+
+# The historical folder-name pattern ``<number> - <DD.MM.YYYY> - <title>``. Kept
+# because the past is full of these names: the scan reads a number out of one when
+# measuring the convention, and a sort uses it as the reading-order key.
+# Recognition itself never consults it -- see :func:`zoombie.item.paths.is_item`.
+LEGACY_FOLDER_RE = re.compile(r"^(\d+)\s*-\s*(\d{2}\.\d{2}\.\d{4})\s*-\s*(.*)$")
 
 # Separators a human actually types between the parts. The old pattern accepted
 # only the ASCII hyphen with optional spaces, so a name "tidied" to an em dash --
@@ -219,29 +224,8 @@ def child_names(root: str) -> list[str]:
 
 
 # --------------------------------------------------------------------------- #
-# the recorded convention
+# the naming verdict
 # --------------------------------------------------------------------------- #
-
-# The library-level record that PINS a detected convention.
-#
-# Measured on every run, a convention is a drift vector: two machines scanning the
-# same workspace at different times can reach different verdicts -- one sees three
-# dated folders, the other sees six plainly-named ones -- and each names new items
-# in its own style. Recording the verdict once, in the library root, is what makes
-# the choice stable; re-measuring is a diagnostic, not a decision.
-LIBRARY_RECORD_NAME = ".zoombie-library.json"
-
-
-def read_record(root: str) -> dict | None:
-    """The recorded convention for ``root``, or ``None`` when unrecorded."""
-    return io.read_json(os.path.join(root, LIBRARY_RECORD_NAME))
-
-
-def write_record(root: str, payload: dict) -> str:
-    """Record ``payload`` as the library's convention; return the path written."""
-    path = os.path.join(root, LIBRARY_RECORD_NAME)
-    io.write_json(path, payload)
-    return path
 
 
 @dataclass
