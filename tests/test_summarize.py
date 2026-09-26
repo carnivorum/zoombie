@@ -713,6 +713,34 @@ class TestBlockTwoSource:
         assert sz._code_span("plain") == "`plain`"
         assert sz._code_span("") == ""
 
+    def test_placed_media_is_a_link_with_a_readable_label(self, tmp_path, monkeypatch):
+        """A media file the item HOLDS is linked; the visible label is the file name.
+
+        The defect: block 2 emitted the percent-encoded relative path as BARE text,
+        so the document showed a mangled ``%20`` href as if it were prose and gave
+        the reader nothing to click. The destination must stay encoded (a valid
+        href) while the label the reader sees is the file's own name.
+        """
+        media = tmp_path / "elsewhere" / "My Video (1).mp4"
+        media.parent.mkdir(parents=True)
+        media.write_bytes(b"media")
+        run, _dest = _seed_run(tmp_path, monkeypatch, source=str(media),
+                               internal=False, media=str(media))
+        sz.run(_args(step="name", run=run, name="My Item", media="copy"))
+        outcome = sz.run(_args(step="prose", run=run, title="T", summary_text="s"))
+        text = open(outcome.data["summary"], encoding="utf-8").read()
+        block2 = text.split("## 2.", 1)[1].split("## 3.", 1)[0]
+        # A link whose VISIBLE label is the raw file name (no percent-encoding)...
+        assert "[My Video (1).mp4](" in block2
+        # ...and whose destination is the percent-encoded relative path.
+        assert "(My%20Video%20%281%29.mp4)" in block2
+        # The encoded href is never shown as bare text.
+        assert "My%20Video" not in block2.split("](", 1)[0]
+
+    def test_media_label_brackets_become_parens(self):
+        assert sz._media_label("a[b]c.mp4") == "a(b)c.mp4"
+        assert sz._media_label("plain.mp4") == "plain.mp4"
+
 
 class TestNextArgsAreReplayable:
     """Guard: a step's recommended ``data.next.args`` must parse through the CLI.

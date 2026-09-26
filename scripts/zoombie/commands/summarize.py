@@ -947,11 +947,35 @@ def _relative_link(from_dir: str, target: str) -> str:
     return percent_encode_dest(relative)
 
 
+def _media_label(name: str) -> str:
+    """A readable block-2 link LABEL from a media file name.
+
+    The label is what the reader actually sees, so it carries the file's own name
+    rather than the percent-encoded href. Square brackets in the name are shown as
+    parentheses: this project's link-label reader treats ``[...]`` inside a label
+    as a nested bracket, and ``postprocess`` would rewrite them to parentheses
+    anyway -- doing it here keeps the label byte-identical to what the reader sees
+    and stops the pass from mutating the document.
+    """
+    return name.replace("[", "(").replace("]", ")")
+
+
+def _media_link(item_dir: str, media: str) -> str:
+    """Block 2's LINK to the media the item actually holds.
+
+    The destination is a percent-encoded relative path (a space or a bracket in
+    the file name becomes ``%20``/``%5B`` so the href is valid Markdown); the label
+    is the readable file name, so a reader is never shown the encoded href in the
+    document text.
+    """
+    return f"[{_media_label(os.path.basename(media))}]({_relative_link(item_dir, media)})"
+
+
 def _code_span(text: str) -> str:
     """``text`` as a Markdown code span, safe against spaces/Cyrillic/parens/quotes.
 
-    Block 2 sometimes names a raw origin path or URL rather than a link into the
-    item (the user kept no copy, or a URL was summarized). That value is
+    Block 2 falls back to naming a raw origin path or URL only when the item holds
+    no media to link (the user kept no copy, or a URL was summarized). That value is
     content-controlled -- it can carry a space, parentheses, a quote or a backtick
     -- and emitted bare it would be re-parsed as emphasis or a broken link. A code
     span swallows all of them. The one character a code span cannot carry is a
@@ -1008,7 +1032,7 @@ def _step_prose(args) -> Outcome:
     # carry, so it is escaped by pairing.
     placed = state.get("mediaPlaced")
     source_line = (
-        _relative_link(item_dir, placed) if placed
+        _media_link(item_dir, placed) if placed
         else _code_span(state.get("source") or "")
     )
     parts = [
