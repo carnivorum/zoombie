@@ -42,22 +42,57 @@ def _is_excluded(relative: str, excludes: tuple[str, ...], suffixes: tuple[str, 
     return relative.lower().endswith(suffixes)
 
 
-def hash_file(path: str) -> str:
-    """sha256 hex digest of one file, read in chunks so a big file cannot spike RAM."""
+def _digest_bytes(data: bytes, *, normalize_newlines: bool) -> str:
+    """sha256 of a byte string, optionally collapsing CRLF to LF first.
+
+    The newline collapse is what makes the comparison line-ending-insensitive:
+    git on Windows checks source out with CRLF while the published archive and
+    GitHub raw serve LF, so a byte-exact hash reported every file as changed on
+    every run and the install could never be idempotent. Hashing the LF form of
+    both sides makes CRLF-on-disk and LF-in-git compare EQUAL, so the tree
+    stabilises after the first write instead of flip-flopping.
+    """
+    if normalize_newlines:
+        data = data.replace(b"\r\n", b"\n")
+    return hashlib.sha256(data).hexdigest()
+
+
+def hash_file(path: str, *, normalize_newlines: bool = True) -> str:
+    """sha256 of one file, read in chunks so a big file cannot spike RAM.
+
+    Newlines are normalised by default; pass ``normalize_newlines=False`` for a
+    byte-exact digest.
+    """
     digest = hashlib.sha256()
+    carry = b""
     with open(paths.to_extended(path), "rb") as handle:
         while True:
             chunk = handle.read(_CHUNK)
             if not chunk:
                 break
+            if normalize_newlines:
+                # A CRLF split across two chunks must still collapse: hold back a
+                # trailing CR and join it with the next chunk before normalising.
+                chunk = carry + chunk
+                carry = b""
+                if chunk.endswith(b"\r"):
+                    carry = b"\r"
+                    chunk = chunk[:-1]
+                chunk = chunk.replace(b"\r\n", b"\n")
             digest.update(chunk)
+        if carry:
+            digest.update(carry)
     return digest.hexdigest()
 
 
-def hash_text(text: str) -> str:
-    """sha256 of a string, encoded UTF-8, so a generated file (a launcher, a
-    skill's expanded body) can be compared with the same currency as a file."""
-    return hashlib.sha256(text.encode("utf-8")).hexdigest()
+def hash_text(text: str, *, normalize_newlines: bool = True) -> str:
+    """sha256 of a string, encoded UTF-8, with the same newline rule as a file.
+
+    Used for a generated file (a launcher, a skill's expanded body) so it can be
+    compared with the same currency as a file on disk.
+    """
+    data = text.encode("utf-8")
+    return _digest_bytes(data, normalize_newlines=normalize_newlines)
 
 
 def hash_tree(
@@ -65,11 +100,15 @@ def hash_tree(
     *,
     excludes: tuple[str, ...] = DEFAULT_EXCLUDES,
     exclude_suffixes: tuple[str, ...] = DEFAULT_EXCLUDE_SUFFIXES,
+    normalize_newlines: bool = True,
 ) -> dict[str, str]:
     """Map every file under ``root`` to ``relative-posix -> sha256``.
 
     A missing ``root`` yields an empty map (the caller then adds everything),
     which is the same shape a genuinely empty tree has: "nothing installed yet".
+
+    Newlines are normalised by default, so a CRLF working tree and an LF published
+    archive compare equal and the install is idempotent across both.
     """
     result: dict[str, str] = {}
     if not paths.is_dir(root):
@@ -88,7 +127,9 @@ def hash_tree(
             relative = full[base_len:].replace("\\", "/")
             if _is_excluded(relative, excludes, exclude_suffixes):
                 continue
-            result[relative] = hash_file(paths.from_extended(full))
+            result[relative] = hash_file(
+                paths.from_extended(full), normalize_newlines=normalize_newlines
+            )
     return result
 
 
@@ -110,16 +151,23 @@ def plan(desired: dict[str, str], installed: dict[str, str]) -> dict:
     }
 
 
+def _normalize_text(text: str) -> str:
+    """Collapse CRLF to LF so a line-ending difference is not a content change."""
+    return text.replace("\r\n", "\n")
+
+
 def plan_text(desired_text: str, installed_text: str | None) -> str:
     """Classify one file from desired and installed TEXT.
 
     ``installed_text`` is ``None`` when the file is absent. Content comparison,
     not a version marker, is what makes ``added``/``updated``/``unchanged``
-    truthful for a generated file such as the launcher.
+    truthful for a generated file such as the launcher. The comparison is
+    line-ending-insensitive, so a generated file a run wrote CRLF and a later
+    fetch serves LF still reads ``unchanged``.
     """
     if installed_text is None:
         return "added"
-    if desired_text == installed_text:
+    if _normalize_text(desired_text) == _normalize_text(installed_text):
         return "unchanged"
     return "updated"
 

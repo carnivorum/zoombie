@@ -131,3 +131,53 @@ class TestHashTree:
         after = sync.hash_tree(str(tmp_path))
         result = sync.plan(after, before)
         assert result["updated"] == ["a.py"]
+
+
+class TestNewlineInsensitivity:
+    """CRLF-on-disk vs LF-in-git must not read as a change.
+
+    git on Windows checks source out as CRLF while the published archive and
+    GitHub raw serve LF. A byte-exact hash therefore reported every file as
+    changed on every run — the live install rewrote all 63 files each time and
+    could never be idempotent. The content hash normalises newlines so the tree
+    stabilises.
+    """
+
+    def test_crlf_and_lf_hash_equal(self, tmp_path):
+        crlf = tmp_path / "crlf.py"
+        lf = tmp_path / "lf.py"
+        crlf.write_bytes(b"line one\r\nline two\r\n")
+        lf.write_bytes(b"line one\nline two\n")
+        assert sync.hash_file(str(crlf)) == sync.hash_file(str(lf))
+
+    def test_tree_equal_across_line_endings(self, tmp_path):
+        left = tmp_path / "left"
+        right = tmp_path / "right"
+        left.mkdir()
+        right.mkdir()
+        (left / "mod.py").write_bytes(b"a\r\nb\r\n")
+        (right / "mod.py").write_bytes(b"a\nb\n")
+        assert sync.plan(sync.hash_tree(str(left)), sync.hash_tree(str(right)))["updated"] == []
+
+    def test_crlf_split_across_chunk_boundary(self, tmp_path):
+        # A \\r at the end of a 1 MiB read must not be normalised away from the
+        # \\n at the start of the next one.
+        big = tmp_path / "big.bin"
+        payload = b"x" * (sync._CHUNK - 1) + b"\r\n" + b"y"
+        big.write_bytes(payload)
+        other = tmp_path / "other.bin"
+        other.write_bytes(b"x" * (sync._CHUNK - 1) + b"\n" + b"y")
+        assert sync.hash_file(str(big)) == sync.hash_file(str(other))
+
+    def test_plan_text_ignores_line_endings(self):
+        assert sync.plan_text("a\r\nb\r\n", "a\nb\n") == "unchanged"
+        assert sync.plan_text("a\r\nb\r\n", "a\nc\n") == "updated"
+
+    def test_byte_exact_hash_still_available(self, tmp_path):
+        crlf = tmp_path / "crlf.py"
+        lf = tmp_path / "lf.py"
+        crlf.write_bytes(b"a\r\n")
+        lf.write_bytes(b"a\n")
+        assert sync.hash_file(str(crlf), normalize_newlines=False) != sync.hash_file(
+            str(lf), normalize_newlines=False
+        )
