@@ -81,10 +81,16 @@ TOOL_NOT_FOUND = -32000
 TOOL_FAILED = -32001
 JOB_NOT_FOUND = -32002
 
-# Every verb the CLI exposes gets a tool, so an MCP client sees the same surface
-# as an agent reading the skills. Kept explicit rather than derived from the
-# parser: ``_dispatch`` is the single source of truth, and a test asserts these
-# two agree, so a new subcommand that is not mirrored here is a failure.
+# Every verb the CLI exposes is CALLABLE as a tool, but not every one is
+# ADVERTISED. ``TOOL_COMMANDS`` is the acceptance set: ``tools/call`` honours any
+# name in it. ``ADVERTISED_TOOLS`` is what ``tools/list`` shows the model -- the
+# small set a user might ask for directly. The rest are reached by the
+# ``summarize`` flow (in process, never through this facade) or are one-time
+# setup/diagnostics, so listing them only bloats the model's tool menu.
+#
+# Kept explicit rather than derived from the parser: ``_dispatch`` is the single
+# source of truth, and a test asserts every verb is at least callable -- so a new
+# subcommand that is not mirrored here is a failure.
 TOOL_COMMANDS: dict[str, str] = {
     "doctor": "doctor",
     "clean": "clean",
@@ -103,6 +109,24 @@ TOOL_COMMANDS: dict[str, str] = {
     "modes": "modes",
     "mcp": "mcp",
 }
+
+# The tools ``tools/list`` advertises. The agent-facing surface: the front door,
+# the three "fetch/convert a file" wrappers, and the read-only orientation verbs.
+# A tool NOT listed here is still callable by name -- it is simply not offered,
+# because it duplicates the summarize flow, is a one-time setup action, or is a
+# maintenance verb the model should not reach for.
+#
+# Order is the order :func:`tool_schemas` emits, so the menu reads top-down.
+ADVERTISED_TOOLS: tuple[str, ...] = (
+    "summarize",   # the front door: one document from any source
+    "download",    # save a link (a file, not a document)
+    "extract",     # pull the audio out of a video
+    "readpdf",     # text from a PDF, or OCR a scan
+    "readimages",  # read an image or a folder of images
+    "unpack",      # open any archive 7-Zip can read (and an NSIS installer)
+    "items",       # read-only: what summaries exist here, and how they are named
+    "doctor",      # read-only: is the toolchain usable
+)
 
 # The stages that may block for a long time are the ones ``start``/``status``/
 # ``result`` exists for. A short, read-only verb is executed inline by
@@ -613,11 +637,15 @@ def _server_info() -> dict:
 
 
 def tool_schemas() -> list[dict]:
-    """The ``tools/list`` payload: one tool per CLI verb.
+    """The ``tools/list`` payload: the ADVERTISED tools only.
 
     The descriptions state the mode flags that decide whether a call WRITES, so a
     client cannot accidentally invoke a writing mode: the house convention is that
     a dry run is the default and ``-Force``/``-Apply`` is required to write.
+
+    A tool that is CALLABLE but not advertised (see :data:`ADVERTISED_TOOLS`) is
+    built here and then dropped by the final filter, so its schema still exists to
+    keep the two lists honest -- the emission order is :data:`ADVERTISED_TOOLS`.
     """
     def schema(name: str, description: str, props: dict, required: list[str]) -> dict:
         return {
@@ -650,7 +678,7 @@ def tool_schemas() -> list[dict]:
         schema("clean", "Remove scratch dirs.", {**source_output, "clean_scratch": {"type": "boolean", "description": "sweep every toolchain-owned scratch dir"}}, []),
         schema("download", "Download a video or its audio. The destination follows the summarize rule: a source inside the workspace keeps its folder; a URL lands under _unsorted/download/<name>. Override with download_dir, or refine the name with name.", {**source_output, "download_dir": {"type": "string"}, "name": {"type": "string", "description": "folder name under _unsorted/download (default: the title)"}, "audio_only": {"type": "boolean", "description": "download the audio track only"}, "format": {"type": "string", "enum": ["wav", "mp3", "m4a", "flac"]}}, ["source"]),
         schema("extract", "Extract audio from a video.", {**source_output, "format": {"type": "string", "enum": ["wav", "mp3", "m4a", "flac"]}}, ["source"]),
-        schema("unpack", "Extract an NSIS installer or a 7z archive into a folder (data, never executed).", {**source_output, "strip": {"type": "integer"}, "include": {"type": "array", "items": {"type": "string"}}}, ["source", "output"]),
+        schema("unpack", "Open any archive 7-Zip can read (7z, zip, rar, tar, gz, xz, cab, iso, ...) or an NSIS installer, into a folder. The source is DATA, never executed. Use check=true to list it first.", {**source_output, "strip": {"type": "integer"}, "include": {"type": "array", "items": {"type": "string"}}, "check": {"type": "boolean", "description": "list the archive's contents; write nothing"}}, ["source", "output"]),
         schema("transcribe", "Transcribe audio to text (blocks; use start/status/result).", {**source_output, **gpu, "language": {"type": "string"}, "from_time": {"type": "string"}, "to_time": {"type": "string"}}, ["source"]),
         schema("pipeline", "Download, extract and transcribe in one call (blocks; use start/status/result).", {**source_output, **gpu, "language": {"type": "string"}, "download_dir": {"type": "string"}}, ["source"]),
         schema("readpdf", "Convert a PDF to Markdown; vision renders text-less pages for a reader.", {**source_output, "pages": {"type": "string"}, "lang": {"type": "string"}, "dpi": {"type": "integer"}, "ocr": {"type": "boolean", "description": "OCR scanned pages with Tesseract"}, "vision": {"type": "string", "description": "render pages with NO text layer to PNG in this directory for a vision reader (ignored when ocr=true)"}, "images": {"type": "boolean", "description": "also extract embedded images"}, "images_only": {"type": "boolean", "description": "extract images and the sidecar only; render no Markdown"}, "image_dir": {"type": "string", "description": "explicit image directory"}}, ["source"]),
@@ -717,7 +745,10 @@ def tool_schemas() -> list[dict]:
         schema("modes", "Deploy the Zoombie role into the global custom modes (dry run unless apply=true).", {"target": {"type": "string"}, "check": {"type": "boolean"}, "apply": {"type": "boolean"}, "force": {"type": "boolean"}}, []),
         schema("mcp", "Register the zoombie MCP server in the client's global MCP settings (dry run unless apply=true).", {"target": {"type": "string"}, "check": {"type": "boolean"}, "apply": {"type": "boolean"}, "force": {"type": "boolean"}}, []),
     ]
-    return tools_out
+    # Advertise only the small agent-facing set, in the order ADVERTISED_TOOLS
+    # names it. A tool not in the tuple is still honoured by ``tools/call``.
+    by_name = {tool["name"]: tool for tool in tools_out}
+    return [by_name[name] for name in ADVERTISED_TOOLS if name in by_name]
 
 
 def handle_initialize(request_id, params: dict) -> dict:

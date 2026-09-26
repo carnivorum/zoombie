@@ -1,4 +1,4 @@
-"""Tests for the generic NSIS/7z unpack capability.
+"""Tests for the generic archive unpack capability.
 
 Hermetic: the extractor is faked and the extraction writes a payload directly, so
 nothing is downloaded and no installer is executed. What is pinned here is the
@@ -12,7 +12,24 @@ from __future__ import annotations
 import os
 
 from zoombie.cli import main
+from zoombie.commands import unpack as unpack_cmd
 from zoombie.lib import unpack as unpack_mod
+
+
+class TestFormats:
+    """The verb is format-agnostic: 7-Zip reads these, so the suffix is a hint."""
+
+    def test_common_archive_extensions_are_known(self):
+        for suffix in (".7z", ".zip", ".rar", ".tar", ".gz", ".tgz", ".bz2", ".xz",
+                       ".zst", ".cab", ".iso", ".wim", ".exe", ".msi"):
+            assert suffix in unpack_cmd.KNOWN_SUFFIXES, suffix
+
+    def test_tarballs_and_installers_are_labelled(self):
+        assert unpack_cmd._kind("x.tar") == "tarball"
+        assert unpack_cmd._kind("x.tar.gz") == "tarball"
+        assert unpack_cmd._kind("x.7z") == "7z-archive"
+        assert unpack_cmd._kind("x.zip") == "zip-archive"
+        assert unpack_cmd._kind("x.exe") == "nsis-installer"
 
 
 def _payload(dest: str) -> None:

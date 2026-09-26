@@ -307,21 +307,32 @@ $zoombie = @(
     "$env:PUBLIC\zoombie-env\bin\zoombie\zoombie.cmd"
 ) | Where-Object { Test-Path $_ } | Select-Object -First 1
 
-& $zoombie doctor                                         # report tool status
+# The ADVERTISED MCP tools -- the small agent-facing surface.
+& $zoombie summarize -Source "<url-or-file>"              # the front door; follow data.next
 & $zoombie download -Source "<url>" [-DownloadDir "<dir>"] [-Name "<name>"] [-AudioOnly] [-Format wav]
                                                           # default dest: _unsorted/download/<name>
 & $zoombie extract  -Source "<video>" -Output "<out>" [-Format wav|mp3|m4a|flac]
-& $zoombie transcribe -Source "<audio>" -Output "<item-folder>" [-Language auto] [-NoSrt] [-NoGpu] [-NoFlashAttn] [-Threads N] [-AllowCpuFallback] [-StrictGpu]
 & $zoombie readpdf  -Source "<pdf>" -Output "<basename>" [-Ocr | -Vision "<dir>"] [-Images] [-ImagesOnly] [-ImageDir "<dir>"] [-MinPx N] [-MinPt N] [-Pages "1-5,8"]
 & $zoombie readimages -Source "<image-or-dir>" -Output "<basename>" [-Ocr] [-Lang eng] [-ImageDir "<dir>"]
-& $zoombie slides -Source "<video>" -Output "<item-dir>" [-Times "00:01:00,00:05:30"] [-TimesFile "<path>"] [-Srt "<file>"] [-Scale N] [-MinSlideSec S] [-HashDistance N]
+& $zoombie unpack   -Source "<archive>" -Output "<dir>" [-Check] [-Strip N] [-Include "*.dll"]
+                                                          # any archive 7-Zip reads (7z/zip/rar/tar/gz/xz/iso/...), or an NSIS installer
+& $zoombie items    [-Root "<dir>"] [-Depth N] [-Title "<title>"]    # read-only: what summaries exist
+& $zoombie doctor                                         # read-only: is the toolchain usable
+
+# CALLABLE but NOT advertised -- driven by summarize, or one-time/maintenance.
 & $zoombie pipeline -Source "<url-or-file>" -Output "<item-folder>" [-DownloadDir "<dir>"] [-NoSrt]
-& $zoombie summarize -Source "<url-or-file>"              # step 0 of the front door; follow data.next
+& $zoombie transcribe -Source "<audio>" -Output "<item-folder>" [-Language auto] [-NoSrt] [-NoGpu] [-Threads N]
+& $zoombie slides -Source "<video>" -Output "<item-dir>" [-Times "00:01:00,00:05:30"] [-Scale N]
 & $zoombie postprocess -Md "<summary.md>" [-Srt "<file>"] [-ImageDir "<dir>"] [-Apply]   # anchors, timestamps, index, images
 & $zoombie verify   -Dir "<library-root>" [-Recurse] [-Json]                               # exit 1 on problems
 & $zoombie clean                                          # remove per-job scratch dirs
-& $zoombie clean -CleanScratch                            # sweep all toolchain scratch (a killed run's leftover)
+& $zoombie modes | mcp                                    # one-time setup (setup runs these)
 ```
+
+`tools/list` advertises only the small agent-facing set; the rest are still
+honoured by `tools/call` (a skill or a power-user can name one), but they are not
+offered to the model, because they either duplicate the summarize flow or are
+setup/maintenance verbs.
 
 Every stage puts its per-run scratch under the toolchain root and removes it when
 it finishes; `-KeepScratch` (alias `-KeepWork`) retains it and the result reports

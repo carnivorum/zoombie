@@ -556,10 +556,32 @@ class TestToolListing:
         for name in mcp.TOOL_COMMANDS:
             assert f'"{name}"' in source, f"{name} is not in cli._dispatch"
 
-    def test_tools_list_reports_a_schema_for_each(self):
+    def test_tools_list_reports_only_the_advertised_set(self):
+        """``tools/list`` shows ADVERTISED_TOOLS, not the whole acceptance set."""
         _code, responses, _text = _serve([_request(1, "tools/list")])
-        listed = {tool["name"] for tool in responses[0]["result"]["tools"]}
-        assert listed == set(mcp.TOOL_COMMANDS)
+        listed = [tool["name"] for tool in responses[0]["result"]["tools"]]
+        assert listed == list(mcp.ADVERTISED_TOOLS)
+        assert set(mcp.ADVERTISED_TOOLS) <= set(mcp.TOOL_COMMANDS)
+
+    def test_every_advertised_tool_is_callable(self):
+        for name in mcp.ADVERTISED_TOOLS:
+            assert name in mcp.TOOL_COMMANDS
+
+    def test_a_hidden_tool_is_callable_but_not_listed(self):
+        """A tool outside ADVERTISED_TOOLS still answers ``tools/call``."""
+        hidden = sorted(set(mcp.TOOL_COMMANDS) - set(mcp.ADVERTISED_TOOLS))
+        assert hidden, "expected some tools to be hidden"
+        _code, listed_responses, _text = _serve([_request(1, "tools/list")])
+        listed = {tool["name"] for tool in listed_responses[0]["result"]["tools"]}
+        assert not (set(hidden) & listed)
+        # It is nonetheless accepted -- dispatch reaches the tool, not a "not found".
+        _code, responses, _text = _serve([
+            _request(2, "tools/call", {"name": hidden[0], "arguments": {}})
+        ])
+        payload = responses[0]["result"]
+        # A missing required argument is a PARAMETER error, which proves the tool
+        # was found; "unknown tool" would be the TOOL_NOT_FOUND wording.
+        assert "unknown tool" not in json.dumps(payload)
 
     def test_every_schema_is_well_formed(self):
         for tool in mcp.tool_schemas():

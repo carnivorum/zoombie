@@ -1,7 +1,12 @@
-"""``unpack``: extract an NSIS installer or a 7z archive into a confirmed folder.
+"""``unpack``: open any archive 7-Zip can read into a confirmed folder.
+
+The verb is FORMAT-AGNOSTIC: 7-Zip reads 7z, zip, rar, tar, gzip, bzip2, xz, cab,
+iso, wim and more, and it sniffs an NSIS payload inside an ``.exe``, so the source
+extension is a HINT rather than a gate. The header below is just the common case
+(an installer or a 7z bundle); the capability is "extract this archive".
 
 This is the first-class form of the capability the installer uses internally. It
-exists because unpacking an installer is exactly the work an agent should never do
+exists because unpacking an archive is exactly the work an agent should never do
 by hand: doing it manually pollutes the workspace with a tree nobody asked for and
 then burns tokens listing files that should never have been read.
 
@@ -30,10 +35,15 @@ from ..lib import paths, process, scratch
 from ..lib import unpack as unpack_mod
 from ..lib.errors import ZoombieError
 
-# Extensions this verb claims to understand. The extension is a HINT, not the
-# truth -- 7-Zip sniffs an NSIS payload inside an .exe -- so an unexpected suffix
-# is reported rather than refused.
-KNOWN_SUFFIXES = (".exe", ".7z", ".7zip", ".zip", ".rar", ".tar", ".gz", ".bz2", ".xz", ".iso")
+# Extensions 7-Zip can read (its FULL build, which is what is provisioned, not the
+# zip-only bootstrap). The extension is a HINT, not the truth -- 7-Zip sniffs the
+# real container, including an NSIS payload inside an ``.exe`` -- so an unexpected
+# suffix is reported rather than refused.
+KNOWN_SUFFIXES = (
+    ".7z", ".7zip", ".zip", ".rar", ".tar", ".gz", ".tgz", ".bz2", ".xz", ".zst",
+    ".lzma", ".cab", ".iso", ".img", ".wim", ".arj", ".lzh", ".cpio", ".rpm",
+    ".deb", ".msi", ".exe", ".z",
+)
 
 # How many file names the result payload carries inline before it truncates. The
 # caller can read the archive itself for the rest; this is a report, not a listing.
@@ -49,6 +59,8 @@ def _kind(source: str) -> str:
         return "7z-archive"
     if suffix == ".zip":
         return "zip-archive"
+    if suffix in (".tar", ".gz", ".tgz", ".bz2", ".xz", ".zst", ".lzma", ".z"):
+        return "tarball"
     return "archive"
 
 

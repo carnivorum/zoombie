@@ -179,12 +179,13 @@ def build_parser() -> argparse.ArgumentParser:
     _add_common(extract)
 
     # --- unpack -----------------------------------------------------------
-    # The generic NSIS/7z capability: an installer (or archive) is DATA, never an
-    # executed program. -Check lists the archive without extracting; -DryRun
-    # extracts to scratch and reports the real file list, writing nothing to the
-    # destination. Installer scaffolding ($PLUGINSDIR) is excluded by directory.
+    # The generic archive capability: a .7z/.zip/.rar/.tar/.gz/.xz/.cab/.iso (or an
+    # NSIS installer, sniffed) is DATA, never an executed program. -Check lists the
+    # archive without extracting; -DryRun extracts to scratch and reports the real
+    # file list, writing nothing to the destination. Installer scaffolding
+    # ($PLUGINSDIR) is excluded by directory.
     unpack_cmd = subparsers.add_parser(
-        "unpack", help="extract an NSIS installer or a 7z archive into a folder"
+        "unpack", help="open any archive 7-Zip can read (or an NSIS installer) into a folder"
     )
     _add_source_output(
         unpack_cmd,
