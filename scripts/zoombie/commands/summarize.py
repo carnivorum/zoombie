@@ -681,10 +681,16 @@ def _reusable_item(folder: str) -> bool:
     """Whether ``folder`` is an EXISTING item we may write into again.
 
     True when the folder does not exist (nothing to reuse but nothing to avoid), is
-    empty (an aborted run's leftover), or already holds our document or figures.
-    False for a folder holding anything else, so a name collision with a stranger's
-    directory still falls back to ``unique_name`` and we never write into -- or
-    archive -- a directory that is not ours.
+    empty (an aborted run's leftover), or already holds our document, our figures,
+    or one of our ARCHIVE folders. False for a folder holding anything else, so a
+    name collision with a stranger's directory still falls back to ``unique_name``
+    and we never write into -- or archive -- a directory that is not ours.
+
+    The archive case is load-bearing, and the live test is what exposed it: after a
+    ``-Archive`` run the item root holds NO ``summary.md`` (it moved into
+    ``summary_<stamp>/``), so an item that had just been archived looked foreign and
+    the next run created ``... (2)``. An archive folder is unambiguous evidence of
+    our work, and it is exactly the state a re-summarize starts from.
     """
     if not paths.is_dir(folder):
         return not paths.exists(folder)
@@ -695,7 +701,9 @@ def _reusable_item(folder: str) -> bool:
     if not entries:
         return True
     names = {entry.name.lower() for entry in entries}
-    return item_paths.SUMMARY_NAME.lower() in names or item_paths.IMAGE_DIR_NAME.lower() in names
+    if item_paths.SUMMARY_NAME.lower() in names or item_paths.IMAGE_DIR_NAME.lower() in names:
+        return True
+    return any(item_paths.is_archive_dir(entry.name) for entry in entries)
 
 
 def _existing_artifacts(folder: str) -> dict:

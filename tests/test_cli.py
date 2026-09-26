@@ -49,3 +49,46 @@ class TestExpandArgFiles:
         value = tmp_path / "root.txt"
         value.write_text(str(tmp_path), encoding="utf-8")
         assert cli.main(["items", "-Root", "@" + str(value), "-Json"]) == 0
+
+
+class TestResultLineEncoding:
+    """The result line must survive a console code page that cannot encode it.
+
+    The live test found this the hard way: a remote video's title carries U+29F8,
+    a legal codepoint cp1251 has no mapping for. The work completed, and then
+    ``write_result`` raised ``UnicodeEncodeError`` on the way out -- emitting NO
+    result line at all, which breaks the one-line-per-invocation contract and
+    leaves a caller nothing to read.
+    """
+
+    def test_an_unencodable_codepoint_still_produces_a_line(self, monkeypatch):
+        """Written as UTF-8 bytes, so the code page is never consulted."""
+        import io
+        import json
+
+        from zoombie.lib import process
+
+        raw = io.BytesIO()
+        stdout = io.TextIOWrapper(raw, encoding="cp1251", errors="strict")
+        monkeypatch.setattr(process.sys, "stdout", stdout)
+
+        exotic = "Гаттака \u29f8 Gattaca"
+        process.write_result("summarize", ok=True, data={"title": exotic})
+
+        stdout.flush()
+        decoded = json.loads(raw.getvalue().decode("utf-8"))
+        assert decoded["ok"] is True
+        assert decoded["data"]["title"] == exotic
+
+    def test_a_replaced_stdout_without_a_buffer_still_writes(self, monkeypatch):
+        """A capture object has no ``buffer``; the fallback must not raise."""
+        import io
+        import json
+
+        from zoombie.lib import process
+
+        capture = io.StringIO()
+        monkeypatch.setattr(process.sys, "stdout", capture)
+        process.write_result("items", ok=True, data={"title": "Гаттака \u29f8"})
+
+        assert json.loads(capture.getvalue())["action"] == "items"

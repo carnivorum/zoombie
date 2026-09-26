@@ -22,6 +22,7 @@ downloads/
 *.ogg
 *.opus
 *.aac
+*.pdf
 
 # Item internals: derived material. The visible img/ folder holds only the
 # figures a summary actually inlines, so it IS a deliverable and is NOT ignored.
@@ -43,3 +44,15 @@ __pycache__/
 # -WorkRoot points inside the repo.
 .tmp/
 work/
+
+# Live test. The INSTRUCTIONS and the RUNNER are TRACKED -- they are the durable
+# part, and a fresh clone must be able to read them -- so the whole folder is NOT
+# ignored. Only the harness it builds and the user's own sample media are.
+#
+# The media lines are redundant against the global *.pdf/*.mp4 rules above, and
+# are kept deliberately: they make "these samples stay on this machine" a LOCAL
+# guarantee that survives a later narrowing of the global patterns.
+tests/livetest/ws/
+tests/livetest/out/
+tests/livetest/*.pdf
+tests/livetest/*.mp4

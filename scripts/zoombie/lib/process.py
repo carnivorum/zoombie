@@ -83,9 +83,28 @@ def write_result(
 
     Key order is fixed (ok, action, error, data, timestamp) so the line is
     byte-stable for a caller that compares runs.
+
+    The line is written as UTF-8 BYTES, not through ``sys.stdout``'s text layer.
+    A text write uses the console's code page, and on this platform that can be
+    cp1251: a source whose title carries an exotic-but-legal codepoint then crashed
+    the whole command with ``UnicodeEncodeError`` AFTER the work was done, emitting
+    no result line at all -- a contract violation (exactly one line per invocation)
+    that no caller can recover from. Encoding explicitly makes the machine-readable
+    line independent of the terminal it happens to run in, which is what the
+    ``ensure_ascii=False`` intent always required.
     """
     payload = result_payload(action, ok=ok, data=data, error=error)
-    sys.stdout.write(json.dumps(payload, ensure_ascii=False, separators=(",", ":")) + "\n")
+    line = json.dumps(payload, ensure_ascii=False, separators=(",", ":")) + "\n"
+    buffer = getattr(sys.stdout, "buffer", None)
+    if buffer is not None:
+        # The normal path: bypass the text layer's code page entirely.
+        buffer.write(line.encode("utf-8"))
+        buffer.flush()
+        return
+    # A replaced stdout (a test capture, a caller-supplied file object) has no
+    # buffer; fall back to a text write, degrading a character that cannot be
+    # encoded rather than losing the whole line.
+    sys.stdout.write(line.encode("utf-8", errors="replace").decode("utf-8"))
     sys.stdout.flush()
 
 

@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 
 import pytest
 
@@ -246,6 +247,35 @@ class TestOverwriteSafety:
                                internal=False)
         named = sz.run(_args(step="name", run=run, name="My Item"))
         assert os.path.basename(named.data["itemDir"]) == "My Item (2)"
+
+    def test_an_archived_item_is_still_reused(self, tmp_path, monkeypatch):
+        """Regression: an archive leaves no ``summary.md``, so the item looked foreign.
+
+        The live test caught this: after ``-Archive`` the item root holds only the
+        archive folder and the media, and the next run then created ``... (2)``
+        instead of reusing the item it had just archived.
+        """
+        source, folder = self._item(tmp_path, figures=1)
+        run, _dest = _seed_run(tmp_path, monkeypatch, source=source, internal=True)
+        first = sz.run(_args(step="name", run=run, archive=True))
+        archive_dir = first.data["archived"]["to"]
+        assert os.path.isdir(archive_dir)
+        # The item now holds NO summary.md and NO img/ -- only the archive + media.
+        # This is the state that made it look like a stranger's folder.
+        assert not (folder / "summary.md").exists()
+        assert not (folder / "img").exists()
+        assert (folder / "b.mp4").is_file()
+
+        # A second run against a source in that SAME folder. Nothing is written to
+        # the folder first: the point is the state the archive left behind. The
+        # first run's scratch is cleared because ``_seed_run`` uses a fixed name.
+        shutil.rmtree(tmp_path / ".tmp", ignore_errors=True)
+        run2, _dest2 = _seed_run(tmp_path, monkeypatch,
+                                 source=str(folder / "b.mp4"), internal=True)
+        second = sz.run(_args(step="name", run=run2))
+        assert second.data["itemDir"] == str(folder), (
+            "an archived item must be REUSED, not suffixed with (2)"
+        )
 
     def test_a_second_prose_run_does_not_archive_again(self, tmp_path, monkeypatch):
         """Prose can run many times; only the name step snapshots the user's file."""
