@@ -19,8 +19,18 @@ from zoombie.lib.errors import ZoombieError
 
 
 def _seed_run(tmp_path, monkeypatch, *, source: str, internal: bool,
-              proposed: str = "Proposed Name", transcript: str = "intro words\n\nbody words\n"):
-    """Create a run scratch dir the name/prose/verify steps can consume."""
+              proposed: str = "Proposed Name", transcript: str = "intro words\n\nbody words\n",
+              media: str | None = None, kind: str = "video",
+              external_local: bool | None = None, run_version: int | None = None):
+    """Create a run scratch dir the name/prose/verify steps can consume.
+
+    ``media`` is the readable media handle the source step would have resolved: the
+    source's own path for a local file, the scratch download for a URL.
+    ``external_local`` mirrors the source step's record of whether the USER owns the
+    media and must be asked how to place it; it defaults to "a local, non-internal
+    file with a handle". ``run_version`` overrides the recorded schema version
+    (used to drive the M3 pre-change-run refusal).
+    """
     monkeypatch.chdir(tmp_path)
     run = tmp_path / ".tmp" / "zoombie-summarize" / "abc123"
     run.mkdir(parents=True)
@@ -30,13 +40,19 @@ def _seed_run(tmp_path, monkeypatch, *, source: str, internal: bool,
         destination = os.path.join(
             workspace.unsorted_dir(workspace.KIND_SUMMARIES), proposed
         )
+    if external_local is None:
+        external_local = (not internal) and bool(media)
     base = run / "transcript"
     (run / "transcript.txt").write_text(transcript, encoding="utf-8")
     (run / "run.json").write_text(json.dumps({
-        "source": source, "kind": "video", "internal": internal,
+        "source": source, "kind": kind, "internal": internal,
         "destination": destination, "proposed": proposed,
-        "media": None, "base": str(base).replace("\\", "/"),
+        "sourceMedia": media, "media": media,
+        "externalLocal": external_local,
+        "mediaMode": None, "mediaPlaced": None,
+        "base": str(base).replace("\\", "/"),
         "destinationFinal": None,
+        "runVersion": sz.RUN_VERSION if run_version is None else run_version,
     }), encoding="utf-8")
     return str(run), destination
 
@@ -46,7 +62,7 @@ def _args(**overrides):
 
     base = dict(step=None, source=None, run=None, name=None, slides=None,
                 times=None, title=None, summary_text=None, criticism=None,
-                sections=None, no_media=False, language="auto",
+                sections=None, media=None, confirm_move=False, language="auto",
                 work_root=None, dry_run=False, force=False)
     base.update(overrides)
     return argparse.Namespace(**base)
@@ -283,3 +299,361 @@ class TestDownloadRouting:
         ))
         assert internal is False
         assert directory == str(target)
+
+
+class TestMediaPlacement:
+    """An EXISTING local source: the user's keep/copy/move/none choice."""
+
+    @staticmethod
+    def _local(tmp_path) -> str:
+        """A local media file OUTSIDE the workspace (routes to _unsorted)."""
+        elsewhere = tmp_path / "elsewhere"
+        elsewhere.mkdir()
+        media = elsewhere / "clip.mp4"
+        media.write_bytes(b"media-bytes")
+        return str(media)
+
+    def test_default_copies_an_external_local_source(self, tmp_path, monkeypatch):
+        media = self._local(tmp_path)
+        run, _dest = _seed_run(tmp_path, monkeypatch, source=media,
+                               internal=False, media=media)
+        outcome = sz.run(_args(step="name", run=run, name="My Item"))
+        item = outcome.data["itemDir"]
+        assert outcome.data["mediaMode"] == "copy"
+        assert os.path.isfile(os.path.join(item, "clip.mp4"))
+        # A copy leaves the user's own file exactly where it was.
+        assert os.path.isfile(media)
+
+    def test_move_without_the_confirm_does_not_relocate_the_user_file(
+        self, tmp_path, monkeypatch
+    ):
+        """H3: a bare ``move`` is REFUSED -- the user's file is never touched.
+
+        ``move`` relocates a file the user owns, with no snapshot, so a mistyped or
+        accidental move must not destroy the source location. Without the explicit
+        acknowledgement the step refuses and the original stays put.
+        """
+        media = self._local(tmp_path)
+        run, _dest = _seed_run(tmp_path, monkeypatch, source=media,
+                               internal=False, media=media)
+        with pytest.raises(ZoombieError, match="ConfirmMove"):
+            sz.run(_args(step="name", run=run, name="My Item", media="move"))
+        # No relocation and no copy: the user's file is exactly where it was.
+        assert os.path.isfile(media)
+        item = os.path.join(str(tmp_path / "_unsorted" / "summaries"), "My Item")
+        assert not os.path.exists(os.path.join(item, "clip.mp4"))
+        # H2: the refusal happened BEFORE any folder was created, so the name was
+        # not consumed either.
+        assert not os.path.isdir(item)
+
+    def test_move_relocates_the_media_only_when_confirmed(self, tmp_path, monkeypatch):
+        media = self._local(tmp_path)
+        run, _dest = _seed_run(tmp_path, monkeypatch, source=media,
+                               internal=False, media=media)
+        outcome = sz.run(_args(step="name", run=run, name="My Item",
+                               media="move", confirm_move=True))
+        item = outcome.data["itemDir"]
+        assert outcome.data["mediaMode"] == "move"
+        assert os.path.isfile(os.path.join(item, "clip.mp4"))
+        # A CONFIRMED move removes the original.
+        assert not os.path.exists(media)
+
+    def test_an_unknown_mode_leaves_no_folder_and_consumes_no_name(
+        self, tmp_path, monkeypatch
+    ):
+        """H2: the media answer is validated BEFORE the destination is created.
+
+        A folder created first would make a retry find the name taken (``My Item
+        (2)``) and litter an empty item; validating first means one typo costs one
+        refusal and nothing on disk.
+        """
+        media = self._local(tmp_path)
+        run, _dest = _seed_run(tmp_path, monkeypatch, source=media,
+                               internal=False, media=media)
+        with pytest.raises(ZoombieError, match="Media"):
+            sz.run(_args(step="name", run=run, name="My Item", media="teleport"))
+        item = os.path.join(str(tmp_path / "_unsorted" / "summaries"), "My Item")
+        assert not os.path.isdir(item), "a bad -Media must not create the folder"
+
+        # A corrected retry keeps the plain name: ``My Item``, never ``My Item (2)``.
+        outcome = sz.run(_args(step="name", run=run, name="My Item", media="copy"))
+        assert os.path.basename(outcome.data["itemDir"]) == "My Item"
+
+    def test_a_vanished_source_media_fails_at_name_naming_the_source(
+        self, tmp_path, monkeypatch
+    ):
+        """M2: deleting the source between source and name is named at NAME.
+
+        The alternative is the misleading ``slides`` message ("no retained media to
+        extract slides from"), which blames the slides step for a file that was
+        gone before it ran.
+        """
+        media = self._local(tmp_path)
+        run, _dest = _seed_run(tmp_path, monkeypatch, source=media,
+                               internal=False, media=media)
+        os.remove(media)
+        with pytest.raises(ZoombieError) as caught:
+            sz.run(_args(step="name", run=run, name="My Item"))
+        message = str(caught.value)
+        assert "source media is gone" in message
+        assert "clip.mp4" in message
+
+    def test_the_external_parent_comes_from_the_recorded_destination(
+        self, tmp_path, monkeypatch
+    ):
+        """M1: the item lands under the parent the SOURCE step reported.
+
+        The name step used to rebuild the parent from ``unsorted_dir`` (a fresh cwd
+        computation). It must instead use the recorded ``destination``'s parent, so
+        the item can never drift from the ``data.destination`` the source step
+        already showed the agent.
+        """
+        media = self._local(tmp_path)
+        run, destination = _seed_run(tmp_path, monkeypatch, source=media,
+                                     internal=False, media=media,
+                                     proposed="Recorded Name")
+        assert os.path.basename(destination) == "Recorded Name"
+        outcome = sz.run(_args(step="name", run=run, name="My Item"))
+        assert os.path.dirname(outcome.data["itemDir"]) == os.path.dirname(destination)
+
+    def test_an_old_run_json_without_source_media_is_refused(self, tmp_path, monkeypatch):
+        """M3: a run scratch is not resumable across versions; say so explicitly."""
+        media = self._local(tmp_path)
+        # Simulate a pre-change run: no ``runVersion`` at all.
+        run, _dest = _seed_run(tmp_path, monkeypatch, source=media,
+                               internal=False, media=media, run_version=None)
+        raw = json.loads(open(os.path.join(run, "run.json"), encoding="utf-8").read())
+        raw.pop("runVersion", None)
+        open(os.path.join(run, "run.json"), "w", encoding="utf-8").write(
+            json.dumps(raw)
+        )
+        with pytest.raises(ZoombieError, match="not resumable across versions"):
+            sz.run(_args(step="name", run=run, name="My Item"))
+
+    def test_none_keeps_no_copy_but_the_source_survives(self, tmp_path, monkeypatch):
+        media = self._local(tmp_path)
+        run, _dest = _seed_run(tmp_path, monkeypatch, source=media,
+                               internal=False, media=media)
+        outcome = sz.run(_args(step="name", run=run, name="My Item", media="none"))
+        item = outcome.data["itemDir"]
+        assert outcome.data["mediaMode"] == "none"
+        assert outcome.data["media"] is None
+        assert not os.path.exists(os.path.join(item, "clip.mp4"))
+        assert os.path.isfile(media)
+
+    def test_an_in_place_source_defaults_to_keep(self, tmp_path, monkeypatch):
+        folder = tmp_path / "item"
+        folder.mkdir()
+        media = folder / "berserk.mp4"
+        media.write_bytes(b"\x00")
+        run, _dest = _seed_run(tmp_path, monkeypatch, source=str(media),
+                               internal=True, media=str(media))
+        outcome = sz.run(_args(step="name", run=run))
+        assert outcome.data["mediaMode"] == "keep"
+        assert outcome.data["media"] == str(media)
+
+    def test_none_on_an_in_place_source_keeps_no_copy(self, tmp_path, monkeypatch):
+        folder = tmp_path / "item"
+        folder.mkdir()
+        media = folder / "berserk.mp4"
+        media.write_bytes(b"\x00")
+        run, _dest = _seed_run(tmp_path, monkeypatch, source=str(media),
+                               internal=True, media=str(media))
+        outcome = sz.run(_args(step="name", run=run, media="none"))
+        assert outcome.data["mediaMode"] == "none"
+        assert outcome.data["media"] is None
+        # A "none" choice is a no-op for the file, never a delete.
+        assert media.is_file()
+
+    def test_an_unknown_mode_is_refused(self, tmp_path, monkeypatch):
+        media = self._local(tmp_path)
+        run, _dest = _seed_run(tmp_path, monkeypatch, source=media,
+                               internal=False, media=media)
+        with pytest.raises(ZoombieError, match="Media"):
+            sz.run(_args(step="name", run=run, name="X", media="teleport"))
+
+    def test_the_name_step_echoes_the_media_choice(self, tmp_path, monkeypatch):
+        """H1/L1/L2: the answer travels back under its own name (``mediaChoice``).
+
+        The source step describes the QUESTION (``data.media``, a dict); the name
+        step reports the ANSWER under a distinct key, so the two steps' media
+        shapes never collide and the decision is machine-readable beside ``why``.
+        """
+        media = self._local(tmp_path)
+        run, _dest = _seed_run(tmp_path, monkeypatch, source=media,
+                               internal=False, media=media)
+        outcome = sz.run(_args(step="name", run=run, name="My Item", media="copy"))
+        choice = outcome.data["mediaChoice"]
+        assert isinstance(choice, dict)
+        assert choice == {"mode": "copy", "choiceRequired": True, "default": "copy"}
+
+    def test_no_answer_is_required_for_a_kind_with_no_media(self, tmp_path, monkeypatch):
+        """L2: a PDF/image kind gets NO media question and NO misleading default."""
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.setattr(sz, "_dispatch", lambda *_a, **_k: _empty_outcome())
+        source = str(tmp_path / "paper.pdf")
+        open(source, "wb").write(b"%PDF")
+        outcome = sz.run(_args(step="source", source=source))
+        block = outcome.data["media"]
+        assert block["choiceRequired"] is False
+        assert "default" not in block, "no question means no default"
+        assert "-Media" not in outcome.data["next"]["args"]
+
+    @pytest.mark.parametrize("internal", [True, False])
+    def test_a_local_source_actually_computes_the_media_handle(
+        self, tmp_path, monkeypatch, internal
+    ):
+        """The SOURCE step itself was uncovered (``_seed_run`` injected the handle).
+
+        Drive ``_step_source`` for a real LOCAL file with the transcription/render
+        stubbed, and assert the handle, the question flag, the default and that the
+        run records a non-null ``sourceMedia`` -- internal and external. The bug
+        that shipped was that only the seed was exercised, never the step.
+        """
+        workspace_root = tmp_path / "ws"
+        workspace_root.mkdir()
+        if internal:
+            folder = workspace_root / "lore"
+            folder.mkdir()
+            source = folder / "clip.mp4"
+        else:
+            outside = tmp_path / "outside"
+            outside.mkdir()
+            source = outside / "clip.mp4"
+        source.write_bytes(b"media")
+
+        monkeypatch.chdir(workspace_root)
+        monkeypatch.setattr(sz, "_dispatch", lambda *_a, **_k: _source_outcome())
+        outcome = sz.run(_args(step="source", source=str(source)))
+
+        block = outcome.data["media"]
+        assert block["source"] == sz.paths.absolute(str(source))
+        assert block["insideItem"] is internal
+        # Only an EXTERNAL local file asks how to place it.
+        assert block["choiceRequired"] is (not internal)
+        assert ("default" in block) is (not internal)
+        if not internal:
+            assert block["default"] == "copy"
+        assert "-Media" not in outcome.data["next"]["args"]
+        # The run.json records a non-null handle.
+        state = sz._read_run(outcome.data["run"])
+        assert state["sourceMedia"] == sz.paths.absolute(str(source))
+
+    def test_slides_falls_back_to_the_source_when_no_copy_was_kept(
+        self, tmp_path, monkeypatch
+    ):
+        """The ``media=None`` of a "none" choice must not blind ``slides``.
+
+        ``slides`` reads ``state.media or state.sourceMedia``; this drives the step
+        with ``media`` None and a readable ``sourceMedia`` to prove the fallback.
+        """
+        media = self._local(tmp_path)
+        run, _dest = _seed_run(tmp_path, monkeypatch, source=media,
+                               internal=False, media=media)
+        sz.run(_args(step="name", run=run, name="My Item", media="none"))
+
+        seen: dict = {}
+
+        def fake_dispatch(command, argv):
+            if command == "slides":
+                seen["source"] = argv[argv.index("-Source") + 1]
+                return _empty_outcome()
+            return _empty_outcome()
+
+        monkeypatch.setattr(sz, "_dispatch", fake_dispatch)
+        outcome = sz.run(_args(step="slides", run=run, slides="true"))
+        assert outcome.data["slides"]["requested"] is True
+        # The slides step read the SOURCE (media is None under a "none" choice).
+        assert seen["source"] == sz.paths.absolute(media)
+
+
+def _empty_outcome():
+    from zoombie.cli import Outcome
+
+    return Outcome(ok=True, data={})
+
+
+def _source_outcome():
+    """A pipeline/readpdf-style result with no keepable media of its own."""
+    from zoombie.cli import Outcome
+
+    return Outcome(ok=True, data={"source": {"title": None}})
+
+
+class TestBlockTwoSource:
+    """L3: a raw origin path must never be emitted bare into block 2."""
+
+    def test_a_source_with_spaces_and_cyrillic_is_a_code_span(self, tmp_path, monkeypatch):
+        folder = tmp_path / "item"
+        folder.mkdir()
+        source = "https://example.com/видео (1).mp4"
+        run, _dest = _seed_run(tmp_path, monkeypatch, source=source, internal=False,
+                               media=None, kind="video", external_local=False)
+        sz.run(_args(step="name", run=run, name="My Item", media="none"))
+        outcome = sz.run(_args(step="prose", run=run, title="T", summary_text="s"))
+        text = open(outcome.data["summary"], encoding="utf-8").read()
+        # The raw URL is wrapped in a code span, not emitted as bare text.
+        assert f"`{source}`" in text
+
+    def test_a_backtick_in_the_source_is_fenced_out(self):
+        assert sz._code_span("a`b") == "`` a`b ``"
+        assert sz._code_span("plain") == "`plain`"
+        assert sz._code_span("") == ""
+
+
+class TestNextArgsAreReplayable:
+    """Guard: a step's recommended ``data.next.args`` must parse through the CLI.
+
+    ``args`` is the recommended INVOCATION, so the agent may replay it verbatim;
+    it therefore must never carry a value argparse rejects. The defect that
+    shipped was exactly that class -- the source step emitted
+    ``-Media "keep|copy|move|none"``, which is not in ``-Media``'s ``choices`` and
+    would exit the parser. This walks the real step seams (source -> name for an
+    in-place AND an external source -- the source step is where the placeholder
+    lived -- and name -> slides) and feeds each ``next.args`` through the real
+    :func:`cli.build_parser`. An unparseable ``args`` is a test failure here,
+    rather than a runtime surprise.
+    """
+
+    def test_every_recommended_next_call_parses_through_the_cli(
+        self, tmp_path, monkeypatch
+    ):
+        from zoombie import cli
+
+        def replay(block: dict) -> None:
+            # The source step's block is ``command="summarize"``; the next step is
+            # the ``-Step`` value already carried in ``args``.
+            assert block["command"] == "summarize"
+            argv = ["summarize"]
+            for key, value in block["args"].items():
+                argv.extend([key, str(value)])
+            cli.build_parser().parse_args(argv)  # must not raise
+
+        # source -> name, for an in-place and an external local source.
+        for internal in (True, False):
+            root = tmp_path / ("ws_inside" if internal else "ws_outside")
+            root.mkdir()
+            if internal:
+                folder = root / "lore"
+                folder.mkdir()
+                source = folder / "clip.mp4"
+            else:
+                outside = tmp_path / "outside"
+                outside.mkdir()
+                source = outside / "clip.mp4"
+            source.write_bytes(b"media")
+            monkeypatch.chdir(root)
+            monkeypatch.setattr(sz, "_dispatch", lambda *_a, **_k: _source_outcome())
+            outcome = sz.run(_args(step="source", source=str(source)))
+            assert outcome.data["next"]["args"]["-Step"] == "name"
+            replay(outcome.data["next"])
+
+        # name -> slides.
+        media = tmp_path / "item" / "clip.mp4"
+        media.parent.mkdir(exist_ok=True)
+        media.write_bytes(b"media")
+        run, _dest = _seed_run(tmp_path, monkeypatch, source=str(media),
+                               internal=False, media=str(media))
+        outcome = sz.run(_args(step="name", run=run, name="My Item", media="copy"))
+        assert outcome.data["next"]["args"]["-Step"] == "slides"
+        replay(outcome.data["next"])

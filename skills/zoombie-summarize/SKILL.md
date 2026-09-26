@@ -38,8 +38,8 @@ Call the `summarize` MCP tool once per step and follow `data.next`:
 
 | Step | Call | You do |
 |------|------|--------|
-| source | `summarize {source: "<url-or-path>"}` | nothing; the tool downloads/transcribes/renders into a run scratch and proposes a name |
-| name | `summarize {step:"name", run, name}` | **ask the user** the name (below) |
+| source | `summarize {source: "<url-or-path>"}` | for an EXISTING local file, **ask how to place the media** (below); the tool transcribes/renders into a run scratch and proposes a name |
+| name | `summarize {step:"name", run, name, media}` | **ask the user** the name, and carry the media answer (`media`, plus `confirm_move: true` only for a user-approved `move`) |
 | slides | `summarize {step:"slides", run, slides, times}` | **ask the user** the slides question; then review the proposed frames and keep/drop |
 | prose | `summarize {step:"prose", run, title, summary_text, criticism, sections}` | write the title, the short summary, an optional criticism, and the topic headings |
 | verify | `summarize {step:"verify", run}` | nothing; the tool gates the tree and deletes the run scratch |
@@ -48,15 +48,26 @@ Call the `summarize` MCP tool once per step and follow `data.next`:
 workspace (see the destination rule below) there is no name question: the
 destination is the source's own folder, so go straight to `slides`.
 
-## The two questions, asked SEPARATELY
+## The questions, asked SEPARATELY
 
 Ask **one** question, let the user answer, then ask the next. Never present a
-combined four-way question.
+combined multi-way question.
 
-1. **The name.** The tool returns `data.proposed`. Offer it as the default and
+1. **How the media is placed** (an EXISTING local file only). When the source is a
+   file that already exists -- not a URL -- the tool sets
+   `data.media.choiceRequired`. Ask whether to **copy** the file into the item,
+   **move** it there (the original is removed), or keep **no** copy. Carry the
+   answer to `step:"name"` as `media`. The default is `keep` when the file already
+   sits in the item, else `copy`; do not ask this for a URL or an in-place source.
+   `move` **RELOCATES the user's own file** (the source is deleted, with no
+   snapshot), so it is refused unless you also pass `confirm_move: true` **and**
+   the user explicitly agreed to the move. Prefer `copy`, which leaves the original
+   untouched. The source step's `data.next.args` already carries a `-Media` entry
+   with the accepted handles -- do not drop it.
+2. **The name.** The tool returns `data.proposed`. Offer it as the default and
    let the user accept it or supply their own; a name the user TYPES wins. Pass
    the answer as `name`.
-2. **Slides** (video only). Ask whether to extract slide frames; if the user has
+3. **Slides** (video only). Ask whether to extract slide frames; if the user has
    exact timestamps, pass them as `times`. Answer with `slides: "true"` or `"false"`.
 
    Auto-detect PROPOSES frames and drops non-sequential repeats (`-GlobalDedup`),
@@ -75,10 +86,12 @@ The tool decides, and reports it as `data.destination` / `data.itemDir`:
   media, in the source's own folder, whose name is unchanged;
 - a URL, or a file **outside** the workspace -> `<workspace>/_unsorted/summaries/<name>/`.
 
-A finished item holds only `summary.md`, the kept media, and a visible **`img/`**
-folder holding exactly the figures the document inlines. Everything else (the
-transcript, the `.srt`, the origin sidecar, the OCR report, the manifest,
-reading copies) is throwaway in a run scratch dir and is deleted at `verify`.
+A finished item holds only `summary.md`, the media (per the placement answer), and
+a visible **`img/`** folder holding exactly the figures the document inlines.
+Everything else (the transcript, the `.srt`, the origin sidecar, the OCR report,
+the manifest, reading copies) is throwaway in a run scratch dir and is deleted at
+`verify`. When the user chose **no** copy, block 2 names the source where it lies
+rather than linking a file the item does not hold.
 
 ## Never destroy an existing summary
 
@@ -98,12 +111,16 @@ Call the `summarize` MCP tool with the step's JSON arguments:
 
 ```json
 {"source": "<url-or-path>"}
-{"step": "name", "run": "<run>", "name": "<confirmed-name>"}
+{"step": "name", "run": "<run>", "name": "<confirmed-name>", "media": "copy"}
+{"step": "name", "run": "<run>", "name": "<name>", "media": "move", "confirm_move": true}
 {"step": "slides", "run": "<run>", "slides": "true", "times": "00:01:00,00:05:30"}
 {"step": "prose", "run": "<run>", "title": "<title>", "summary_text": "<short summary>",
  "sections": "[{\"heading\": \"Вступление\", \"at\": \"first words of the section\"}]"}
 {"step": "verify", "run": "<run>"}
 ```
+
+The first `name` variant is the safe one; the second (`move`) applies only after the
+user explicitly agreed, because it deletes the original.
 
 CLI fallback only:
 `& $cli summarize -Source "<url-or-path>"`, then `-Step name -Run "<run>" -Name "..."`, etc.
@@ -120,9 +137,11 @@ yt-dlp command, and do not write `summary.md` yourself.
 ## Procedure
 
 1. **Inspect the project** once (workspace layout, where media already lives).
-2. **Start** with `summarize {source}`. Read `data.proposed`, `data.internal` and
-   `data.destination`. If `internal` is true, skip to step 4 (slides).
-3. **Ask the name**, separately, then call `step:"name"`.
+2. **Start** with `summarize {source}`. Read `data.proposed`, `data.internal`,
+   `data.destination` and `data.media`. If `data.media.choiceRequired` is true,
+   ask that question first (copy / move / no copy).
+3. **Ask the name**, separately, then call `step:"name"` with `-Media` when the
+   source was an existing local file.
 4. **Ask the slides question**, separately, then call `step:"slides"`.
 5. **Write the prose.** Read the source text if you need to (the run scratch has
    it), then give the tool the title, the short summary, an optional criticism,

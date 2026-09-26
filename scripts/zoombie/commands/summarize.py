@@ -43,6 +43,13 @@ __all__ = ["run"]
 
 RUN_MARKER = "run.json"
 
+# The run-state schema version written into ``run.json`` and checked on every
+# resume. Bumping it is how a future change to the recorded state fails a resume
+# LOUDLY ("start again") instead of half-working against a stale shape. It exists
+# because the media model gained ``sourceMedia`` after runs had already shipped
+# WITHOUT it: an old ``run.json`` is not resumable (see :func:`_read_run`).
+RUN_VERSION = 2
+
 _VIDEO_EXT = {".mp4", ".mkv", ".webm", ".mov", ".avi", ".m4v"}
 _AUDIO_EXT = {".mp3", ".wav", ".m4a", ".flac", ".ogg", ".opus", ".aac"}
 _PDF_EXT = {".pdf"}
@@ -52,6 +59,14 @@ _URL_RE = re.compile(r"^[a-z][a-z0-9+.-]*://", re.IGNORECASE)
 
 # The step order, used to refuse an out-of-order call.
 STEPS = ("source", "name", "slides", "prose", "verify")
+
+# How an EXISTING local media may be placed in the item. A URL download is always
+# placed (it is ours); these govern a source the user already owns:
+#   keep -- leave it where it is (the default when it is already the item's folder)
+#   copy -- duplicate it into the item (the default otherwise)
+#   move -- move it into the item, the original removed
+#   none -- keep no copy, reference the source path
+_MEDIA_MODES = ("keep", "copy", "move", "none")
 
 
 def _scratch_root() -> str:
@@ -71,19 +86,38 @@ def _run_file(run: str) -> str:
 
 
 def _write_run(run: str, payload: dict) -> None:
+    # Stamp the schema version on EVERY write, so a run.json always declares the
+    # shape a later step may assume and an older file is recognisable (see
+    # :func:`_read_run`).
+    payload = {**payload, "runVersion": RUN_VERSION}
     with open(paths.to_extended(_run_file(run)), "w", encoding="utf-8", newline="\n") as handle:
         json.dump(payload, handle, ensure_ascii=False, indent=2)
         handle.write("\n")
 
 
 def _read_run(run: str) -> dict:
-    """Load a run's state, or refuse with a clear message."""
+    """Load a run's state, or refuse with a clear message.
+
+    A ``run.json`` written by a DIFFERENT toolchain version -- its ``runVersion`` is
+    missing (a pre-change file) or ahead of :data:`RUN_VERSION` -- is REFUSED rather
+    than half-read: the media model gained ``sourceMedia`` after early runs shipped,
+    so an old file carries no readable media handle and resuming it would mis-place
+    the media. The run scratch is throwaway, so the fix is to start again.
+    """
     if not run or not paths.is_file(_run_file(run)):
         raise ZoombieError(
             f"summarize: no run at {run!r}. Start with step 0 by passing -Source."
         )
     with open(paths.to_extended(_run_file(run)), "r", encoding="utf-8") as handle:
-        return json.load(handle)
+        state = json.load(handle)
+    if state.get("runVersion") != RUN_VERSION:
+        found = state.get("runVersion")
+        raise ZoombieError(
+            f"summarize: the run at {run!r} was written by a different version "
+            f"(runVersion {found!r}, expected {RUN_VERSION}); the run scratch is not "
+            "resumable across versions -- start again with step 0 (-Source)."
+        )
+    return state
 
 
 def _kind_of(source: str) -> str:
@@ -125,6 +159,82 @@ def _next(step: str, args: dict, why: str) -> dict:
     return next_mod.build("summarize", {"-Step": step, **args}, why=why, attachable=[])
 
 
+def _media_choice_required(state: dict) -> bool:
+    """Whether the USER must answer the media-placement question.
+
+    Only an EXISTING local file that is NOT already inside its item raises the
+    question: a URL download is ours to place, and an in-place source is already
+    beside the summary. A PDF or an image folder has no separate media to place at
+    all, so it never asks.
+
+    ``externalLocal`` (recorded at the source step) is required in addition to
+    ``sourceMedia`` because a DOWNLOAD also has a ``sourceMedia`` handle (the file
+    the pipeline left in the scratch) -- but that one is ours, not the user's.
+    """
+    return (
+        bool(state.get("sourceMedia"))
+        and not state.get("internal")
+        and bool(state.get("externalLocal"))
+    )
+
+
+def _default_media_mode(state: dict) -> str:
+    """The placement used when the user gives no ``-Media``: keep in place, else copy."""
+    return "keep" if state.get("internal") else "copy"
+
+
+def _media_choice(state: dict, mode: str | None = None) -> dict:
+    """The media decision to echo in the NAME step's result.
+
+    Named ``mediaChoice``, distinct from the ``source`` step's ``data.media``
+    (the readable-handle block): the two steps carry DIFFERENT shapes --
+    ``source`` is the description of a question, ``name`` is the scalar answer --
+    so they are named apart rather than sharing ``media`` and inviting a
+    mis-read. ``mode`` is the placement actually applied (the user's ``-Media``
+    or the routing's default). ``default`` is emitted ONLY when a choice is
+    actually required: a PDF/image kind has no media to place, and a misleading
+    ``"copy"`` there would invent a decision the user was never asked for.
+    """
+    required = _media_choice_required(state)
+    block: dict = {
+        "mode": mode or _default_media_mode(state),
+        "choiceRequired": required,
+    }
+    if required:
+        block["default"] = _default_media_mode(state)
+    return block
+
+
+def _media_mode(args, state: dict) -> str:
+    """The user's media-placement choice, validated and defaulted.
+
+    An omitted ``-Media`` falls back to the routing: a source already inside the
+    item is KEPT (the user's file is not moved out of its own folder), anything
+    else is COPIED. An explicit value wins, and an unknown one is refused rather
+    than silently treated as the default.
+
+    ``move`` is GATED (H3): it RELOCATES the user's own file, deleting the source
+    location, so it additionally requires an explicit ``-ConfirmMove``. A mistyped
+    or accidental ``move`` therefore cannot destroy where the user kept the file;
+    while the run is still alive the source is only ever relocated when the caller
+    said so twice (the value AND the acknowledgement).
+    """
+    chosen = (getattr(args, "media", None) or "").strip().lower()
+    if not chosen:
+        return _default_media_mode(state)
+    if chosen not in _MEDIA_MODES:
+        raise ZoombieError(
+            f"summarize: -Media must be one of {_MEDIA_MODES}, got {chosen!r}."
+        )
+    if chosen == "move" and not getattr(args, "confirm_move", False):
+        raise ZoombieError(
+            "summarize: -Media move RELOCATES the user's own file (the original is "
+            "removed). Re-run with -ConfirmMove (and media:\"move\") only after the "
+            "user explicitly agreed; use -Media copy to leave the original in place."
+        )
+    return chosen
+
+
 # --------------------------------------------------------------------------- #
 # step 0: source
 # --------------------------------------------------------------------------- #
@@ -141,6 +251,13 @@ def _step_source(args) -> Outcome:
     run = _new_run()
     process.log(f"summarize: run scratch {run}", "step")
 
+    # ``media`` is the readable media handle for THIS run, resolved independently of
+    # where it finally lands. The pipeline deliberately does NOT duplicate a
+    # user-supplied local file, so for a local source the handle is the source file
+    # ITSELF, wherever the user keeps it -- nothing media-shaped is left in the run
+    # scratch. A URL is downloaded into the scratch, so its handle is what the
+    # pipeline left there. The USER then chooses (at the name step) whether the item
+    # keeps a copy, a move, or nothing.
     media: str | None = None
     base: str | None = None
     title: str | None = None
@@ -160,7 +277,11 @@ def _step_source(args) -> Outcome:
         if not outcome.ok:
             return outcome
         made = outcome.data or {}
-        media = (made.get("sourceFile") and os.path.join(run, made["sourceFile"])) or _media_in(run)
+        if _URL_RE.match(source):
+            media = (made.get("sourceFile") and os.path.join(run, made["sourceFile"])) or _media_in(run)
+        else:
+            # A local source: the user's own file is the media, at its real path.
+            media = paths.absolute(source)
         base = os.path.join(run, "transcript")
         title = (made.get("source") or {}).get("title") if isinstance(made.get("source"), dict) else None
     elif kind == "pdf":
@@ -178,7 +299,8 @@ def _step_source(args) -> Outcome:
             return outcome
         base = os.path.join(run, "source")
 
-    internal = (not _URL_RE.match(source)) and workspace.inside_workspace(source)
+    is_url = bool(_URL_RE.match(source))
+    internal = (not is_url) and workspace.inside_workspace(source)
     if internal:
         destination = os.path.dirname(paths.absolute(source))
         proposed = workspace.sanitize_name(
@@ -190,20 +312,82 @@ def _step_source(args) -> Outcome:
             workspace.unsorted_dir(workspace.KIND_SUMMARIES), proposed
         )
 
+    # The media question is the USER's to answer, and only an EXISTING local file
+    # raises it: a download is ours to place, an in-place source is already beside
+    # the summary, and a PDF or an image folder has no separate media to place.
+    # ``externalLocal`` is recorded so the name step can tell a USER-owned file from
+    # a DOWNLOAD (both carry a ``sourceMedia`` handle, but only the former is asked
+    # about).
+    external_local = (not is_url) and bool(media) and not internal
+
     _write_run(run, {
         "source": source, "kind": kind, "internal": internal,
         "destination": destination, "proposed": proposed,
-        "media": media, "base": base, "destinationFinal": None,
+        # ``sourceMedia`` is the readable handle; ``media`` becomes the PLACED
+        # deliverable at the name step (and equals sourceMedia when nothing is
+        # copied). Kept separate so a "no copy"/"keep" choice never blinds the
+        # slides step to a perfectly readable source.
+        "sourceMedia": media, "media": media, "base": base,
+        "externalLocal": external_local,
+        "mediaMode": None, "mediaPlaced": None, "destinationFinal": None,
     })
 
+    # The media question is the USER's to answer, and only an EXISTING local file
+    # raises it (``external_local`` above). The answer arrives at the name step as
+    # -Media, and the source step describes the question in ``data.media`` and in
+    # ``why`` -- NOT in ``data.next.args``, which is a replayable invocation.
+    choice_required = external_local
+    mode_default = _default_media_mode({"internal": internal})
+    why = (
+        "ASK the user (a separate question) whether to COPY the source media into "
+        "the item, MOVE it there (with an explicit confirm), or keep NO copy; then "
+        "pass the folder name as -Name and the answer as -Media copy|move|none"
+        if choice_required else
+        "confirm or replace the folder name with the user, then pass it as -Name; "
+        "for an in-place source the folder is fixed, so confirm it as-is, and for a "
+        "URL or a rendered source -Media does not apply"
+    )
+    # ``args`` is the recommended INVOCATION and must be REPLAYABLE: a placeholder
+    # like "keep|copy|move|none" is not a valid ``-Media`` choice (it is not in
+    # argparse ``choices``) and would exit argparse. The question therefore rides in
+    # the sibling ``data.media`` descriptor and in ``why`` -- exactly as the name
+    # step reports its ANSWER under ``data.mediaChoice`` -- and ``-Media`` is never
+    # added to any ``next.args``.
+    next_args = {"-Run": run}
     return Outcome(ok=True, data={
         "step": "source", "run": run, "kind": kind, "internal": internal,
         "proposed": proposed, "destination": destination,
-        "next": _next("name", {"-Run": run},
-                      "confirm or replace the folder name with the user, then pass "
-                      "it as -Name; for an in-place source the folder is fixed, so "
-                      "confirm it as-is"),
+        # ``data.media`` is the source step's DESCRIPTOR (dict): the readable
+        # handle plus the question's shape. The NAME step echoes a scalar answer
+        # under a DIFFERENT name (``mediaChoice``) so the two shapes are never
+        # confused. ``default`` is emitted only when a choice is actually required
+        # -- a PDF/image kind has no media to place and must not advertise a
+        # misleading "copy" default for a question the user is never asked.
+        "media": _source_media_block(
+            media=media, internal=internal, choice_required=choice_required,
+            default=mode_default,
+        ),
+        "next": _next("name", next_args, why),
     })
+
+
+def _source_media_block(
+    *, media: str | None, internal: bool, choice_required: bool, default: str
+) -> dict:
+    """The ``data.media`` DESCRIPTOR emitted by the SOURCE step.
+
+    A dict -- distinct from the NAME step's scalar ``data.media`` answer -- so a
+    reader can tell the two apart by shape. ``default`` is present only when
+    ``choiceRequired``: otherwise there is no question to default.
+    """
+    block: dict = {
+        "source": media,
+        "insideItem": internal,
+        "choiceRequired": choice_required,
+    }
+    if choice_required:
+        block["default"] = default
+    return block
 
 
 # --------------------------------------------------------------------------- #
@@ -217,6 +401,24 @@ def _step_name(args) -> Outcome:
     if state.get("destinationFinal"):
         raise ZoombieError("summarize: the name step already ran for this run.")
 
+    # H2: validate the media answer FIRST, BEFORE the destination is computed or
+    # created. A bad ``-Media`` must raise before ANY folder exists: otherwise a
+    # retry finds the name already taken (and an empty item folder to clean up),
+    # so one typo consumes a unique name and litters ``My Item``/``My Item (2)``.
+    mode = _media_mode(args, state)
+
+    # M2: a ``sourceMedia`` that VANISHED between the source and name steps is
+    # named HERE, at the step that recorded it -- never left for ``slides`` to
+    # report as the misleading "no retained media to extract slides from". The
+    # error names the exact path, so the user knows WHAT disappeared.
+    source_media = state.get("sourceMedia") or state.get("media")
+    if source_media and not paths.is_file(source_media):
+        raise ZoombieError(
+            f"summarize: the source media is gone: {source_media} no longer exists "
+            "(it was recorded at the source step). Re-run step source to produce "
+            "it again."
+        )
+
     destination = state["destination"]
     if state.get("internal"):
         # In place: the destination is the source folder; the media is already
@@ -224,38 +426,60 @@ def _step_name(args) -> Outcome:
         final = destination
     else:
         name = workspace.sanitize_name(args.name) if args.name else state["proposed"]
-        parent = workspace.unsorted_dir(workspace.KIND_SUMMARIES)
+        # M1: the external parent is the RECORDED destination's parent -- the
+        # folder the source step already reported as ``data.destination`` -- not a
+        # fresh ``_unsorted`` path recomputed from the cwd. Since
+        # ``workspace_root()`` is unconditionally the cwd, recomputing here could
+        # name a DIFFERENT parent than the source step routed to; the item must
+        # land where the source step said it would.
+        parent = os.path.dirname(destination) or destination
         name = workspace.unique_name(parent, name)
         final = os.path.join(parent, name)
 
     paths.assert_fits(final, "The summarize destination")
     paths.ensure_dir(final)
 
-    # Place the media in the item folder. For an in-place source the media is
-    # already the source file; for an external or URL source it is moved out of
-    # the scratch (or copied from the source path) unless -NoMedia was given.
-    media = state.get("media")
+    # Place the media according to the USER'S choice (-Media), defaulted from the
+    # routing. ``source_media`` is the readable handle; ``placed`` is where it now
+    # lives INSIDE the item, or None when the user keeps no copy.
+    #   keep -- already beside the summary (an in-place source): nothing to do.
+    #   copy -- duplicate the source into the item; the original is untouched.
+    #   move -- move the source into the item; the original is gone.
+    #   none -- keep no copy; the item references the source where it lies.
     placed: str | None = None
-    if media and paths.is_file(media):
-        target = os.path.join(final, os.path.basename(media))
-        if os.path.normcase(paths.absolute(media)) != os.path.normcase(paths.absolute(target)):
-            if args.no_media:
-                placed = None
-            else:
-                paths.copy_file(media, target)
-                placed = target
-        else:
+    if source_media:
+        target = os.path.join(final, os.path.basename(source_media))
+        same = (
+            os.path.normcase(paths.absolute(source_media))
+            == os.path.normcase(paths.absolute(target))
+        )
+        if same and mode != "none":
+            # Already the item's file (an in-place source, or a re-run): nothing to
+            # move or copy. An explicit "none" still wins and records no placement.
             placed = target
-    elif state.get("internal") and not _URL_RE.match(state["source"]):
-        # A local source inside the workspace: the media is the source itself.
-        placed = paths.absolute(state["source"])
+        elif not same and mode == "move":
+            paths.move(source_media, target)
+            source_media = target
+            placed = target
+        elif not same and mode == "copy":
+            paths.copy_file(source_media, target)
+            placed = target
+        # "none" (or "keep" for a source outside the item): leave it where it is.
 
     # Figures are NOT published here. They are extracted into the run scratch by the
     # slides step and published by the prose step, which knows the final keep/drop
     # selection. Publishing early would copy frames the agent later drops.
 
     state["destinationFinal"] = final
-    state["media"] = placed or media
+    # ``sourceMedia`` is the readable handle (always the file to READ from);
+    # ``media`` is the PLACED deliverable in the item, or None when the user kept
+    # no copy. Keeping them distinct is what lets ``slides`` fall back to
+    # ``sourceMedia`` when ``media`` is None -- a "none" choice must not blind the
+    # slides step to a perfectly readable source.
+    state["sourceMedia"] = source_media
+    state["media"] = placed
+    state["mediaMode"] = mode
+    state["mediaPlaced"] = placed
 
     # Archive the existing summary ONCE, at the START of the task: the snapshot must
     # be the file as the USER left it, not an intermediate the run itself produced.
@@ -274,7 +498,14 @@ def _step_name(args) -> Outcome:
         "call step slides with -Slides true/false"
     )
     return Outcome(ok=True, data={
-        "step": "name", "run": run, "itemDir": final, "media": placed,
+        "step": "name", "run": run, "itemDir": final,
+        # ``media`` is the PLACED deliverable (a path, or None when no copy was
+        # kept) -- a scalar, unlike the source step's ``data.media`` DESCRIPTOR.
+        "media": placed, "mediaMode": mode, "sourceMedia": source_media,
+        # H1/L1/L2: the media DECISION echoed under its own name, so the answer is
+        # machine-readable next to ``why`` and the two steps' media shapes never
+        # collide. ``default`` rides only when a choice was required.
+        "mediaChoice": _media_choice(state, mode),
         "archived": archived,
         "next": _next("slides", {"-Run": run}, why),
     })
@@ -293,7 +524,7 @@ def _step_slides(args) -> Outcome:
         raise ZoombieError("summarize: run the name step before the slides step.")
 
     want = str(args.slides or "").strip().lower() in {"1", "true", "yes", "on"}
-    media = state.get("media")
+    media = state.get("media") or state.get("sourceMedia")
     frames: dict = {"requested": want, "extracted": 0}
 
     if want:
@@ -500,6 +731,25 @@ def _relative_link(from_dir: str, target: str) -> str:
     return percent_encode_dest(relative)
 
 
+def _code_span(text: str) -> str:
+    """``text`` as a Markdown code span, safe against spaces/Cyrillic/parens/quotes.
+
+    Block 2 sometimes names a raw origin path or URL rather than a link into the
+    item (the user kept no copy, or a URL was summarized). That value is
+    content-controlled -- it can carry a space, parentheses, a quote or a backtick
+    -- and emitted bare it would be re-parsed as emphasis or a broken link. A code
+    span swallows all of them. The one character a code span cannot carry is a
+    backtick, so a value containing one is fenced with a longer run and
+    space-padded, per CommonMark.
+    """
+    if not text:
+        return ""
+    if "`" not in text:
+        return f"`{text}`"
+    fence = "`" * (max(len(run) for run in re.findall(r"`+", text)) + 1)
+    return f"{fence} {text} {fence}"
+
+
 def _step_prose(args) -> Outcome:
     run = args.run
     state = _read_run(run)
@@ -530,8 +780,21 @@ def _step_prose(args) -> Outcome:
     # Assemble the six-block skeleton. postprocess takes over from here: it
     # numbers and stamps the block-6 headings, regenerates block 4, repairs the
     # links and inlines the figures.
-    media = state.get("media")
-    source_line = _relative_link(item_dir, media) if media else state.get("source", "")
+    # Block 2 points at the media only when it actually sits IN the item; otherwise
+    # it names the origin (the source path or URL) so the reference is never a link
+    # to a file the item does not own.
+    #
+    # L3: a WELL-FORMED relative link is percent-encoded by ``_relative_link``, but a
+    # raw origin path/URL is not -- an absolute path with spaces, Cyrillic, parens or
+    # a quote would land in the document verbatim. Wrap that origin in backticks (a
+    # code span) so Markdown never re-parses it as emphasis, a link, or a broken
+    # construct; a backtick inside the path is the one character a code span cannot
+    # carry, so it is escaped by pairing.
+    placed = state.get("mediaPlaced")
+    source_line = (
+        _relative_link(item_dir, placed) if placed
+        else _code_span(state.get("source") or "")
+    )
     parts = [
         f"# {args.title}",
         "",

@@ -178,7 +178,12 @@ KNOWN_OPTIONS: dict[str, dict] = {
     "summarize": {
         "step": "str", "run": "str", "name": "str", "slides": "str", "times": "str",
         "title": "str", "summary_text": "str", "criticism": "str", "sections": "str",
-        "no_media": "bool", "language": "str", "keep": "str", "drop": "str",
+        # How an EXISTING local source is placed: keep|copy|move|none (a value the
+        # agent carries back from the user's answer, not a boolean toggle).
+        # ``confirm_move`` is the acknowledgement -Media move RELOCATES the user's
+        # own file: move is refused without it.
+        "media": "str", "confirm_move": "bool", "language": "str",
+        "keep": "str", "drop": "str",
     },
     "items": {"root": "str", "depth": "int", "recurse": "bool", "json": "bool", "title": "str", "date": "str"},
     "modes": {"target": "str", "check": "bool", "apply": "bool"},
@@ -716,25 +721,27 @@ def tool_schemas() -> list[dict]:
             (
                 "Produce a summary.md step by step - the FRONT DOOR. Call once per step "
                 "and follow data.next: source (summarize a URL or path; produces the "
-                "source material), name (confirm the folder name; slides is a SEPARATE "
-                "question), slides (optional frames), prose (your title, summary, "
-                "optional criticism and section headings; the backend assembles block 6 "
-                "and archives any existing summary), verify (gate the tree and delete "
-                "the run scratch). Args: step, run (from the previous step), source, "
-                "name, slides, times, title, summary_text, criticism, sections."
+                "source material), name (confirm the folder name and, for an existing "
+                "local source, how the media is placed; slides is a SEPARATE question), "
+                "slides (optional frames), prose (your title, summary, optional "
+                "criticism and section headings; the backend assembles block 6 and "
+                "archives any existing summary), verify (gate the tree and delete the "
+                "run scratch). Args: step, run (from the previous step), source, name, "
+                "media, slides, times, title, summary_text, criticism, sections."
             ),
             {
                 "source": {"type": "string", "description": "source file or URL (step source)"},
                 "step": {"type": "string", "enum": ["source", "name", "slides", "prose", "verify"]},
                 "run": {"type": "string", "description": "the run scratch path from the previous step"},
                 "name": {"type": "string", "description": "the confirmed folder name (step name)"},
+                "media": {"type": "string", "enum": ["keep", "copy", "move", "none"], "description": "existing local media: keep in place, copy into the item, move into the item (requires confirm_move), or keep no copy (ask the user; default keep if in-place, else copy)"},
+                "confirm_move": {"type": "boolean", "description": "acknowledge that media:\"move\" RELOCATES the user's own file (the source is removed); move is refused without it"},
                 "slides": {"type": "string", "description": "true/false: extract slide frames? (step slides)"},
                 "times": {"type": "string", "description": "exact slide timestamps"},
                 "title": {"type": "string", "description": "the document title (step prose)"},
                 "summary_text": {"type": "string", "description": "the short summary, block 3"},
                 "criticism": {"type": "string", "description": "optional criticism sub-block"},
                 "sections": {"type": "string", "description": "JSON array of {heading, at} topic-change sections for block 6"},
-                "no_media": {"type": "boolean", "description": "do not keep the source media in the item"},
                 "keep": {"type": "string", "description": "slide frames to KEEP (ids fNNN or timestamps); re-run step slides"},
                 "drop": {"type": "string", "description": "slide frames to DROP (same handles as keep)"},
                 "language": {"type": "string"},

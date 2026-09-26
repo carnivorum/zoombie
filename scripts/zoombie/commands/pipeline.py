@@ -23,14 +23,6 @@ URL_PATTERN = re.compile(r"^https?://", re.IGNORECASE)
 # so the name is re-checked here after fullwidth folding.
 _ILLEGAL_NAME_CHARS = '<>:"/\\|?*'
 
-# A retention larger than this is a logged SKIP, not a copy: the origin can
-# re-produce the media, but a surprise multi-GB duplicate cannot be un-copied once
-# the disk is full. Same best-effort discipline as the over-budget path check. The
-# guard is a safety net for the URL-download path -- a local -Source is never
-# copied at all (see :func:`_retain_source`).
-MAX_RETAIN_BYTES = 2 * 1024 * 1024 * 1024
-
-
 def _same_file(a: str, b: str) -> bool:
     """True when two paths name the same file, resolving case and ``./``."""
     return os.path.normcase(paths.absolute(a)) == os.path.normcase(paths.absolute(b))
@@ -94,9 +86,12 @@ def _retain_source(
     Best effort by design. A media file name is content-controlled -- a video
     title may be long, non-ASCII, or both -- so the destination can exceed the
     Windows budget, and that must be a logged skip rather than a failed run whose
-    transcript is already on disk. An oversized retention (over ``MAX_RETAIN_BYTES``)
-    is likewise a logged skip. The caller records what happened in ``sourceKept``,
-    so the absence is visible in the sidecar instead of silent.
+    transcript is already on disk. The caller records what happened in
+    ``sourceKept``, so the absence is visible in the sidecar instead of silent.
+
+    There is deliberately NO size guard: an oversized retention is the USER's call,
+    made in ``summarize`` (``-Media copy|move|none``), not a silent skip here. A
+    caller that wants the media kept asks for it; one that does not, does not pay.
     """
     if not paths.is_file(video_path):
         return None
@@ -128,19 +123,6 @@ def _retain_source(
         paths.assert_fits(destination, "The retained source path")
     except Exception as exc:  # noqa: BLE001 - any budget/length refusal is a skip
         process.log(f"  source not retained beside the transcript: {exc}", "warn")
-        return None
-
-    try:
-        size = paths.file_size(video_path)
-    except OSError:
-        size = None
-    if size is not None and size > MAX_RETAIN_BYTES:
-        process.log(
-            f"  source not retained beside the transcript: {size} bytes exceeds the "
-            f"{MAX_RETAIN_BYTES}-byte retention budget; re-download from the origin "
-            "to keep a copy",
-            "warn",
-        )
         return None
 
     try:

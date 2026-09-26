@@ -220,6 +220,27 @@ class TestRetainSourceDownloadedPath:
         assert kept == str(tmp_path / "item" / "video.mp4")
         assert (tmp_path / "item" / "video.mp4").read_bytes() == b"downloaded"
 
+    def test_a_download_over_the_old_budget_is_still_retained(self, tmp_path, monkeypatch):
+        """The ``MAX_RETAIN_BYTES`` guard was removed: retention is the USER's call.
+
+        The guard used to silently skip a download larger than 2 GiB. With it gone,
+        a downloaded medium is retained whatever its size -- the removal was only
+        implied before this test. ``file_size`` is stubbed to report over-budget so
+        the assertion does not depend on a multi-GB fixture.
+        """
+        assert not hasattr(pipeline, "MAX_RETAIN_BYTES"), (
+            "the size guard must not be reinstated silently"
+        )
+        downloads = tmp_path / "downloads"
+        downloads.mkdir()
+        source = downloads / "video.mp4"
+        source.write_bytes(b"downloaded")
+        monkeypatch.setattr(pipeline.paths, "file_size", lambda *_a, **_k: 5 * 1024**3)
+
+        kept = pipeline._retain_source(str(source), str(tmp_path / "item"))
+        assert kept == str(tmp_path / "item" / "video.mp4")
+        assert (tmp_path / "item" / "video.mp4").read_bytes() == b"downloaded"
+
     def test_a_local_source_is_never_copied(self, tmp_path):
         downloads = tmp_path / "downloads"
         downloads.mkdir()
@@ -231,26 +252,6 @@ class TestRetainSourceDownloadedPath:
         assert kept is None
         assert not (item / "video.mp4").exists()
         assert source.is_file()
-
-    def test_an_oversized_retention_is_a_logged_skip(self, tmp_path, monkeypatch, capsys):
-        """A multi-GB duplication is a logged skip, never a copy.
-
-        The guard mirrors the over-budget path check: best effort, with the reason
-        on stderr. ``-Source`` local inputs never reach it (they are not copied at
-        all), so it protects the URL-download path.
-        """
-        source = tmp_path / "video.mp4"
-        source.write_bytes(b"x")
-        item = tmp_path / "item"
-
-        monkeypatch.setattr(
-            pipeline.paths, "file_size",
-            lambda _p: pipeline.MAX_RETAIN_BYTES + 1,
-        )
-        kept = pipeline._retain_source(str(source), str(item))
-        assert kept is None
-        assert not (item / "video.mp4").exists()
-        assert "exceeds" in capsys.readouterr().err
 
 
 class TestSidecarPlumbing:

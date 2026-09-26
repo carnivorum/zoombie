@@ -582,9 +582,22 @@ def build_parser() -> argparse.ArgumentParser:
         "-Sections", "--sections", dest="sections", default=None,
         help="JSON array of {heading, at} topic-change sections for block 6",
     )
+    # For an EXISTING local source the user chooses how the media is placed. The
+    # choice is the user's (the agent asks at the source step), so it is a VALUE,
+    # not a toggle: keep (leave in place), copy (duplicate into the item), move
+    # (relocate, the original removed), none (keep no copy). Omitted, it defaults
+    # from the routing: an in-place source is kept, anything else is copied.
     summarize.add_argument(
-        "-NoMedia", "--no-media", dest="no_media", action="store_true",
-        help="do not keep the source media in the item (default: kept)",
+        "-Media", "--media", dest="media", default=None,
+        choices=["keep", "copy", "move", "none"],
+        help="existing local media: keep|copy|move|none (default: keep if in-place, else copy)",
+    )
+    # ``move`` RELOCATES the user's own file (the source is deleted), so it is
+    # gated behind an explicit acknowledgement: a mistyped or accidental move must
+    # be refused rather than silently destroy where the user kept the file.
+    summarize.add_argument(
+        "-ConfirmMove", "--confirm-move", dest="confirm_move", action="store_true",
+        help="acknowledge that -Media move relocates the user's own file (required for move)",
     )
     summarize.add_argument(
         "-Language", "--language", dest="language", default="auto",
