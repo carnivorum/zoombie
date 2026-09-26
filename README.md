@@ -64,8 +64,14 @@ download. Never claim success without the self-test passing.
 - **Two transports, one set of commands — MCP first.** Setup **globally** registers
   the `zoombie` MCP server (`python -m zoombie.mcp`, JSON-RPC over stdio) in the
   client's own `mcp_settings.json`, verifying the entry is present
-  (`manifest.mcp.registered`); the merge replaces only our entry, so other MCP
-  servers are preserved. **MCP is the transport the skills use**: each skill calls
+  (`manifest.mcp.registered`) **and that the registered command really starts**
+  (`manifest.mcp.available`, a spawn of `<command> -m zoombie.mcp --version` with the
+  registered `PYTHONPATH`) — registration alone only means the entry is in the file,
+  not that the tools will appear. The merge replaces only our entry, so other MCP
+  servers are preserved. The entry is a plain stdio `command`/`args` server and needs
+  no `"type"` field (checked against client 3.84.0); after a setup or a window reload,
+  open a **new** task, because the client fixes its MCP tool list when a task starts.
+  **MCP is the transport the skills use**: each skill calls
   the MCP tool of the same name with JSON arguments, and only falls back to the
   `zoombie.cmd` launcher when those tools are unavailable. The MCP path calls the
   commands **in process** — no `cmd.exe`, no console code page — so a Cyrillic

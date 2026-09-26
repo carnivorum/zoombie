@@ -903,11 +903,27 @@ def deploy_mcp(modes: Modes) -> dict:
     """
     if not modes.may_write:
         record = mcpsettings.deploy(dry_run=True)
+        # -Check/-DryRun write nothing, but they must still report the TRUTH about
+        # the deployed entry: read the file for the registration, and PROBE it when
+        # it is there. Spawning `<command> -m zoombie.mcp --version` writes nothing,
+        # so `registered` and `available` are real facts in every mode -- otherwise
+        # `-Check` would report "missing: none" over a server that never starts.
+        record["registered"] = mcpsettings.is_registered(record.get("path"))
+        if record["registered"]:
+            record["probe"] = mcpsettings.probe_server()
         process.log(
             f"mcp server '{record['name']}' (global): {record['action']} -> "
             f"{record['path']}",
             "step",
         )
+        if record["registered"]:
+            verdict = record["probe"]
+            process.log(
+                f"mcp server starts: {verdict.get('version')}"
+                if verdict.get("ok")
+                else f"mcp server would not start: {verdict.get('error')}",
+                "info" if verdict.get("ok") else "warn",
+            )
         return record
 
     record = mcpsettings.deploy_safe()
@@ -919,6 +935,18 @@ def deploy_mcp(modes: Modes) -> dict:
         process.log(
             f"mcp server 'zoombie' registered globally -> {record['path']}"
         )
+        # Registration is NOT availability: spawn the registered argv the way the
+        # client will, so "registered but will not start" is caught at install time
+        # instead of surfacing as a user's missing tool list (report (1).md §3).
+        record["probe"] = mcpsettings.probe_server()
+        if record["probe"].get("ok"):
+            process.log(f"mcp server starts: {record['probe'].get('version')}")
+        else:
+            process.log(
+                "mcp server is registered but `-m zoombie.mcp` did not start: "
+                f"{record['probe'].get('error')}",
+                "warn",
+            )
         modes.note(f"mcp server (global): {record['action']}")
     else:
         process.log(

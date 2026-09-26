@@ -221,6 +221,13 @@ def _install(modes: components.Modes, args, root: str, result: dict) -> tuple[bo
     # exact gap this closes.
     process.log("registering the MCP server in the global MCP settings", "step")
     mcp_info = components.deploy_mcp(modes)
+    if mcp_info.get("registered") and not (mcp_info.get("probe") or {}).get("ok"):
+        process.log(
+            "the MCP server entry is written but the server did not start; the "
+            "client will not see its tools. Fix the cause and re-run "
+            "`python -m zoombie mcp -Apply`.",
+            "warn",
+        )
 
     # The 7-Zip extractor is the shared capability that reads an installer as data,
     # so it is a component in its OWN right rather than a side effect of whichever
@@ -289,6 +296,14 @@ def _install(modes: components.Modes, args, root: str, result: dict) -> tuple[bo
     # rather than a hard failure. The CLI is already installed and verified.
     if modes.check and mcp_info.get("action") == "failed":
         missing.append("mcp-settings")
+    # Registered but not STARTABLE is its own gap: the entry can be byte-perfect
+    # while the server never comes up, which is the defect this probe exists for.
+    if (
+        modes.check
+        and mcp_info.get("registered")
+        and not (mcp_info.get("probe") or {}).get("ok")
+    ):
+        missing.append("mcp-server")
     # Tesseract is now toolchain-owned, so a missing engine is a real gap rather
     # than an "optional" note -- the same standard ffmpeg and whisper are held to.
     # Checked against the FILESYSTEM, not the component's return value: in -Check /
@@ -516,6 +531,14 @@ def _build_manifest(
             # Confirmed against the settings file, so the manifest records the
             # GLOBAL registration as a fact the skills' MCP-first rule can rely on.
             "registered": bool(mcp_info.get("registered")),
+            # Registration and STARTABILITY are different facts. ``serverProbe`` is
+            # the spawn check (`<command> -m zoombie.mcp --version` with the
+            # registered env); ``available`` is true only when BOTH hold, so a
+            # consumer cannot read "registered" as "the tools will be there".
+            "serverProbe": mcp_info.get("probe"),
+            "available": bool(
+                mcp_info.get("registered") and (mcp_info.get("probe") or {}).get("ok")
+            ),
             "note": mcp_info.get("note"),
         },
         "hardware": hw.to_dict(),

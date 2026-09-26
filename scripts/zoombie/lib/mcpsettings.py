@@ -29,7 +29,7 @@ from __future__ import annotations
 import json
 import os
 
-from . import io as io_mod, paths, tools
+from . import io as io_mod, paths, process, tools
 
 # The key our server is registered under. Fixed, so a re-run replaces our entry
 # and never appends a second one.
@@ -228,6 +228,42 @@ def is_registered(target_path: str | None = None, name: str = SERVER_NAME) -> bo
     document = io_mod.read_json(target) or {}
     servers = document.get("mcpServers")
     return isinstance(servers, dict) and isinstance(servers.get(name), dict)
+
+
+def probe_server(
+    *,
+    interpreter_path: str | None = None,
+    package: str | None = None,
+    timeout: float = 60,
+) -> dict:
+    """Spawn the REGISTERED command the way the client would and report the verdict.
+
+    ``registered: true`` proves only that the entry exists in the settings file; it
+    says nothing about whether ``<command> -m zoombie.mcp`` actually starts. A clean
+    install was therefore reported on a machine where the server never came up (see
+    ``feedback/report (1).md``). This runs EXACTLY the registered argv with the
+    registered ``PYTHONPATH``/``PYTHONUTF8`` and records whether it answered, so the
+    manifest gains a checked sibling to :func:`is_registered`.
+
+    Best effort, never raises: a failure is a reportable fact, not a setup failure.
+    """
+    python = interpreter_path or interpreter()
+    if not python:
+        return {"ok": False, "version": None, "error": "no Python interpreter resolved"}
+    env = process.child_env()
+    env["PYTHONPATH"] = package or package_dir()
+    env["PYTHONUTF8"] = "1"
+    # The real entrypoint, not an import shim: this is what the client spawns.
+    argv = [python, "-m", SERVER_MODULE, "--version"]
+    code, text = process.run_text(argv, env=env, timeout=timeout)
+    version = None
+    if code == 0 and (text or "").strip():
+        version = text.strip().splitlines()[-1].strip()
+    return {
+        "ok": code == 0 and bool(version),
+        "version": version,
+        "error": None if code == 0 else f"exit {code}",
+    }
 
 
 def deploy_safe(

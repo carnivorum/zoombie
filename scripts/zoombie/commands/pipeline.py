@@ -117,6 +117,25 @@ def _retain_source(
         )
         return None
 
+    # The download already landed in the item's OWN directory, under yt-dlp's name.
+    # That name is content-controlled: ``--windows-filenames`` strips ASCII-illegal
+    # characters but NOT their fullwidth twins, so a title ending in ``？`` (U+FF1F)
+    # downloads as ``...？.mp4`` and then forces a percent-encoded link. COPYING it to
+    # the sanitized name left TWO spellings of one video in the run scratch (the
+    # report's two-variant finding), so RENAME in place instead -- the item ends up
+    # holding exactly one file, under the clean name.
+    if os.path.normcase(os.path.dirname(paths.absolute(video_path))) == os.path.normcase(
+        paths.absolute(item_dir)
+    ):
+        try:
+            paths.assert_fits(destination, "The retained source path")
+            os.replace(paths.to_extended(video_path), paths.to_extended(destination))
+        except OSError as exc:
+            process.log(f"  source not renamed in place: {exc}", "warn")
+            return video_path
+        process.log(f"  source renamed in place: {destination}")
+        return destination
+
     try:
         # Room for the extension and the Windows path budget; the NAME is not ours
         # to shorten, so an over-long one is refused rather than truncated.
@@ -176,7 +195,9 @@ def _download(environment: env_mod.Env, args, log_dir: str) -> tuple[str, str, y
     # exit code is inspected here so a real download failure still raises.
     code, text = process.run_text(argv, timeout=None)
     if code != 0:
-        raise StepFailedError(f"yt-dlp failed (exit {code})")
+        # ``run_text`` merges stderr into stdout, so ``text`` already holds yt-dlp's
+        # own ERROR line; naming it is what turns "exit 1" into a diagnosable cause.
+        raise StepFailedError(f"yt-dlp failed (exit {code}){ytdlp.failure_detail(text)}")
     origin = ytdlp.parse_metadata(text)
     if not origin:
         # Best-effort: a missing metadata line degrades the sidecar, it does not

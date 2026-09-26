@@ -1159,8 +1159,11 @@ def serve(stdin=None, stdout=None, stderr=None) -> int:
     stdout = stdout or sys.stdout
     if stderr is not None and stderr is not sys.stderr:
         sys.stderr = stderr
+    # "info", not "step": the readiness banner is normal operation, but the client
+    # renders any stderr line as an error, so the WARN/ERROR-looking prefixes made
+    # every launch look like a failure in the client log (report (1).md §6.2).
     process.log(f"zoombie MCP facade ready ({SERVER_NAME} {SKILL_VERSION}); "
-                f"python={sys.executable}", "step")
+                f"python={sys.executable}")
 
     exit_code = 0
     for raw in stdin:

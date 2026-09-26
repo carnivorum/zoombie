@@ -61,7 +61,15 @@ from __future__ import annotations
 # between -Archive (the document and its figures move to summary_<yyyyMMdd_HHmm>/)
 # and -Overwrite (replace with no backup). Only summary.md and img/ are ever
 # replaced; the source media is never touched.
-SKILL_VERSION = "6.0.0"
+# 6.1.0: regressions from a second machine's report. The run scratch is DETERMINISTIC
+# per source (a re-run reuses its directory instead of leaving the old one beside it),
+# a failed step 0 NAMES the scratch it deliberately keeps, a download failure carries
+# yt-dlp's own ERROR line instead of a bare exit code, a download that already sits in
+# the item is renamed in place (one file per item, not two spellings of one title), and
+# MCP registration gains a STARTABILITY probe -- ``manifest.mcp.available`` spawns the
+# registered command, because ``registered: true`` only ever meant "the entry is in the
+# settings file".
+SKILL_VERSION = "6.1.0"
 
 # The version marker written into every SKILL.md we own, to prove ownership.
 MARKER_KEY = "cvrm-zoombie-version"

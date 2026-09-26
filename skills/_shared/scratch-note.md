@@ -2,7 +2,11 @@
 throwaway - the transcript, the `.srt`, the origin sidecar, the OCR report, the
 image manifest and the reading copies - in a run scratch dir under the workspace
 `/.tmp/zoombie-summarize/<run>/`, and deletes it at the `verify` step on success.
-Do not create, move or delete those files yourself.
+The `<run>` name is DERIVED FROM THE SOURCE, so re-running the same source reuses
+its directory instead of leaving a second one behind, and a run you started over
+the same input resumes rather than starting fresh beside it. Do not create, move
+or delete those files yourself, and never start a run by hand to get a different
+directory name.
 
 A run puts its own other intermediate files
 under the toolchain's ASCII scratch root (`zoombie-env\work\<guid>` for $job work

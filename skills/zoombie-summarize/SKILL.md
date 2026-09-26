@@ -1,6 +1,6 @@
 ---
 name: zoombie-summarize
-cvrm-zoombie-version: 6.0.0
+cvrm-zoombie-version: 6.1.0
 description: Produce a readable summary.md from any source - a video or audio recording, a URL, a PDF, or images - the FRONT DOOR for a document. Use when the user asks to summarize, make notes, a digest, a write-up, or a readable document from a recording or a file. One guided flow walks you from the source to the finished document - you supply the name, the title, the short summary and the topic headings, and the backend produces the transcript, splits it into the verbatim source copy, archives any existing summary, and verifies the result. Never hand-assemble ffmpeg, whisper or yt-dlp commands.
 ---
 

@@ -27,10 +27,10 @@ refused by checking the prerequisites on disk.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import re
-import uuid
 
 from .. import SKILL_VERSION
 from ..cli import Outcome, build_parser
@@ -73,11 +73,74 @@ def _scratch_root() -> str:
     return os.path.join(workspace.workspace_root(), ".tmp", "zoombie-summarize")
 
 
-def _new_run() -> str:
-    """Create and return a fresh run scratch dir."""
-    run = os.path.join(_scratch_root(), uuid.uuid4().hex)
+def _run_key(source: str) -> str:
+    """The DETERMINISTIC run-scratch name for a source: its canonical text hashed.
+
+    Keep this 32 lowercase hex: :func:`zoombie.lib.scratch.is_run_dir` recognises
+    scratch by exactly that shape, so a differently-shaped name would make the run
+    dir invisible to ``clean -CleanScratch`` and leak it forever. A local source is
+    canonicalised (absolute + case-folded) so the same file spelled two ways maps to
+    one directory.
+    """
+    canonical = source
+    if not _URL_RE.match(source):
+        canonical = os.path.normcase(paths.absolute(source))
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()[:32]
+
+
+def _run_for_source(source: str) -> str:
+    """The run scratch for ``source``, REUSED when a resumable one exists.
+
+    Keyed by the source, so a re-run of the same input never creates a second
+    directory -- the duplicated-folder leak the report saw. An existing directory is
+    reused ONLY when its ``run.json`` is readable AND carries the current schema; a
+    directory left by a run killed before step 0 wrote its state, or by a different
+    ``RUN_VERSION``, holds nothing resumable, so it is recreated rather than reused.
+    A stale ``run.json`` from a FINISHED source is harmless: step 0 always overwrites
+    it with a fresh payload.
+    """
+    run = os.path.join(_scratch_root(), _run_key(source))
+    if paths.is_dir(run):
+        marker = _run_file(run)
+        resumable = False
+        if paths.is_file(marker):
+            try:
+                with open(paths.to_extended(marker), "r", encoding="utf-8") as handle:
+                    resumable = json.load(handle).get("runVersion") == RUN_VERSION
+            except (OSError, ValueError):
+                resumable = False
+        if resumable:
+            return run
+        paths.remove_quietly(run, recursive=True)
     paths.ensure_dir(run)
     return run
+
+
+def _attach_scratch(outcome: Outcome, run: str) -> Outcome:
+    """A failed step-0 outcome that NAMES the scratch it deliberately kept.
+
+    A failure at the download/render stage leaves the run scratch in place -- it
+    holds the partial download and whatever was transcribed, which is what makes the
+    failure diagnosable -- but the result said nothing about WHERE it was, so the
+    media sat on disk with nothing pointing at it. This reports the path and names
+    the verb that removes it.
+    """
+    data = dict(outcome.data or {})
+    data["run"] = run
+    data["scratch"] = {
+        "path": run, "kept": True, "removed": False, "leftover": True,
+        # The verb is named EXACTLY. `clean -CleanScratch` sweeps the TOOLCHAIN roots
+        # only -- a run dir under the workspace /.tmp is deliberately NOT its target
+        # (a caller's /.tmp destination is treated as an artifact, see
+        # tests/test_scratch.py). Pointing a user at a verb that would spare this
+        # directory is worse than naming none, so the honest answers are: resume, or
+        # delete it by hand.
+        "hint": (
+            "kept for inspection; a re-run of the same source resumes in this "
+            "directory, or delete it by hand -- it lives under the workspace /.tmp"
+        ),
+    }
+    return Outcome(ok=False, error=outcome.error, data=data)
 
 
 def _run_file(run: str) -> str:
@@ -247,7 +310,7 @@ def _step_source(args) -> Outcome:
     if not _URL_RE.match(source) and not paths.exists(source):
         raise ZoombieError(f"summarize: source not found: {source}")
 
-    run = _new_run()
+    run = _run_for_source(source)
     process.log(f"summarize: run scratch {run}", "step")
 
     # ``media`` is the readable media handle for THIS run, resolved independently of
@@ -274,7 +337,7 @@ def _step_source(args) -> Outcome:
             argv += ["-WorkRoot", args.work_root]
         outcome = _dispatch("pipeline", argv)
         if not outcome.ok:
-            return outcome
+            return _attach_scratch(outcome, run)
         made = outcome.data or {}
         if _URL_RE.match(source):
             media = (made.get("sourceFile") and os.path.join(run, made["sourceFile"])) or _media_in(run)
@@ -288,14 +351,14 @@ def _step_source(args) -> Outcome:
                 "-Images", "-ImageDir", os.path.join(run, "img")]
         outcome = _dispatch("readpdf", argv)
         if not outcome.ok:
-            return outcome
+            return _attach_scratch(outcome, run)
         base = os.path.join(run, "source")
     else:
         argv = ["readimages", "-Source", source, "-Output", os.path.join(run, "source"),
                 "-ImageDir", os.path.join(run, "img")]
         outcome = _dispatch("readimages", argv)
         if not outcome.ok:
-            return outcome
+            return _attach_scratch(outcome, run)
         base = os.path.join(run, "source")
 
     is_url = bool(_URL_RE.match(source))

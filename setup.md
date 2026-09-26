@@ -361,6 +361,27 @@ what makes new projects work with no per-project setup. A warning —
 `entry not confirmed in <path>` — means the global file could not be written; fix it
 and re-run `python -m zoombie mcp -Apply`.
 
+**Registered is not the same as STARTABLE.** The install also runs that entry the way
+the client will — `<command> -m zoombie.mcp --version` with the registered `PYTHONPATH`
+— and records the verdict as `data.manifest.mcp.available` (with the raw `serverProbe`).
+A registration that is byte-perfect while the server never comes up is a real state:
+it was reported from a machine whose tools silently never appeared, so the install now
+warns (`the MCP server entry is written but the server did not start`) and `-Check`
+lists `mcp-server` as missing.
+
+**The entry needs no `"type"` field.** It is a plain stdio `command`/`args` server, and
+that is accepted by the client as written — verified against extension 3.84.0, whose
+bundle contains no streamable-HTTP transport to disambiguate, and against a live
+3.84.0 install where the entry carries `command`/`args`/`env`/`disabled`/`timeout` and
+the tools connect. Adding `"type": "stdio"` is unnecessary; do not "fix" the config by
+inventing one.
+
+**After a setup or a window reload, open a NEW task.** The client fixes its MCP tool
+list when a task STARTS, so a task created before the server connected (or before the
+reload) never grows the `zoombie` tools, and reloading the window does not rebuild
+that task's list. This is a client behaviour, outside this toolchain: the server is up
+and answers, but a pre-existing task will not see it.
+
 Re-run just this step after a manual edit, without a full setup:
 
 ```bat

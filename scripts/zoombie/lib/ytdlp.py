@@ -133,6 +133,23 @@ class Origin:
     duration_sec: float | None = None
 
 
+def failure_detail(text: str, limit: int = 400) -> str:
+    """A one-line tail of yt-dlp output for an error message, or ``""``.
+
+    The exit code alone is unactionable: the report that prompted this could not
+    tell a DNS failure from a name-sanitisation failure because only "yt-dlp failed
+    (exit 1)" survived, with no way to recover the cause. The caller's ``run_text``
+    already MERGES stderr into stdout, so the last non-empty line is yt-dlp's own
+    ``ERROR:`` line. It is clipped to ``limit`` so a huge dump cannot bloat the
+    single result line the CLI contract allows.
+    """
+    for line in reversed((text or "").splitlines()):
+        stripped = line.strip()
+        if stripped:
+            return f": {stripped[:limit]}"
+    return ""
+
+
 def parse_metadata(text: str) -> Origin | None:
     """Parse the ``--print after_move:`` line out of captured yt-dlp output.
 
