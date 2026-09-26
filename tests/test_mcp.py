@@ -379,6 +379,44 @@ class TestCapShaping:
         images = [block for block in payload["content"] if block.get("type") == "image"]
         assert len(images) == 2
 
+    def test_deferred_frames_are_named_by_id_and_the_agent_is_told_to_decide(self, tmp_path):
+        """The correction the Crimson talking-head run needed.
+
+        A capped result must not merely list file names: it must hand the agent the
+        handle it is allowed to use (the frame id) and say plainly that the AGENT
+        decides which frames to keep and the TOOL edits the files.
+        """
+        from zoombie.cli import Outcome
+
+        entries = _attachable(tmp_path, 12)
+        for index, entry in enumerate(entries, start=1):
+            entry["id"] = f"f{index:03d}"
+        outcome = Outcome(ok=True, data={"next": {"attach": entries}})
+        payload = mcp.tool_result("slides", outcome)
+
+        deferred = next(
+            block for block in payload["content"]
+            if "deferred images" in block.get("text", "")
+        )
+        assert "f009" in deferred["text"]          # the id, not only the file name
+        decide = next(
+            block for block in payload["content"]
+            if "AGENT DECIDES" in block.get("text", "")
+        )
+        assert "keep:" in decide["text"]
+        assert "never a file path" in decide["text"]
+        assert ".data/" in decide["text"]
+
+    def test_the_keep_and_drop_arguments_reach_argparse(self):
+        from zoombie import cli as cli_mod
+
+        parser = cli_mod.build_parser()
+        argv = mcp.build_argv("slides", {"source": "v.mp4", "keep": "f001,f002"})
+        assert parser.parse_args(argv).keep == "f001,f002"
+
+        argv = mcp.build_argv("slides", {"source": "v.mp4", "drop_file": "d.txt"})
+        assert parser.parse_args(argv).drop_file == "d.txt"
+
     def test_an_error_result_is_flagged(self):
         from zoombie.cli import Outcome
 

@@ -405,6 +405,9 @@ def _extract_frames(
             "height": height_px,
             "timeSec": candidate["timeSec"],
             "endTimeSec": candidate.get("endTimeSec"),
+            # The stable proposed id (assigned in ``run``), carried so one handle
+            # names a frame across the manifest, visionFrames and the result.
+            "frameId": candidate.get("frameId"),
             "digest": f"{digest:016x}" if digest is not None else "",
             "anchor_text": candidate.get("anchor_text", ""),
             "slide_title": "",
@@ -546,11 +549,64 @@ def run(args) -> Outcome:
             )
             candidates, dedup_skipped = _dedup_candidates(candidates, args.hash_distance)
 
+        # Stamp every PROPOSED candidate with its stable id BEFORE the agent's
+        # selection runs. The id means "the N-th frame the detector proposed" and is
+        # therefore invariant to what the agent keeps: the id read in one result is
+        # the id that may be named in the next run's -Keep/-Drop, even though the
+        # kept set is a different, smaller list. Records and visionFrames carry this
+        # id through, so nothing downstream has to re-derive it.
+        for position, candidate in enumerate(candidates, start=1):
+            candidate["frameId"] = slides.frame_id(position)
+        proposed_ids = [candidate["frameId"] for candidate in candidates]
+
+        # The agent's FINAL keep/drop (the Crimson talking-head correction). The
+        # detector only PROPOSES -- it cannot tell a webcam frame from a slide -- so
+        # an agent that can see the proposals names the frames worth keeping and this
+        # is where that verdict lands. Applied BEFORE extraction, so a dropped frame
+        # costs no ffmpeg and no OCR. Ids are 1-based over the proposed set, which is
+        # exactly what ``data.images.imageIds`` reports and what ``visionFrames[].id``
+        # carries, so the id an agent read is the id it may name.
+        keep_spec = slides.parse_selection(getattr(args, "keep", None))
+        drop_spec = slides.parse_selection(getattr(args, "drop", None))
+        if getattr(args, "keep_file", None):
+            keep_spec = slides.load_selection_file(args.keep_file)
+        if getattr(args, "drop_file", None):
+            drop_spec = slides.load_selection_file(args.drop_file)
+        proposed_frames = len(candidates)
+        candidates, selection_dropped, selection_unmatched = slides.apply_selection(
+            candidates, keep_spec, drop_spec
+        )
+        if keep_spec or drop_spec:
+            process.log(
+                f"  agent selection applied: -Keep {len(keep_spec)} / -Drop "
+                f"{len(drop_spec)} token(s) -> {len(candidates)} of {proposed_frames} "
+                f"proposed frame(s) kept"
+            )
+        if selection_unmatched:
+            # A refusal, not a silent no-op: an id the agent typed wrong must not
+            # quietly produce an empty (or a full) document. Frames are named by id
+            # or by their timestamp, never by a path -- the agent decides, this
+            # command touches the files.
+            raise ZoombieError(
+                "the selection names frames this run did not propose: "
+                + ", ".join(selection_unmatched)
+                + f". The run proposed {proposed_frames} frame(s) "
+                f"(ids {slides.frame_id(1)}..{slides.frame_id(proposed_frames)}); "
+                "name only those ids, or their timestamps, in -Keep/-Drop."
+            )
+
         process.log(
             f"slides: mode={mode} samples={candidate_frames} runs={len(runs)} "
-            f"candidates={len(candidates) + len(dedup_skipped)} kept={len(candidates)}",
+            f"proposed={proposed_frames} kept={len(candidates)} "
+            f"dropped={len(selection_dropped)}",
             "step",
         )
+        if selection_dropped:
+            process.log(
+                f"  the selection dropped {len(selection_dropped)} proposed frame(s) "
+                f"by agent request (-Keep/-Drop); they are not extracted, not OCR'd "
+                f"and not written to the manifest"
+            )
         if not candidates:
             process.log(
                 "  no slide candidates found; the video may be a talking head with no "
@@ -610,6 +666,7 @@ def run(args) -> Outcome:
             png_name = record["file"]
             reading_path = _reading_path(png_name)
             frame = {
+                "id": record.get("frameId"),
                 "file": png_name,
                 "timeSec": record["timeSec"],
                 "timecode": slides.time_tag(record["timeSec"]),
@@ -637,6 +694,11 @@ def run(args) -> Outcome:
             skip_reasons[entry["reason"]] = skip_reasons.get(entry["reason"], 0) + 1
         image_only = sum(1 for entry in ocr_entries if entry.get("likelyImageOnly"))
 
+        # ``_prepare_images_dir`` prunes EVERY frame our previous manifest recorded
+        # before this run's are copied in, so a frame the agent dropped this time
+        # cannot linger from a wider earlier run: the published ``.data/img`` always
+        # matches the kept set exactly. That also means narrowing is a plain re-run
+        # with a different selection, with no extra cleanup and nothing to hand-edit.
         pruned = _prepare_images_dir(images_dir, args.force)
         if pruned:
             process.log(f"  pruned {pruned} slide file(s) from a previous run")
@@ -678,12 +740,30 @@ def run(args) -> Outcome:
             "images": {
                 "path": images_dir,
                 "count": len(records),
+                # What the DETECTOR proposed, before the agent's verdict. ``count`` is
+                # the kept set; ``proposed`` is what ``imageIds`` enumerates, so an
+                # agent can see exactly how much it narrowed.
+                "proposed": proposed_frames,
+                # The stable proposed ids (``f001``.. ``fNNN``), in reading order --
+                # the ONLY handles an agent may name in -Keep/-Drop. The server owns
+                # the files: the agent never names a path.
+                "imageIds": proposed_ids,
+                # The agent's verdict, echoed so a run records WHAT was kept and why.
+                "selection": {
+                    "applied": bool(keep_spec or drop_spec),
+                    "keep": keep_spec,
+                    "drop": drop_spec,
+                    "dropped": len(selection_dropped),
+                    "droppedIds": [record.get("frameId") for record in selection_dropped],
+                },
                 "manifest": os.path.join(images_dir, slides.SIDECAR_MANIFEST),
                 "readme": os.path.join(images_dir, slides.SIDECAR_README),
                 "skipped": len(skipped),
                 # Every drop, by reason: ``error`` (ffmpeg), ``tiny`` (pixel floor),
                 # ``dedup`` (a same-picture duplicate). No ``flat``/``low-text`` key
                 # exists any more -- nothing is dropped for being flat or textless.
+                # An agent selection is NOT here: it is a requested drop, reported in
+                # ``selection``, not a structural or duplicate rejection.
                 "skippedReasons": skip_reasons,
             },
             "sourceDurationSec": duration,
@@ -729,6 +809,10 @@ def run(args) -> Outcome:
                 # spend (plan §9/§12) -- a JPEG, not a ~3x larger PNG.
                 attachable=[
                     {
+                        # The id is carried into the attachable list so the facade
+                        # can name each (even deferred) frame by the handle the agent
+                        # is allowed to use in -Keep/-Drop.
+                        "id": frame.get("id"),
                         "file": frame["file"],
                         "path": frame.get("readingPath")
                         or os.path.join(images_dir, frame["file"]),

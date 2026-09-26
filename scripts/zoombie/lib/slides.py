@@ -60,6 +60,10 @@ __all__ = [
     "parse_time",
     "parse_times",
     "load_times_file",
+    "frame_id",
+    "parse_selection",
+    "load_selection_file",
+    "apply_selection",
     "hamming",
     "dhash_bits",
     "hash_sequence",
@@ -223,6 +227,162 @@ def load_times_file(path: str) -> list[float]:
             return parse_times(handle.read())
     except OSError as exc:
         raise ZoombieError(f"Could not read the timestamps file: {exc}") from exc
+
+
+# --------------------------------------------------------------------------- #
+# the agent's final keep/drop over the detector's proposals
+# --------------------------------------------------------------------------- #
+
+def frame_id(index: int) -> str:
+    """``f001`` -- the stable id of the ``index``-th kept frame (1-based).
+
+    The id is what an agent NAMES in ``-Keep``/``-Drop``. It is deliberately not a
+    file path: the agent's judgement is expressed as ids and timestamps, and the
+    command performs every file operation. An id the agent never sees is a file it
+    cannot touch, which is the point -- selection can never damage the directory.
+    """
+    return f"f{int(index):03d}"
+
+
+def _selection_key(token: str) -> str:
+    """Normalise one selection token (an id or a timestamp) for matching."""
+    return str(token or "").strip().lower()
+
+
+def _frame_matches(index: int, record: dict, key: str) -> bool:
+    """True when ``key`` names the frame at ``index`` of ``records``.
+
+    A key may be the frame id (``f005``) or the frame's timestamp in any spelling
+    the toolchain already accepts -- ``00:04:04``, ``00-04-04``, or raw seconds
+    (``244``) -- because all three are read off the same reported ``intervals``.
+    """
+    if not key:
+        return False
+    if key == frame_id(index):
+        return True
+    seconds = record.get("timeSec")
+    if seconds is None:
+        return False
+    try:
+        value = float(seconds)
+    except (TypeError, ValueError):
+        return False
+    return key in (time_tag(value).lower(), textnorm.hhmmss(value).lower(), f"{value:g}")
+
+
+def parse_selection(spec: str | None) -> list[str]:
+    """Parse a ``-Keep``/``-Drop`` value into de-duplicated, ordered tokens.
+
+    Commas, whitespace and newlines all separate, so one flag accepts a one-line
+    list and the same value pasted from a file. Order is not trusted and duplicates
+    collapse, because the selection is a SET of frames and how it was typed must not
+    matter. Ids are lower-cased; a timestamp is kept as typed and matched by
+    :func:`_frame_matches`.
+    """
+    if not spec:
+        return []
+    out: list[str] = []
+    seen: set[str] = set()
+    for chunk in re.split(r"[,\s;]+", str(spec)):
+        key = _selection_key(chunk)
+        if not key or key in seen:
+            continue
+        seen.add(key)
+        out.append(key)
+    return out
+
+
+def load_selection_file(path: str) -> list[str]:
+    """Read a selection from a UTF-8 file, one id/timestamp per line.
+
+    A file exists for the same reason ``-TimesFile`` does: a talking-head run can
+    mean naming dozens of frames, and a long inline value is exactly what a shell
+    mangles. It is parsed by :func:`parse_selection`, so the file and the inline
+    flag cannot drift.
+    """
+    try:
+        with open(path, "r", encoding="utf-8-sig", errors="replace") as handle:
+            return parse_selection(handle.read())
+    except OSError as exc:
+        raise ZoombieError(f"Could not read the selection file: {exc}") from exc
+
+
+def apply_selection(
+    records: list[dict],
+    keep: list[str] | None = None,
+    drop: list[str] | None = None,
+) -> tuple[list[dict], list[dict], list[str]]:
+    """Apply an agent's FINAL keep/drop to the detector's proposed ``records``.
+
+    The selector PROPOSES (the covered-run rule keeps one frame per stable run);
+    this is where the agent DECIDES, which is the correction the Crimson
+    talking-head run needed: the detector cannot tell a webcam frame from a slide,
+    so it must not be the last word. Returns ``(kept, dropped, unmatched)``.
+
+    * With neither list, **every** record is kept and nothing is dropped -- the
+      detector's set is the starting point, not the verdict.
+    * ``keep`` is an **allow-list**: when non-empty it REPLACES the default set, so
+      40 talking-head proposals can be narrowed to the content frames. It may also
+      be used to *reorder* -- see below.
+    * ``drop`` removes from whatever ``keep`` left, so a frame the agent knows is
+      noise can be stripped without enumerating everything it wants.
+    * A token that names no frame is returned in ``unmatched``. This function does
+      not raise: a dry run reports it, and the command turns a non-empty
+      ``unmatched`` into a refusal rather than silently placing an empty set.
+
+    Kept records are returned in the caller's ``keep`` order when an allow-list was
+    given, so an agent may also sequence frames (e.g. put the wide market chart
+    before the single-name one); with no allow-list reading order is preserved.
+    """
+    keep_keys = [key for key in (_selection_key(t) for t in (keep or [])) if key]
+    drop_keys = [key for key in (_selection_key(t) for t in (drop or [])) if key]
+
+    if not keep_keys and not drop_keys:
+        return list(records), [], []
+
+    keep_hits: dict[str, bool] = {key: False for key in keep_keys}
+    drop_hits: dict[str, bool] = {key: False for key in drop_keys}
+    kept: list[dict] = []
+    dropped: list[dict] = []
+    # ``start=1``: ids are 1-based (``f001`` is the FIRST frame), so the ordinal a
+    # record is enumerated at IS its ``frame_id``. An off-by-one here silently
+    # selects the neighbouring frame, which is why the base is stated explicitly.
+    for index, record in enumerate(records, start=1):
+        in_keep = False
+        for key in keep_keys:
+            if _frame_matches(index, record, key):
+                keep_hits[key] = True
+                in_keep = True
+        in_drop = False
+        for key in drop_keys:
+            if _frame_matches(index, record, key):
+                drop_hits[key] = True
+                in_drop = True
+        if (not keep_keys or in_keep) and not in_drop:
+            kept.append(record)
+        else:
+            dropped.append(record)
+
+    if keep_keys:
+        # An allow-list also SEQUENCES: reorder the survivors to the order the
+        # agent named them, so reading order follows the agent's intent. A frame
+        # matched by several keys lands at its first mention.
+        ordered: list[dict] = []
+        used: set[int] = set()
+        for key in keep_keys:
+            for index, record in enumerate(records, start=1):
+                if index in used or not _frame_matches(index, record, key):
+                    continue
+                if record in dropped:
+                    continue
+                used.add(index)
+                ordered.append(record)
+        if len(ordered) == len(kept):
+            kept = ordered
+
+    unmatched = [key for key, hit in keep_hits.items() if not hit]
+    unmatched += [key for key, hit in drop_hits.items() if not hit]
+    return kept, dropped, unmatched
 
 
 # --------------------------------------------------------------------------- #

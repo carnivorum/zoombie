@@ -80,21 +80,26 @@ material to say; when the source is sound, omit it.
 For a **video** source, ask before anything expensive: (1) "should I also try to
 extract slides?"; (2) if yes, "do you have exact timestamps?" — **yes** runs the
 `slides` tool with `times: "..."` (one frame each, the minimal set), **no** runs
-`slides` to auto-detect and dedup. `postprocess` with `apply: true` then embeds
-them. Frames land in `.data/img/`; stage any scratch under the workspace `/.tmp/`.
+`slides` in auto-detect mode, which PROPOSES frames. `postprocess` with
+`apply: true` then embeds them. Frames land in `.data/img/`; stage any scratch
+under the workspace `/.tmp/`.
 
 `slides` **promotes, never drops on text**: every stable run keeps ≥1 frame, so an
 image-only slide is never lost; `data.images.skippedReasons` names the structural
 and duplicate drops. OCR runs **once per run** into **`<item>/.data/ocr.json`**
 (`data.ocr.artifact`) — score usefulness from that text, not from char count.
 
-**Block-6 convention:** one `###` per slide, with the **narration FIRST** under
-each heading (`anchor_text`, the placement anchor) plus `timeSec` for the stamp.
+<!-- zoombie:include frame-selection -->
+<!-- /zoombie:include -->
 
-**Read the kept frames with your OWN vision — OCR filters, it does not read.**
-Open each path in `data.visionFrames` and write what the slide SAYS — title,
-bullets, table — into the block-6 **body**. The heading stays led by the narration
-(so the anchor resolves); the slide's content goes in the body.
+**Block-6 convention:** the heading is led by the **narration** under each `###`
+(`anchor_text`, the placement anchor) plus `timeSec` for the stamp.
+
+**Read the kept frames with your OWN vision — OCR cannot read a chart for you.**
+Open each path in `data.visionFrames` (the compressed reading copy) and write what
+the slide SAYS — title, bullets, table — into the block-6 **body**. The heading
+stays led by the narration (so the anchor resolves); the slide's content goes in
+the body.
 
 ### Block-6 subsections: on TOPIC CHANGE, not one per slide
 
@@ -228,6 +233,8 @@ Read `data` for what changed. Do **not** hand-assemble a Python command.
 
 - **Never edit what the tool owns.** If anchors, timestamps, contents or image
   placement are wrong, fix the *input* or the *prose* and re-run `postprocess`.
+  The frame set is the same rule: name frames in `keep`/`drop`, never touch the
+  files (see the frame-selection block above).
   Hand-patching block 4 or an `<a id>` breaks the idempotency guarantee.
 - **One document per item.** `summary.md`, the kept media, and `.data/`.
   Everything under `.data/` is a sidecar or derived material — never hand-edit it.

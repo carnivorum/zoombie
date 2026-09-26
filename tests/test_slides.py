@@ -659,3 +659,168 @@ class TestDryRun:
         # No scratch, no sidecar, no OCR artifact -- nothing at all was written.
         assert not (output / ".data").exists()
         assert list(output.iterdir()) == []
+
+
+# --------------------------------------------------------------------------- #
+# the agent's final keep/drop: the detector proposes, the agent decides
+# --------------------------------------------------------------------------- #
+
+class TestSelectionHelpers:
+    """The pure half -- no ffmpeg -- so the id/timestamp handles are pinned."""
+
+    def _records(self):
+        return [
+            {"timeSec": 10.0, "file": "001 - 00-00-10.png"},
+            {"timeSec": 20.0, "file": "002 - 00-00-20.png"},
+            {"timeSec": 30.0, "file": "003 - 00-00-30.png"},
+        ]
+
+    def test_frame_id_is_stable_and_zero_padded(self):
+        assert slides.frame_id(1) == "f001"
+        assert slides.frame_id(12) == "f012"
+
+    def test_no_selection_keeps_everything(self):
+        records = self._records()
+        kept, dropped, unmatched = slides.apply_selection(records)
+        assert kept == records and dropped == [] and unmatched == []
+
+    def test_keep_is_an_allow_list_by_id(self):
+        kept, dropped, unmatched = slides.apply_selection(self._records(), ["f002"])
+        assert [r["timeSec"] for r in kept] == [20.0]
+        assert [r["timeSec"] for r in dropped] == [10.0, 30.0]
+        assert unmatched == []
+
+    def test_a_frame_may_be_named_by_its_timestamp(self):
+        # 00:00:20 -- the same handle the result's ``intervals`` reports.
+        kept, _dropped, unmatched = slides.apply_selection(self._records(), ["00:00:20"])
+        assert [r["timeSec"] for r in kept] == [20.0]
+        assert unmatched == []
+
+    def test_drop_removes_from_the_full_set(self):
+        kept, dropped, unmatched = slides.apply_selection(self._records(), None, ["f001"])
+        assert [r["timeSec"] for r in kept] == [20.0, 30.0]
+        assert [r["timeSec"] for r in dropped] == [10.0]
+        assert unmatched == []
+
+    def test_an_unknown_handle_is_reported_not_silently_ignored(self):
+        kept, _dropped, unmatched = slides.apply_selection(self._records(), ["f099"])
+        assert kept == []            # an allow-list that matches nothing keeps nothing
+        assert unmatched == ["f099"]
+
+    def test_keep_also_sequences_the_survivors(self):
+        kept, _dropped, _unmatched = slides.apply_selection(
+            self._records(), ["f003", "f001"]
+        )
+        assert [r["timeSec"] for r in kept] == [30.0, 10.0]
+
+    def test_parse_selection_splits_and_collapses(self):
+        assert slides.parse_selection("f001, f002 f001\nf003") == ["f001", "f002", "f003"]
+        assert slides.parse_selection("") == []
+
+
+class TestSelectionCommand:
+    """Drive ``slides`` in timestamps mode with ffmpeg/OCR stubbed out."""
+
+    def _args(self, source: str, output: str, work_root: str, **overrides):
+        values = {
+            "source": source, "output": output, "image_dir": None,
+            "times": "00:10,00:20,00:30", "times_file": None, "srt": None,
+            "scale": 1280, "sample_rate": 0.25, "diff_threshold": 3.0,
+            "hash_distance": 8, "min_slide_seconds": 2.0, "sample_interval": 30.0,
+            "min_px": 0, "min_frame_bytes": 0, "min_text_chars": 12,
+            "no_text_gate": False, "lang": None, "dry_run": False, "force": True,
+            "keep_work": False, "keep_scratch": False, "work_root": work_root,
+            "attach_limit": None, "no_reading_copy": True,
+            "keep": None, "drop": None, "keep_file": None, "drop_file": None,
+        }
+        values.update(overrides)
+        return SimpleNamespace(**values)
+
+    def _patch(self, monkeypatch):
+        class Env:
+            ffprobe = None
+
+            def require(self, *_a, **_k):
+                return "ffmpeg"
+
+        def fake_argv(_ffmpeg, _source, _seconds, output, _width):
+            return ["ffmpeg", output]
+
+        def fake_run_text(argv, **_kwargs):
+            with open(argv[-1], "wb") as handle:
+                handle.write(_png())
+            return 0, ""
+
+        monkeypatch.setattr(slides_cmd.env_mod, "resolve", lambda: Env())
+        monkeypatch.setattr(slides_cmd.slides, "single_frame_argv", fake_argv)
+        monkeypatch.setattr(slides_cmd.process, "run_text", fake_run_text)
+        monkeypatch.setattr(slides_cmd.ocr, "ocr_image", lambda *_a, **_k: "text")
+
+    def _run(self, tmp_path, monkeypatch, **overrides):
+        self._patch(monkeypatch)
+        source = tmp_path / "media.mp4"
+        source.write_bytes(b"\x00" * 32)
+        output = tmp_path / "item"
+        output.mkdir()
+        outcome = slides_cmd.run(
+            self._args(str(source), str(output), str(tmp_path / "work"), **overrides)
+        )
+        return outcome, output
+
+    def test_without_a_selection_every_proposed_frame_is_kept(self, tmp_path, monkeypatch):
+        outcome, _out = self._run(tmp_path, monkeypatch)
+        assert outcome.data["images"]["proposed"] == 3
+        assert outcome.data["images"]["count"] == 3
+        assert outcome.data["images"]["imageIds"] == ["f001", "f002", "f003"]
+        assert outcome.data["images"]["selection"]["applied"] is False
+
+    def test_keep_narrows_the_frames_written_and_the_manifest(self, tmp_path, monkeypatch):
+        outcome, output = self._run(tmp_path, monkeypatch, keep="f002")
+        assert outcome.data["images"]["count"] == 1
+        assert [f["id"] for f in outcome.data["visionFrames"]] == ["f002"]
+        selection = outcome.data["images"]["selection"]
+        assert selection["applied"] is True
+        assert selection["keep"] == ["f002"]
+        assert selection["dropped"] == 2
+        assert selection["droppedIds"] == ["f001", "f003"]
+        # The manifest on disk carries ONLY the kept frame -- one figure, not three.
+        import json
+
+        manifest = json.loads(
+            (output / ".data" / "img" / "manifest.json").read_text(encoding="utf-8")
+        )
+        assert manifest["count"] == 1
+        # ... and the dropped PNGs were never written to the published directory.
+        pngs = sorted(p.name for p in (output / ".data" / "img").glob("*.png"))
+        assert len(pngs) == 1
+
+    def test_the_proposed_ids_are_reported_even_when_the_agent_kept_one(self, tmp_path, monkeypatch):
+        outcome, _out = self._run(tmp_path, monkeypatch, keep="f003")
+        # The ids are stable across runs: the id read in the FIRST result is the
+        # handle selectable in the SECOND, whichever frames were kept.
+        assert outcome.data["images"]["imageIds"] == ["f001", "f002", "f003"]
+        assert [f["id"] for f in outcome.data["visionFrames"]] == ["f003"]
+
+    def test_drop_removes_named_noise(self, tmp_path, monkeypatch):
+        outcome, _out = self._run(tmp_path, monkeypatch, drop="f002")
+        assert outcome.data["images"]["count"] == 2
+        assert [f["id"] for f in outcome.data["visionFrames"]] == ["f001", "f003"]
+
+    def test_an_unknown_id_is_refused_by_name(self, tmp_path, monkeypatch):
+        from zoombie.lib.errors import ZoombieError
+
+        with pytest.raises(ZoombieError) as excinfo:
+            self._run(tmp_path, monkeypatch, keep="f099")
+        assert "f099" in str(excinfo.value)
+
+    def test_a_path_is_not_a_handle(self, tmp_path, monkeypatch):
+        """The agent names frames by id, never by path: a path is an unknown handle."""
+        from zoombie.lib.errors import ZoombieError
+
+        with pytest.raises(ZoombieError):
+            self._run(tmp_path, monkeypatch, drop=".data/img/002 - 00-00-20.png")
+
+    def test_the_attach_list_carries_the_id(self, tmp_path, monkeypatch):
+        outcome, _out = self._run(tmp_path, monkeypatch)
+        ids = [entry["id"] for entry in outcome.data["next"]["attach"]]
+        assert ids == ["f001", "f002", "f003"]

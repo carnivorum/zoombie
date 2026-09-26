@@ -78,6 +78,7 @@ MAX_DESCRIPTION_CHARS = 1024
 # here, and so a deleted block is a failure rather than a silently missing include.
 EXPECTED_INCLUDES = {
     "cli-resolve", "json-contract", "repo-fallback", "shell-note", "scratch-note",
+    "frame-selection",
 }
 
 _OPEN_RE = re.compile(r"<!--\s*zoombie:include\s+([A-Za-z0-9._-]+)\s*-->")

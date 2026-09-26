@@ -141,6 +141,9 @@ KNOWN_OPTIONS: dict[str, dict] = {
         "min_frame_bytes": "int", "min_text_chars": "int", "min_slide_sec": "float",
         "sample_rate": "float", "sample_interval_sec": "float", "diff_threshold": "float",
         "hash_distance": "int",
+        # The agent's final keep/drop. Handles are frame ids (``f005``) or their
+        # timestamps -- NEVER a path: the agent decides, the tool moves the files.
+        "keep": "str", "drop": "str", "keep_file": "str", "drop_file": "str",
     },
     "postprocess": {
         "md": "str", "dir": "str", "recurse": "bool", "srt": "str", "image_dir": "str",
@@ -506,6 +509,19 @@ def _attachable_from_data(data: dict | None) -> list[dict]:
     return []
 
 
+def _deferred_label(_index: int, entry: dict, _total: int) -> str:
+    """``f013 013 - 00-08-40.png`` -- a deferred frame named by its allowed handle.
+
+    The id is the only handle an agent may name in ``keep``/``drop``; the file is
+    shown beside it so a human reading the transcript can identify the frame. A
+    command whose attach entries carry no id (an image run, say) degrades to the
+    file name alone rather than inventing a handle it cannot honour.
+    """
+    name = str(entry.get("file") or entry.get("path") or "?")
+    handle = entry.get("id")
+    return f"{handle} {name}" if handle else name
+
+
 def tool_result(command: str, outcome, cap: int = IMAGE_ATTACH_CAP) -> dict:
     """Wrap an :class:`Outcome` as an MCP ``tools/call`` result.
 
@@ -546,15 +562,31 @@ def tool_result(command: str, outcome, cap: int = IMAGE_ATTACH_CAP) -> dict:
         })
         content.extend(image_blocks(selected["attach"]))
         if selected["truncated"]:
-            names = ", ".join(
-                str(entry.get("file") or entry.get("path") or "?")
-                for entry in selected["overAttach"]
+            # Name each deferred frame by its ID as well as its file. The id is the
+            # handle the agent is allowed to use, and the guidance below is the
+            # correction the Crimson talking-head run needed: the agent does not
+            # raise the cap or touch files, it makes a KEEP/DROP decision and lets
+            # the server do the work.
+            described = ", ".join(
+                _deferred_label(index, entry, len(attachable))
+                for index, entry in enumerate(selected["overAttach"], start=1)
             )
             content.append({
                 "type": "text",
                 "text": (
-                    "deferred images (read these by NARROWING the request, e.g. "
-                    f"slides -Times, not by raising the cap): {names}"
+                    "deferred images (each as <id> <file>): " + described
+                ),
+            })
+            content.append({
+                "type": "text",
+                "text": (
+                    "AGENT DECIDES, THE TOOL EDITS: look at what is attached, decide "
+                    "which frames are worth keeping, then re-run this tool with "
+                    "keep:\"<ids or timestamps>\" (or drop:\"...\"). Name frames by "
+                    "their id (fNNN) or timestamp -- never a file path: do NOT delete, "
+                    "move, rename or hand-edit anything under .data/. The tool applies "
+                    "the selection, prunes the dropped frames and rewrites the "
+                    "manifest itself."
                 ),
             })
 
@@ -615,7 +647,34 @@ def tool_schemas() -> list[dict]:
         schema("pipeline", "Download, extract and transcribe in one call (blocks; use start/status/result).", {**source_output, **gpu, "language": {"type": "string"}, "download_dir": {"type": "string"}}, ["source"]),
         schema("readpdf", "Convert a PDF to Markdown; vision renders text-less pages for a reader.", {**source_output, "pages": {"type": "string"}, "lang": {"type": "string"}, "dpi": {"type": "integer"}, "ocr": {"type": "boolean", "description": "OCR scanned pages with Tesseract"}, "vision": {"type": "string", "description": "render pages with NO text layer to PNG in this directory for a vision reader (ignored when ocr=true)"}, "images": {"type": "boolean", "description": "also extract embedded images"}, "images_only": {"type": "boolean", "description": "extract images and the sidecar only; render no Markdown"}, "image_dir": {"type": "string", "description": "explicit image directory"}}, ["source"]),
         schema("readimages", "Turn images into Markdown (OCR with ocr=true, else vision/metadata only).", {**source_output, "ocr": {"type": "boolean"}, "lang": {"type": "string"}, "image_dir": {"type": "string"}}, ["source"]),
-        schema("slides", "Extract slide frames from a video plus a placement manifest (blocks; use start/status/result).", {**source_output, "times": {"type": "string"}, "scale": {"type": "integer"}, "lang": {"type": "string"}, "min_frame_bytes": {"type": "integer"}}, ["source"]),
+        schema(
+            "slides",
+            (
+                "Extract slide frames from a video plus a placement manifest (blocks; "
+                "use start/status/result). The detector only PROPOSES frames; the agent "
+                "makes the FINAL keep/drop call with keep/drop, naming frames by their "
+                "id (fNNN) or timestamp as reported in data.images.imageIds -- never a "
+                "path. The tool performs every file operation."
+            ),
+            {
+                **source_output,
+                "times": {"type": "string"},
+                "scale": {"type": "integer"},
+                "lang": {"type": "string"},
+                "min_frame_bytes": {"type": "integer"},
+                "keep": {
+                    "type": "string",
+                    "description": "agent ALLOW-LIST of frames to keep: ids (f005), timestamps, or seconds, comma/space separated. Non-empty replaces the default set",
+                },
+                "drop": {
+                    "type": "string",
+                    "description": "agent DENY-LIST of frames to drop (same handles as keep)",
+                },
+                "keep_file": {"type": "string", "description": "read keep from a UTF-8 file (one id per line)"},
+                "drop_file": {"type": "string", "description": "read drop from a UTF-8 file"},
+            },
+            ["source"],
+        ),
         schema("postprocess", "Assign anchors, timestamps, index and images in a summary.md (dry run unless apply=true).", {"md": {"type": "string"}, "dir": {"type": "string"}, "recurse": {"type": "boolean"}, "srt": {"type": "string"}, "image_dir": {"type": "string"}, "report": {"type": "string"}, "apply": {"type": "boolean"}, "attach_limit": {"type": "integer"}}, []),
         schema("verify", "Check a produced summary tree (exit 1 on problems).", {"dir": {"type": "string"}, "recurse": {"type": "boolean"}, "json": {"type": "boolean"}}, []),
         schema("index", "Regenerate the README.md index of a library (dry run unless apply=true).", {"dir": {"type": "string"}, "output": {"type": "string"}, "json": {"type": "boolean"}, "apply": {"type": "boolean"}}, ["dir"]),

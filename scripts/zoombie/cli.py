@@ -429,6 +429,31 @@ def build_parser() -> argparse.ArgumentParser:
             f"'likely image-only' (default: {slides.DEFAULT_MIN_TEXT_CHARS})"
         ),
     )
+    # The agent's FINAL keep/drop over the detector's proposals. The detector
+    # cannot tell a webcam frame from a slide, so it only PROPOSES; the agent, which
+    # can see the frames, names the ones worth keeping. The handles are the ids and
+    # timestamps from the previous run's ``data.images.imageIds`` -- NEVER a path:
+    # the agent decides, this command performs every file operation.
+    slides_cmd.add_argument(
+        "-Keep", "--keep", dest="keep", default=None,
+        help=(
+            "agent ALLOW-LIST of proposed frames to keep (ids like f005 or their "
+            "timestamps, comma/space separated). Non-empty replaces the default set, "
+            "so a talking-head run can be narrowed to its content slides"
+        ),
+    )
+    slides_cmd.add_argument(
+        "-Drop", "--drop", dest="drop", default=None,
+        help="agent DENY-LIST of proposed frames to drop (same handles as -Keep)",
+    )
+    slides_cmd.add_argument(
+        "-KeepFile", "--keep-file", dest="keep_file", default=None,
+        help="read the -Keep selection from a UTF-8 file (one id/timestamp per line)",
+    )
+    slides_cmd.add_argument(
+        "-DropFile", "--drop-file", dest="drop_file", default=None,
+        help="read the -Drop selection from a UTF-8 file",
+    )
     # Text is REPORTING, not a decision. OCR runs once per run and its text is
     # written to .data/ocr.json for the agent to score; -NoTextGate disables it.
     slides_cmd.add_argument(
