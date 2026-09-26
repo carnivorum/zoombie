@@ -536,6 +536,80 @@ class TestToolListing:
         assert {"slides", "pipeline", "transcribe"} <= mcp.LONG_TOOLS
 
 
+# The tool arguments ``build_argv`` handles without a :data:`mcp.KNOWN_OPTIONS`
+# entry, because they are shared by name across commands (``--source``/``--output``
+# come from ``_add_source_output``, the rest are the common/GPU flags).
+CORE_ARGUMENTS = frozenset({
+    "source", "output", "dry_run", "force", "attach_limit", "keep_scratch",
+    "keep_work", "no_gpu", "threads", "model",
+})
+
+# A representative value per coercion kind, so a key is exercised as the type the
+# schema advertises rather than as a string.
+_SAMPLE_BY_KIND = {"bool": True, "int": 1, "float": 1.0, "str": "sample", "list": ["sample"]}
+
+
+def _subcommand_options() -> dict[str, set[str]]:
+    """Each CLI subcommand's accepted option strings, read from argparse."""
+    parser = cli.build_parser()
+    out: dict[str, set[str]] = {}
+    for action in parser._actions:  # noqa: SLF001 - argparse exposes no public API
+        choices = getattr(action, "choices", None)
+        if not choices:
+            continue
+        for name, sub in choices.items():
+            strings: set[str] = set()
+            for sub_action in sub._actions:  # noqa: SLF001
+                strings.update(sub_action.option_strings)
+            out[name] = strings
+    return out
+
+
+class TestAdvertisedArgumentsAreCallable:
+    """A schema must never advertise an argument ``_option_flags`` refuses.
+
+    The blocking defect this guards against: ``tool_schemas`` advertised ``apply``
+    on ``postprocess`` while :data:`mcp.KNOWN_OPTIONS` omitted it, so the summarize
+    WRITE path failed over MCP with "unknown argument". Both directions are checked
+    -- schema -> whitelist, and whitelist -> a real argparse flag -- so neither
+    side can drift alone and a future flag cannot silently become un-callable.
+    """
+
+    def test_every_advertised_property_is_core_or_whitelisted(self):
+        for tool in mcp.tool_schemas():
+            name = tool["name"]
+            known = mcp.KNOWN_OPTIONS.get(name, {})
+            for prop in tool["inputSchema"]["properties"]:
+                assert prop in CORE_ARGUMENTS or prop in known, (
+                    f"{name}: the schema advertises '{prop}', but _option_flags "
+                    f"would refuse it (add it to mcp.KNOWN_OPTIONS)"
+                )
+
+    def test_every_advertised_argument_builds_without_raising(self):
+        for tool in mcp.tool_schemas():
+            name = tool["name"]
+            known = mcp.KNOWN_OPTIONS.get(name, {})
+            extra = {
+                prop: _SAMPLE_BY_KIND[known[prop]]
+                for prop in tool["inputSchema"]["properties"]
+                if prop not in CORE_ARGUMENTS
+            }
+            # The call is a FULL request with every advertised argument at once.
+            mcp.build_argv(name, dict(extra))
+
+    def test_every_whitelisted_key_maps_to_a_real_cli_flag(self):
+        """The other direction: a whitelisted key must name a real flag."""
+        options = _subcommand_options()
+        for name, known in mcp.KNOWN_OPTIONS.items():
+            assert name in options, f"whitelist names unknown subcommand {name}"
+            for key in known:
+                flag = mcp._flag_for(name, key)
+                assert flag in options[name], (
+                    f"{name}: '{key}' maps to '{flag}', which is not an option of "
+                    f"that subcommand (declare it in mcp.OPTION_FLAGS)"
+                )
+
+
 # --------------------------------------------------------------------------- #
 # 8. the job lifecycle
 # --------------------------------------------------------------------------- #

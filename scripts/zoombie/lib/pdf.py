@@ -191,11 +191,47 @@ def page_has_text(page) -> bool:
         return False
 
 
+def _point_pytesseract_at_engine() -> str | None:
+    """Point pytesseract at the resolved engine and return that path (or ``None``).
+
+    Tesseract is a **toolchain-owned component**: the installer provisions a pinned,
+    verified engine under the ASCII root (see :mod:`zoombie.lib.tesseract`), and the
+    package's image OCR (:func:`zoombie.lib.ocr.available`) already prefers it over
+    PATH. On a machine with no system Tesseract, ``pytesseract``'s own PATH search
+    is empty -- so without this every page OCR failed with "not in your PATH" while
+    the engine sat provisioned and callable. The pairing here mirrors ``lib.ocr``:
+    ONE resolution order (toolchain engine -> system install -> PATH) shared by both
+    consumers, instead of two probes that can disagree.
+
+    Imports are kept local so this module stays import-light for the standalone
+    ``scripts/pdf/extract_pdf.py`` wrapper.
+    """
+    try:
+        from . import tesseract
+    except Exception:  # noqa: BLE001 - a partially installed checkout must not raise
+        return None
+    exe, _reason = tesseract.resolve_engine()
+    if not exe:
+        return None
+    try:
+        import pytesseract
+    except Exception:  # noqa: BLE001 - environment dependent
+        return exe
+    pytesseract.pytesseract.tesseract_cmd = exe
+    return exe
+
+
 def ocr_available() -> tuple[bool, str | None]:
-    """Return ``(available, version_or_error)`` for Tesseract without raising."""
+    """Return ``(available, version_or_error)`` for Tesseract without raising.
+
+    Resolves the engine through the toolchain first (as ``lib.ocr`` does), so the
+    provisioned engine counts as available even when it is on neither PATH nor a
+    system location.
+    """
     try:
         import pytesseract
 
+        _point_pytesseract_at_engine()
         return True, str(pytesseract.get_tesseract_version())
     except Exception as exc:  # environment dependent
         return False, str(exc)
@@ -206,6 +242,7 @@ def ocr_page(page, lang: str) -> str:
     import pytesseract
     from PIL import Image
 
+    _point_pytesseract_at_engine()
     pix = page.get_pixmap(dpi=200)
     image = Image.open(io.BytesIO(pix.tobytes("png")))
     return pytesseract.image_to_string(image, lang=lang).strip()

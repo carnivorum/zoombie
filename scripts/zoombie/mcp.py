@@ -124,29 +124,55 @@ IMAGE_ATTACH_CAP = next_mod.DEFAULT_ATTACH_CAP
 # handled specially, and ``-CleanScratch`` -> ``clean_scratch`` by the generic
 # rule).
 KNOWN_OPTIONS: dict[str, dict] = {
-    "unpack": {"strip": "int", "include": "list"},
+    "unpack": {"strip": "int", "include": "list", "check": "bool"},
     "transcribe": {"from_time": "str", "to_time": "str", "language": "str"},
-    "pipeline": {"from_time": "str", "to_time": "str", "language": "str"},
-    "readpdf": {"pages": "str", "lang": "str", "dpi": "int", "min_px": "int", "min_pt": "int"},
-    "readimages": {"lang": "str"},
+    "pipeline": {"from_time": "str", "to_time": "str", "language": "str", "download_dir": "str"},
+    # ``ocr`` is a mode switch and ``vision`` maps to the ``--vision <dir>`` flag
+    # (whose argparse destination is ``vision_dir``): both are the scan-escalation
+    # path, and neither is optional in the sense the whitelist used to imply.
+    "readpdf": {
+        "pages": "str", "lang": "str", "dpi": "int", "min_px": "int", "min_pt": "int",
+        "ocr": "bool", "vision": "str", "images": "bool", "images_only": "bool",
+        "image_dir": "str",
+    },
+    "readimages": {"lang": "str", "ocr": "bool", "image_dir": "str"},
     "slides": {
         "times": "str", "lang": "str", "scale": "int", "min_px": "int",
         "min_frame_bytes": "int", "min_text_chars": "int", "min_slide_sec": "float",
         "sample_rate": "float", "sample_interval_sec": "float", "diff_threshold": "float",
         "hash_distance": "int",
     },
-    "postprocess": {"md": "str", "dir": "str", "recurse": "bool", "srt": "str", "image_dir": "str", "report": "str"},
-    "verify": {"dir": "str", "recurse": "bool"},
-    "index": {"dir": "str", "output": "str", "json": "bool"},
+    "postprocess": {
+        "md": "str", "dir": "str", "recurse": "bool", "srt": "str", "image_dir": "str",
+        "report": "str", "apply": "bool",
+    },
+    "verify": {"dir": "str", "recurse": "bool", "json": "bool"},
+    "index": {"dir": "str", "output": "str", "json": "bool", "apply": "bool"},
     "items": {"root": "str", "depth": "int", "recurse": "bool", "json": "bool", "title": "str", "date": "str"},
-    "migrate": {"dir": "str", "json": "bool"},
-    "modes": {"target": "str", "check": "bool"},
-    "mcp": {"target": "str", "check": "bool"},
-    "clean": {"work_root": "str"},
-    "download": {"download_dir": "str", "format": "str"},
+    "migrate": {"dir": "str", "json": "bool", "apply": "bool"},
+    "modes": {"target": "str", "check": "bool", "apply": "bool"},
+    "mcp": {"target": "str", "check": "bool", "apply": "bool"},
+    "clean": {"work_root": "str", "clean_scratch": "bool"},
+    "download": {"download_dir": "str", "format": "str", "audio_only": "bool"},
     "extract": {"format": "str"},
-    "transcribe_only": {},
 }
+
+# Keys whose CLI flag does NOT follow the ``apply -> --apply`` underscore-to-dash
+# rule. Kept explicit because argparse's own spelling is irregular here
+# (``-From``/``-To``), and the generic rule would fabricate ``--from-time`` -- a
+# flag the parser rejects. The reverse direction matters too: a whitelist entry
+# that maps to no real flag is caught by the parser-derived test, so this table is
+# the single place an irregular spelling has to be declared.
+OPTION_FLAGS: dict[str, dict[str, str]] = {
+    "transcribe": {"from_time": "from", "to_time": "to"},
+    "pipeline": {"from_time": "from", "to_time": "to"},
+}
+
+
+def _flag_for(command: str, key: str) -> str:
+    """The ``--flag`` token for a whitelisted key, honouring :data:`OPTION_FLAGS`."""
+    name = OPTION_FLAGS.get(command, {}).get(key, key.replace("_", "-"))
+    return "--" + name
 
 
 # --- framing / JSON-RPC plumbing -------------------------------------------
@@ -287,17 +313,17 @@ def _option_flags(command: str, arguments: dict) -> list[str]:
         kind = known[key]
         if kind == "bool":
             if _coerce("bool", value):
-                tokens.append("--" + key.replace("_", "-"))
+                tokens.append(_flag_for(command, key))
             continue
         if kind == "list":
             items = _coerce("list", value)
             if not isinstance(items, list):
                 items = [items]
             for item in items:
-                tokens.append("--" + key.replace("_", "-"))
+                tokens.append(_flag_for(command, key))
                 tokens.append(str(item))
             continue
-        tokens.append("--" + key.replace("_", "-"))
+        tokens.append(_flag_for(command, key))
         tokens.append(str(_coerce(kind, value)))
     return tokens
 
@@ -582,13 +608,13 @@ def tool_schemas() -> list[dict]:
     tools_out: list[dict] = [
         schema("doctor", "Report tool status.", {}, []),
         schema("clean", "Remove scratch dirs.", {**source_output, "clean_scratch": {"type": "boolean", "description": "sweep every toolchain-owned scratch dir"}}, []),
-        schema("download", "Download a video or its audio.", {**source_output, "download_dir": {"type": "string"}, "format": {"type": "string", "enum": ["wav", "mp3", "m4a", "flac"]}}, ["source"]),
+        schema("download", "Download a video or its audio.", {**source_output, "download_dir": {"type": "string"}, "audio_only": {"type": "boolean", "description": "download the audio track only"}, "format": {"type": "string", "enum": ["wav", "mp3", "m4a", "flac"]}}, ["source"]),
         schema("extract", "Extract audio from a video.", {**source_output, "format": {"type": "string", "enum": ["wav", "mp3", "m4a", "flac"]}}, ["source"]),
         schema("unpack", "Extract an NSIS installer or a 7z archive into a folder (data, never executed).", {**source_output, "strip": {"type": "integer"}, "include": {"type": "array", "items": {"type": "string"}}}, ["source", "output"]),
         schema("transcribe", "Transcribe audio to text (blocks; use start/status/result).", {**source_output, **gpu, "language": {"type": "string"}, "from_time": {"type": "string"}, "to_time": {"type": "string"}}, ["source"]),
         schema("pipeline", "Download, extract and transcribe in one call (blocks; use start/status/result).", {**source_output, **gpu, "language": {"type": "string"}, "download_dir": {"type": "string"}}, ["source"]),
-        schema("readpdf", "Convert a PDF to Markdown; -Vision renders text-less pages for a reader.", {**source_output, "pages": {"type": "string"}, "lang": {"type": "string"}, "dpi": {"type": "integer"}}, ["source"]),
-        schema("readimages", "Turn images into Markdown (OCR with ocr=true, else vision/metadata only).", {**source_output, "ocr": {"type": "boolean"}, "lang": {"type": "string"}}, ["source"]),
+        schema("readpdf", "Convert a PDF to Markdown; vision renders text-less pages for a reader.", {**source_output, "pages": {"type": "string"}, "lang": {"type": "string"}, "dpi": {"type": "integer"}, "ocr": {"type": "boolean", "description": "OCR scanned pages with Tesseract"}, "vision": {"type": "string", "description": "render pages with NO text layer to PNG in this directory for a vision reader (ignored when ocr=true)"}, "images": {"type": "boolean", "description": "also extract embedded images"}, "images_only": {"type": "boolean", "description": "extract images and the sidecar only; render no Markdown"}, "image_dir": {"type": "string", "description": "explicit image directory"}}, ["source"]),
+        schema("readimages", "Turn images into Markdown (OCR with ocr=true, else vision/metadata only).", {**source_output, "ocr": {"type": "boolean"}, "lang": {"type": "string"}, "image_dir": {"type": "string"}}, ["source"]),
         schema("slides", "Extract slide frames from a video plus a placement manifest (blocks; use start/status/result).", {**source_output, "times": {"type": "string"}, "scale": {"type": "integer"}, "lang": {"type": "string"}, "min_frame_bytes": {"type": "integer"}}, ["source"]),
         schema("postprocess", "Assign anchors, timestamps, index and images in a summary.md (dry run unless apply=true).", {"md": {"type": "string"}, "dir": {"type": "string"}, "recurse": {"type": "boolean"}, "srt": {"type": "string"}, "image_dir": {"type": "string"}, "report": {"type": "string"}, "apply": {"type": "boolean"}, "attach_limit": {"type": "integer"}}, []),
         schema("verify", "Check a produced summary tree (exit 1 on problems).", {"dir": {"type": "string"}, "recurse": {"type": "boolean"}, "json": {"type": "boolean"}}, []),

@@ -108,6 +108,67 @@ class TestAvailableResolutionOrder:
         assert detail == "5.5.3"
 
 
+class TestPdfOcrUsesTheSameEngine:
+    """``lib.pdf``'s page OCR must resolve the SAME engine as ``lib.ocr``.
+
+    The defect this pins: ``pdf.ocr_available`` called ``get_tesseract_version()``
+    without pointing pytesseract at the provisioned engine, so a machine with the
+    toolchain engine and no PATH tesseract reported "not in your PATH" and the
+    ``readpdf --ocr`` escalation -- a documented path -- never ran.
+    """
+
+    def _fake_pytesseract(self, monkeypatch, engine, seen: list):
+        import sys
+        import types
+
+        module = types.ModuleType("pytesseract")
+
+        class _Driver:
+            tesseract_cmd = None
+
+        module.pytesseract = _Driver()
+
+        def _get_version():
+            seen.append(module.pytesseract.tesseract_cmd)
+            return "5.5.3"
+
+        module.get_tesseract_version = _get_version
+        monkeypatch.setitem(sys.modules, "pytesseract", module)
+        monkeypatch.setattr(tesseract.paths, "env_path", lambda *c: str(engine.parent))
+        monkeypatch.setattr(tesseract.process, "refresh_path_from_registry", lambda: "")
+        return module
+
+    def test_pdf_ocr_points_pytesseract_at_the_provisioned_engine(
+        self, tmp_path, monkeypatch
+    ):
+        from zoombie.lib import pdf
+
+        engine = tmp_path / "tesseract" / "tesseract.exe"
+        engine.parent.mkdir(parents=True)
+        engine.write_bytes(b"stub")
+        seen: list = []
+        self._fake_pytesseract(monkeypatch, engine, seen)
+
+        usable, detail = pdf.ocr_available()
+        assert usable is True
+        assert detail == "5.5.3"
+        assert seen == [str(engine)], "the provisioned engine must be handed to the driver"
+
+    def test_pdf_and_image_ocr_agree_on_the_engine(self, tmp_path, monkeypatch):
+        """Both consumers resolve one order; neither may disagree with the other."""
+        from zoombie.lib import pdf
+
+        engine = tmp_path / "tesseract" / "tesseract.exe"
+        engine.parent.mkdir(parents=True)
+        engine.write_bytes(b"stub")
+        seen: list = []
+        self._fake_pytesseract(monkeypatch, engine, seen)
+
+        pdf_usable, _ = pdf.ocr_available()
+        image_usable, _ = ocr.available()
+        assert pdf_usable is True and image_usable is True
+
+
 class TestLanguageDerivation:
     def test_explicit_override_wins(self, tmp_path):
         assert ocr.derive_lang(str(tmp_path / "x.mp4"), "deu") == "deu"

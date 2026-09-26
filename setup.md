@@ -44,8 +44,10 @@ The repo already contains a tested, idempotent implementation:
 - [`scripts/zoombie/install/main.py`](scripts/zoombie/install/main.py) — the
   installer/updater that actually does the work (the `setup-worker` replacement,
   also used directly for local development).
-- [`scripts/zoombie/cli.py`](scripts/zoombie/cli.py) — the runtime CLI. All skills
-  call it through the deployed `zoombie.cmd` launcher.
+- [`scripts/zoombie/cli.py`](scripts/zoombie/cli.py) — the runtime CLI. The skills
+  reach it through the `zoombie` **MCP server** (`python -m zoombie.mcp`), which
+  calls the same command modules in process; the deployed `zoombie.cmd` launcher is
+  the fallback.
 - [`scripts/zoombie/selftest.py`](scripts/zoombie/selftest.py) — end-to-end verification.
 - [`skills/`](skills/) — the canonical skill sources, deployed to the global root.
 

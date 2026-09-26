@@ -1,6 +1,6 @@
 ---
 name: zoombie-summarize
-cvrm-zoombie-version: 4.9.0
+cvrm-zoombie-version: 5.0.0
 description: Turn SOURCE material into a readable 6-block summary.md inside an item folder - a transcript, a PDF-derived Markdown, or arbitrary text. Use when the user wants a summary, notes, a digest, a write-up, or a readable document from something they already have. You write the prose yourself; the mechanical passes (anchors, heading timestamps from the SRT, the regenerated table of contents, link encoding, image re-insertion) are done by zoombie postprocess, so a re-run cannot drift.
 ---
 
@@ -76,10 +76,10 @@ material to say; when the source is sound, omit it.
 ### Slides (video sources only): ask first
 
 For a **video** source, ask before anything expensive: (1) "should I also try to
-extract slides?"; (2) if yes, "do you have exact timestamps?" — **yes** runs
-`slides -Times "..."` (one frame each, the minimal set), **no** runs `slides` to
-auto-detect and dedup. `postprocess -Apply` then embeds them. Frames land in
-`.data/img/`; stage any scratch under the workspace `/.tmp/`.
+extract slides?"; (2) if yes, "do you have exact timestamps?" — **yes** runs the
+`slides` tool with `times: "..."` (one frame each, the minimal set), **no** runs
+`slides` to auto-detect and dedup. `postprocess` with `apply: true` then embeds
+them. Frames land in `.data/img/`; stage any scratch under the workspace `/.tmp/`.
 
 `slides` **promotes, never drops on text**: every stable run keeps ≥1 frame, so an
 image-only slide is never lost; `data.images.skippedReasons` names the structural
@@ -116,44 +116,37 @@ stay out of the contents. Use `####` for a sub-point within a topic.
 6. Collapses blank runs and ensures exactly one trailing newline.
 
 Each pass works on a *range* rebuilt from the document, never by appending, so
-**a second `-Apply` on an unchanged file leaves it byte-identical.** That is the
-acceptance criterion, and it is why re-running is always safe.
+**a second `apply: true` on an unchanged file leaves it byte-identical.** That is
+the acceptance criterion, and it is why re-running is always safe.
 
-## Run this, nothing else
+## Run this (MCP tool first)
 
 <!-- zoombie:include cli-resolve -->
 <!-- /zoombie:include -->
 
-Then the mechanical pass — **dry run by default, and `-Apply` is what writes**:
+Call the `postprocess` MCP tool with the target as JSON arguments. The mechanical
+pass is **dry run by default, and `apply: true` is what writes**:
 
-```powershell
-# report what would change, write nothing
-& $cli postprocess -Md "<item>\summary.md"
-
-# write it (byte-identical on a second run)
-& $cli postprocess -Md "<item>\summary.md" -Apply
-
-# a whole folder instead of one file (add -Recurse to walk subfolders)
-& $cli postprocess -Dir "<library>" -Apply
+```json
+{"md": "<item>\\summary.md"}
+{"md": "<item>\\summary.md", "apply": true}
+{"dir": "<library>", "apply": true, "recurse": true}
 ```
 
-`-Srt` and `-ImageDir` are optional: the default is the item layout, so the
-sibling `.data/transcript.srt` and the `.data/img/` manifest are found for you.
-Pass them only to override.
+`srt` and `image_dir` are optional: the default is the item layout, so the sibling
+`.data/transcript.srt` and the `.data/img/` manifest are found for you. Pass them
+only to override.
 
-Rebuild the library index from a deterministic scan of the item folders:
+The `index` tool rebuilds the library index from a deterministic scan, and
+`verify` checks a finished tree (exit code 1 on problems: dangling links, missing
+anchors, broken image references):
 
-```powershell
-& $cli index -Dir "<library>"            # dry run
-& $cli index -Dir "<library>" -Apply     # writes <library>\README.md
+```json
+{"dir": "<library>"}
+{"dir": "<library>", "apply": true}
 ```
 
-Check a finished tree (exit code 1 on problems: dangling links, missing anchors,
-broken image references):
-
-```powershell
-& $cli verify -Dir "<library>"
-```
+CLI fallback only: `& $cli postprocess -Md "<item>\summary.md" -Apply`.
 
 <!-- zoombie:include json-contract -->
 <!-- /zoombie:include -->
@@ -185,19 +178,18 @@ Read `data` for what changed. Do **not** hand-assemble a Python command.
            transcript.txt, transcript.srt, source.json, item.json
    ```
 
-   `.data/` is created by `transcribe`/`pipeline` the moment `-Output` names the
+   `.data/` is created by `transcribe`/`pipeline` the moment `output` names the
    item, so a folder that has only been transcribed is already a recognised item.
    You do not create `.data/`; you write `summary.md` and run `postprocess`.
 
    Read what the workspace already does instead of imposing a convention:
 
-   ```powershell
-   # what exists here, what number is next, and which naming the folder uses
-   & $cli items -Root "<target>" -Title "<the item's title>"
+   ```json
+   {"root": "<target>", "title": "<the item's title>"}
    ```
 
    `items` reports the naming convention it MEASURED in that directory, with a
-   confidence and a sample count, and `-Title` renders concrete name proposals
+   confidence and a sample count, and `title` renders concrete name proposals
    from it. Follow the directory's own convention. With no evidence at all, the
    recommendation is `<DD.MM.YYYY> - <title>`; say that is the default. Then
    present the proposals and wait for the user to choose.
@@ -212,17 +204,17 @@ Read `data` for what changed. Do **not** hand-assemble a Python command.
    the origin was not durable rather than inventing a link).
    Block-6 subsections follow **topic change, not slides** — see above.
 
-4. **Run `postprocess`** with the confirmed paths and `-Apply`.
+4. **Run the `postprocess` tool** with the confirmed paths and `apply: true`.
 
 5. **Verify.** Re-read the result and confirm the anchors resolve and block 4
    indexes what block 6 actually contains.
 
-6. **Offer the reindex**, do not assume it: `index -Apply` rebuilds the library
-   `README.md`. Then offer `verify` as the check.
+6. **Offer the reindex**, do not assume it: `index` with `apply: true` rebuilds
+   the library `README.md`. Then offer `verify` as the check.
 
 ## Rules
 
-- **Never edit what the CLI owns.** If anchors, timestamps, contents or image
+- **Never edit what the tool owns.** If anchors, timestamps, contents or image
   placement are wrong, fix the *input* or the *prose* and re-run `postprocess`.
   Hand-patching block 4 or an `<a id>` breaks the idempotency guarantee.
 - **One document per item.** `summary.md`, the kept media, and `.data/`.

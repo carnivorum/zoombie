@@ -45,10 +45,14 @@ is the agent-facing procedure itself; the sections below explain the design.
   the `zoombie` MCP server (`python -m zoombie.mcp`, JSON-RPC over stdio) in the
   client's own `mcp_settings.json`, verifying the entry is present
   (`manifest.mcp.registered`); the merge replaces only our entry, so other MCP
-  servers are preserved. The **skills prefer the MCP tools** and fall back to the
-  `zoombie.cmd` launcher, because the MCP path calls the commands **in process** —
-  no `cmd.exe`, no console code page — so a Cyrillic `-Output` never round-trips
-  through a shell. Re-register any time with `python -m zoombie mcp -Apply`.
+  servers are preserved. **MCP is the transport the skills use**: each skill calls
+  the MCP tool of the same name with JSON arguments, and only falls back to the
+  `zoombie.cmd` launcher when those tools are unavailable. The MCP path calls the
+  commands **in process** — no `cmd.exe`, no console code page — so a Cyrillic
+  `output` never round-trips through a shell. Every argument a tool's schema
+  advertises is accepted by the facade (a parser-derived test pins that, so a
+  future flag cannot silently become un-callable over MCP). Re-register any time
+  with `python -m zoombie mcp -Apply`.
 - **No install-path reliance.** All tools are fetched into one ASCII root and
   invoked by absolute path resolved from a manifest. PATH is only a fallback,
   refreshed from the registry, so "tool not found" false negatives are gone.

@@ -1,6 +1,6 @@
 ---
 name: zoombie-transcribe-audio
-cvrm-zoombie-version: 4.9.0
+cvrm-zoombie-version: 5.0.0
 description: Transcribe an audio file into SOURCE material - a TXT transcript, an SRT subtitle track and a .source.json origin sidecar - using a local whisper.cpp binary with a CUDA/Vulkan/CPU backend. Use when the user wants a speech-to-text transcript, subtitles, or SRT/TXT output for a recording. It deliberately writes no summary and no readable document; zoombie-summarize produces those. Always inspects the project, proposes transcript output paths, and confirms the destination before writing anything.
 ---
 
@@ -15,7 +15,7 @@ CLI. This skill only decides *where* to write and asks the user to confirm.
 
 ## Producer contract
 
-`-Output` names the **item folder**; the artifacts always land in its `.data/`
+`output` names the **item folder**; the artifacts always land in its `.data/`
 subdirectory, which is the documented item layout. Nothing is written at the item
 root -- so a transcript can never again sit loose beside `summary.md`.
 
@@ -34,8 +34,8 @@ In the confirmed item folder, one `transcribe` call writes:
   why the `.srt` is the ONLY timing source in the output set: with no cue lines
   in the `.txt`, a downstream indexing pass has nowhere else to read the timings
   from. Do not drop the SRT "to keep things tidy".
-- The `.srt` is emitted **by default**. `-NoSrt` is the opt-out and it destroys
-  the timings.
+- The `.srt` is emitted **by default**. `no_srt: true` is the opt-out and it
+  destroys the timings.
 - `.data/source.json` records the origin. Keys: `kind`, `url`, `title`, `id`,
   `durationSec`, `language`, `model`, `backend`, `deviceUsed`, `deviceVerified`,
   `realtimeFactor`, `toolchainVersion`, `createdAt`, `sourceKept`. Every value is
@@ -44,22 +44,25 @@ In the confirmed item folder, one `transcribe` call writes:
   `null`; `kind` is the recorded source category (a `pipeline` run writes `video`
   for a URL and `audio` for a local file, while a plain `transcribe` leaves the
   default `video`); `sourceKept` is `true` only when `pipeline` was told to keep
-  the downloaded media (`-KeepWork`).
+  the downloaded media (`keep_work: true`).
 
-## Run this, nothing else
+## Run this (MCP tool first)
 
 <!-- zoombie:include cli-resolve -->
 <!-- /zoombie:include -->
 
-Then call it — this is the only command this skill needs:
+Call the `transcribe` MCP tool with the confirmed item folder as JSON arguments:
 
-```powershell
-& $cli transcribe -Source "<audio>" -Output "<confirmed-item-folder>" [-Language auto] [-NoSrt] [-Model "<name>"] [-Force] [-NoGpu] [-NoFlashAttn] [-Threads N] [-AllowCpuFallback] [-StrictGpu]
+```json
+{"source": "<audio>", "output": "<confirmed-item-folder>", "language": "auto"}
 ```
 
-`-NoGpu` forces a deliberate CPU run; `-AllowCpuFallback` permits a CPU run on a
-machine whose GPU is configured and usable. You should need neither normally —
-see the GPU policy below.
+CLI fallback only:
+`& $cli transcribe -Source "<audio>" -Output "<confirmed-item-folder>"`.
+
+`no_gpu: true` forces a deliberate CPU run; `allow_cpu_fallback: true` permits a
+CPU run on a machine whose GPU is configured and usable. You should need neither
+normally — see the GPU policy below.
 
 <!-- zoombie:include repo-fallback -->
 <!-- /zoombie:include -->
@@ -69,7 +72,7 @@ see the GPU policy below.
 
 Read `data.artifacts.txt.path`, `data.artifacts.srt.path` and
 `data.artifacts.sidecar.path` (each with its own `size`), plus `data.outputBase`.
-`data.artifacts.srt` is `null` when `-NoSrt` suppressed it. Do **not**
+`data.artifacts.srt` is `null` when `no_srt` suppressed it. Do **not**
 hand-assemble a `whisper-cli` command.
 
 ## How the Cyrillic-path bug is handled
@@ -81,11 +84,13 @@ destination folder containing Cyrillic characters is safe. You do not need to
 do anything special — just pass the paths the user confirmed.
 
 A Cyrillic **argument**, though, can be mangled by the Windows console code page
-before the CLI sees it. If quoting inline is unreliable, write the value to a
-UTF-8 file under the workspace `/.tmp/` folder and pass `@<file>` instead, e.g.
-`-Output "@.tmp\name.txt"`; the CLI reads the value from the file. This works for
-`-Source` and `-Output`. Stage that file under `/.tmp/` and delete it when done,
-never in `C:\Temp` (outside the workspace) or the workspace root.
+before the CLI sees it. This affects the CLI **fallback** only — the MCP tools
+pass arguments in process, so no code page is involved. For a CLI call, if
+quoting inline is unreliable, write the value to a UTF-8 file under the workspace
+`/.tmp/` folder and pass `@<file>` instead, e.g. `-Output "@.tmp\name.txt"`; the
+CLI reads the value from the file. This works for `-Source` and `-Output`. Stage
+that file under `/.tmp/` and delete it when done, never in `C:\Temp` (outside the
+workspace) or the workspace root.
 
 ## Procedure
 
@@ -101,10 +106,12 @@ never in `C:\Temp` (outside the workspace) or the workspace root.
    Explorer and a user looking for `transcript.txt` at the item root will not see
    it.
 
-4. **Run the CLI** with the confirmed **item folder** as `-Output`. Add `-Language <code>` only to
-   force a language (auto by default). Do **not** pass `-Srt`: it still parses
-   but is a legacy no-op alias, because the `.srt` is already produced. Pass
-   `-NoSrt` only if the user explicitly accepts losing the only timing source.
+4. **Run the `transcribe` tool** (CLI fallback only if it is unavailable). Pass
+   the confirmed **item folder** as `output`. Add `language: "<code>"` only to
+   force a language (auto by default). Do **not** opt into subtitles: the legacy
+   `-Srt` alias is a parsed no-op, because the `.srt` is already produced. Pass
+   `no_srt: true` only if the user explicitly accepts losing the only timing
+   source.
 
 5. **Report every artifact produced** with its path and size — `.data/transcript.txt`,
    `.data/transcript.srt` (say so plainly if it is `null`), and `.data/source.json`
@@ -118,16 +125,17 @@ never in `C:\Temp` (outside the workspace) or the workspace root.
 ## Notes
 
 - **Never overwrite without asking.** `transcribe` refuses to overwrite an
-  existing `<item>/.data/transcript.txt` unless `-Force` is given, and it refuses
-  *before* any scratch directory is created, so an accidental re-run costs
-  nothing. Pass `-Force` only with the user's consent.
-- If the CLI returns `ok:false`, report `error` plainly.
+  existing `<item>/.data/transcript.txt` unless `force: true` is given, and it
+  refuses *before* any scratch directory is created, so an accidental re-run
+  costs nothing. Pass `force: true` only with the user's consent.
+- If the result returns `ok:false`, report `error` plainly.
 - **A CPU run on a GPU machine is a failure, not a warning.** When a usable GPU
   backend is configured, the CLI refuses to return a CPU transcript: it returns
   `ok:false` with an `error` naming the reason (most often an incomplete CUDA
   runtime, e.g. a missing `cublas64_*.dll`), and `data.logPath` points at the
-  preserved whisper log. Pass `-NoGpu` only if the user explicitly wants the CPU.
-  A machine with no GPU is unaffected and transcribes on the CPU normally.
+  preserved whisper log. Pass `no_gpu: true` only if the user explicitly wants
+  the CPU. A machine with no GPU is unaffected and transcribes on the CPU
+  normally.
 - The GPU retry is narrow: it only re-runs on the CPU when the failure looks like
   a GPU failure. An unrelated error (bad model, unsupported codec) surfaces
   directly instead of being masked by a CPU re-run.
@@ -135,9 +143,9 @@ never in `C:\Temp` (outside the workspace) or the workspace root.
   machine `deviceUsed` must be `cuda` (or `vulkan`) and `realtimeFactor` well
   below `1.0`. `data.deviceVerified` is the positive proof the GPU was used;
   `backendInitialised` only means the backend loaded. If `deviceVerified` is
-  `false`, GPU use is unproven: report that plainly, and pass `-StrictGpu` on a
-  re-run to make it a hard failure. `gpuAttemptWallMs` is the time wasted by an
-  abandoned GPU attempt before a CPU retry.
+  `false`, GPU use is unproven: report that plainly, and pass `strict_gpu: true`
+  on a re-run to make it a hard failure. `gpuAttemptWallMs` is the time wasted by
+  an abandoned GPU attempt before a CPU retry.
 
 <!-- zoombie:include scratch-note -->
 <!-- /zoombie:include -->

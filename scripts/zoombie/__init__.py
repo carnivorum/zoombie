@@ -33,7 +33,15 @@ from __future__ import annotations
 # 4.9.0: the MCP facade is registered in the client's own MCP settings at setup
 # (lib/mcpsettings + the `mcp` command), so the servers the skills already call are
 # reachable in process; the shared cli-resolve block points at the MCP tools first.
-SKILL_VERSION = "4.9.0"
+# 5.0.0: MCP-first is the whole transport. The shared cli-resolve block drops the
+# flag-translation sentence (the tool schemas carry the argument names), each run
+# section shows an MCP JSON example with a single CLI-fallback line, and the
+# transport-facing prose uses the MCP argument names. Download/extract state that a
+# TRANSCRIPT goal hands off to zoombie-transcribe-video, whose pipeline already runs
+# download -> extract -> transcribe. Paired with the mcp.py fix that accepts every
+# argument its schemas advertise (apply, ocr, vision, audio_only, ...), so the
+# WRITE and scan-escalation paths work over MCP at all.
+SKILL_VERSION = "5.0.0"
 
 # The version marker written into every SKILL.md we own, to prove ownership.
 MARKER_KEY = "cvrm-zoombie-version"

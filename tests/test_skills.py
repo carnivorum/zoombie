@@ -366,6 +366,21 @@ class TestMcpFirst:
     def test_the_block_names_the_cli_as_the_fallback(self):
         assert "fallback" in self._block().lower()
 
+    def test_the_block_does_not_teach_flag_translation(self):
+        """The MCP schemas carry the argument names; the block must not re-teach it.
+
+        The removed sentence mapped ``-Source -> source`` etc. Keeping it invited
+        an agent to double-guess the tool schema, so its absence is asserted.
+        """
+        body = self._block()
+        assert "->" not in body, "the shared block must not translate flags"
+        assert "flags as arguments" not in body.lower()
+        for flag in ("`-Source`", "`-Output`", "`-DownloadDir`", "`-AudioOnly`"):
+            assert flag not in body, (
+                f"the shared block still names the CLI flag {flag}; the MCP "
+                "argument name is the transport-facing spelling"
+            )
+
     def test_the_expanded_skill_carries_the_mcp_first_rule(self):
         """What is DEPLOYED must carry the rule, not only the repo source."""
         for path in _skill_paths():
@@ -373,6 +388,64 @@ class TestMcpFirst:
             assert "MCP" in expanded, (
                 f"{os.path.basename(os.path.dirname(path))} does not reach the MCP "
                 "tools after expansion"
+            )
+
+    def test_no_skill_orders_the_agent_to_use_the_shell(self):
+        """No skill may shout 'Run this, nothing else' over a SHELL snippet.
+
+        A heading that commands a shell run, or a line calling the CLI "the only
+        command", contradicts the MCP-first rule in the same file. Each skill's run
+        section must name the MCP tool first.
+        """
+        banned = (
+            "Run this, nothing else",
+            "the only command this skill needs",
+            "these are the only commands this skill needs",
+        )
+        for path in _skill_paths():
+            skill = os.path.basename(os.path.dirname(path))
+            body = _read(path)
+            for phrase in banned:
+                assert phrase not in body, (
+                    f"{skill} still contains '{phrase}', which presents the shell as "
+                    "the primary transport"
+                )
+
+    def _run_section(self, path: str) -> str:
+        body = _read(path)
+        assert "## Run this" in body, f"{os.path.dirname(path)} has no run section"
+        run = body[body.index("## Run this"):]
+        return run[:run.index("\n## ") if "\n## " in run else len(run)]
+
+    def test_the_run_section_names_the_mcp_tool_first(self):
+        for path in _skill_paths():
+            skill = os.path.basename(os.path.dirname(path))
+            run = self._run_section(path)
+            assert "MCP" in run, (
+                f"{skill}: the run section must present the MCP tool, not only the CLI"
+            )
+            assert "fallback" in run.lower(), (
+                f"{skill}: the run section must label the CLI as the fallback"
+            )
+
+    def test_the_run_section_shows_an_mcp_json_example(self):
+        """Naming MCP is not enough: the run section must SHOW a JSON tool call.
+
+        An example is what an agent copies. A prose mention ("prefer the MCP
+        tool") without one leaves the CLI snippet as the only runnable thing,
+        which is exactly the drift this guard exists to stop.
+        """
+        for path in _skill_paths():
+            skill = os.path.basename(os.path.dirname(path))
+            run = self._run_section(path)
+            assert "```json" in run, (
+                f"{skill}: the run section must carry a ```json MCP tool example, "
+                "not only a CLI snippet"
+            )
+            # The MCP example precedes the CLI fallback line, so the JSON block is
+            # the first code fence an agent meets.
+            assert run.index("```json") < run.lower().index("cli fallback"), (
+                f"{skill}: the MCP JSON example must come before the CLI fallback line"
             )
 
 

@@ -28,6 +28,6 @@ data.next = { command, args, why, attach: [...], budget: { images, bytes } }
   files that actually exist (so the JPEG sizes, not the PNGs).
 - `reason` names any cap that bit. An empty string means nothing was refused.
 
-`-AttachLimit N` raises the cap for a deliberately small set; it is a transport
-guarantee, so `-Force` does not bypass it. Reaching more than 8 means NARROWING
-the request (e.g. `slides -Times`), not raising the cap.
+`attach_limit: N` raises the cap for a deliberately small set; it is a transport
+guarantee, so `force` does not bypass it. Reaching more than 8 means NARROWING
+the request (e.g. `slides` with explicit `times`), not raising the cap.
