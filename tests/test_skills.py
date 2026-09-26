@@ -54,10 +54,25 @@ EXPECTED_SKILLS = {
 # its include marker, which is a few hundred bytes, and zoombie-summarize sits just
 # under the bound. The guard still catches a re-pasted BLOCK (roughly 1.5 KB) or a
 # skill that took on a second job.
+# A REPO-LOCAL heuristic, NOT a client limit: the extension imposes no file-size
+# cap on SKILL.md (it reads the whole file and only checks name/description), so
+# this bound exists purely for token economy -- a loaded skill is injected into
+# the agent's context, so its size is its cost. It is kept tight enough that a
+# re-pasted shared BLOCK (roughly 1.5 KB) still trips it.
 # Raised from 11500 when the shared cli-resolve block gained the MCP-first note
-# (the MCP facade is now registered at setup): every skill expands it, so the
-# bound moves with the shared text, not with any one skill.
-MAX_SKILL_BYTES = 12000
+# (every skill expands it, so the bound moves with the shared text).
+# Raised from 12000 when zoombie-summarize became the FRONT DOOR: it now also
+# produces its own source material (video/audio/PDF/images) rather than only
+# consuming it -- a deliberate scope addition, not re-pasted boilerplate.
+MAX_SKILL_BYTES = 13000
+
+# A GENUINE CLIENT LIMIT, and a silent one. The Zoo Code extension validates the
+# skill description as 1..1024 characters and, on a violation, logs to the console
+# and RETURNS -- the skill is simply not loaded, with no visible error in the UI.
+# Verified in the installed bundle (zoocodeorganization.zoo-code 3.82.2):
+#   `f.length<1||f.length>1024` -> "invalid description length" -> return.
+# Every description must stay comfortably inside it.
+MAX_DESCRIPTION_CHARS = 1024
 
 # The canonical include blocks. Kept explicit so a rename is a deliberate edit
 # here, and so a deleted block is a failure rather than a silently missing include.
@@ -121,6 +136,25 @@ class TestInventory:
             f"new skills not listed in EXPECTED_SKILLS: {sorted(extra)}. "
             "Add them here so the hand-off cross-check covers them."
         )
+
+    def test_every_description_fits_the_client_limit(self):
+        """The extension silently drops a skill whose description exceeds 1024 chars.
+
+        Verified in the installed bundle: the validator logs "invalid description
+        length" and returns WITHOUT registering the skill, so an over-long
+        description is not a warning but a skill that never appears. This is the
+        real, client-enforced bound -- distinct from the repo-local byte budget.
+        """
+        for path in _skill_paths():
+            skill = os.path.basename(os.path.dirname(path))
+            match = re.search(r"(?m)^description:\s*(.+)$", _read(path))
+            assert match, f"{skill}: no 'description:' in the front matter"
+            length = len(match.group(1).strip())
+            assert length <= MAX_DESCRIPTION_CHARS, (
+                f"{skill}: description is {length} chars, over the client's "
+                f"{MAX_DESCRIPTION_CHARS}-char limit -- the extension would REFUSE "
+                "to load this skill entirely"
+            )
 
     def test_name_matches_the_directory(self):
         for path in _skill_paths():
@@ -447,6 +481,68 @@ class TestMcpFirst:
             assert run.index("```json") < run.lower().index("cli fallback"), (
                 f"{skill}: the MCP JSON example must come before the CLI fallback line"
             )
+
+
+class TestPickerRouting:
+    """The descriptions must route a request, not just describe a skill.
+
+    The failure this pins: zoombie-summarize, zoombie-transcribe-audio and
+    zoombie-transcribe-video each read as a plausible answer to "summarize this
+    recording", so an agent could pick summarize with no source material and
+    stall, or chain transcribe -> summarize and never learn the intended entry
+    point. The fix is that summarize ADVERTISES the raw-source case and every
+    producer POINTS at summarize as the one-shot document path.
+    """
+
+    def _description(self, name: str) -> str:
+        path = os.path.join(SKILLS_DIR, name, "SKILL.md")
+        match = re.search(r"(?m)^description:\s*(.+?)(?=\n[a-z_]+:|\n---)", _read(path), re.S)
+        assert match, f"{name} has no description in the front matter"
+        return " ".join(match.group(1).split())
+
+    def test_summarize_is_the_front_door_for_a_raw_source(self):
+        description = self._description("zoombie-summarize")
+        assert "FRONT DOOR" in description
+        # It must accept a raw source, not only material already on disk.
+        assert "raw source" in description.lower()
+        for source in ("video", "audio", "PDF", "image"):
+            assert source.lower() in description.lower(), (
+                f"summarize's description must admit a raw {source} source"
+            )
+
+    def test_summarize_no_longer_claims_only_existing_material(self):
+        assert "already have" not in self._description("zoombie-summarize")
+
+    def test_every_producer_points_at_summarize(self):
+        for name in (
+            "zoombie-transcribe-audio",
+            "zoombie-transcribe-video",
+            "zoombie-images-to-md",
+            "zoombie-download-video",
+            "zoombie-extract-audio",
+        ):
+            description = self._description(name)
+            assert "zoombie-summarize" in description, (
+                f"{name} must point a document request at zoombie-summarize"
+            )
+            # A producer is for the FILE or the SOURCE, not the document.
+            assert "source" in description.lower() or "file" in description.lower()
+
+    def test_the_transcript_producers_declare_they_write_no_document(self):
+        for name in ("zoombie-transcribe-audio", "zoombie-transcribe-video"):
+            description = self._description(name)
+            assert "no summary" in description.lower() or "no readable document" in description.lower()
+
+    def test_summarize_has_a_step_that_produces_the_source(self):
+        body = _read(os.path.join(SKILLS_DIR, "zoombie-summarize", "SKILL.md"))
+        assert "Produce the source material" in body
+        # The producing tools it may call must be named in that step.
+        for tool in ("pipeline", "transcribe", "readpdf", "readimages"):
+            assert f"`{tool}`" in body, f"summarize's front-door step must name {tool}"
+
+    def test_summarize_no_longer_forbids_producing_the_source(self):
+        body = _read(os.path.join(SKILLS_DIR, "zoombie-summarize", "SKILL.md"))
+        assert "Do not re-transcribe or re-convert" not in body
 
 
 class TestSkillBudget:

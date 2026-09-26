@@ -1,4 +1,4 @@
-# zoombie
+ co# zoombie
 
 A deterministic Windows text-extraction toolchain: download video → extract
 audio → transcribe with whisper.cpp (CUDA/Vulkan/CPU), plus PDF → Markdown.
@@ -552,7 +552,7 @@ shared block redeploys without a version bump.
 | `zoombie-transcribe-audio` | a transcript (+ SRT) via `zoombie transcribe` |
 | `zoombie-transcribe-video` | the whole chain via `zoombie pipeline` |
 | `zoombie-images-to-md` | Markdown (+ images) via `zoombie readpdf` / `zoombie readimages` |
-| `zoombie-summarize` | a 6-block `summary.md` in an item folder |
+| `zoombie-summarize` | a 6-block `summary.md` in an item folder — the **front door**: for a raw video/audio/PDF/images it produces the source material itself, so one skill answers "make me a document" |
 
 `zoombie-images-to-md` converts a PDF, a loose image, or a folder of images to
 Markdown. **A text PDF is read directly and costs nothing** — only a page with no
@@ -562,8 +562,11 @@ rendered page the model reads). It reuses the Python this repo already requires
 `pip --user`), and the source is copied into an ASCII scratch dir first, so the
 Cyrillic-path invariant holds for PyMuPDF exactly as it does for whisper.cpp.
 
-`zoombie-summarize` turns a transcript, a PDF-derived Markdown, or arbitrary text
-into a 6-block `summary.md` inside an **item**. An item is a folder whose name is
+`zoombie-summarize` is the **front door** for any document: given existing source
+material (a transcript, a PDF-derived Markdown, or text) it turns it into a 6-block
+`summary.md`, and given a RAW source (a video, an audio recording, a PDF, or images)
+it produces that material first — one skill, no hand-rolled chain. An item is a
+folder whose name is
 the user's own choice — it is never parsed — laid out as:
 
 ```

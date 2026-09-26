@@ -1,13 +1,15 @@
 ---
 name: zoombie-summarize
-cvrm-zoombie-version: 5.0.0
-description: Turn SOURCE material into a readable 6-block summary.md inside an item folder - a transcript, a PDF-derived Markdown, or arbitrary text. Use when the user wants a summary, notes, a digest, a write-up, or a readable document from something they already have. You write the prose yourself; the mechanical passes (anchors, heading timestamps from the SRT, the regenerated table of contents, link encoding, image re-insertion) are done by zoombie postprocess, so a re-run cannot drift.
+cvrm-zoombie-version: 5.1.0
+description: Turn a source into a readable 6-block summary.md inside an item folder - the FRONT DOOR for any document. Accepts existing SOURCE material (a transcript, a PDF-derived Markdown, or text) OR a raw source (a video, an audio recording, a PDF, or images): for a raw source it produces the transcript or rendering itself, then writes the document. Use when the user wants a summary, notes, a digest, a write-up, or a readable document, from a raw recording or PDF as much as from material already on disk - you never have to chain skills. You write the prose yourself; the mechanical passes (anchors, heading timestamps from the SRT, the regenerated table of contents, link encoding, image re-insertion) are done by zoombie postprocess, so a re-run cannot drift.
 ---
 
 # Skill: zoombie-summarize
 
-This is the skill the other five hand off to. They produce SOURCE material
-(`.txt`, `.srt`, `.md`, images); this one turns it into a DOCUMENT a human reads.
+The **front door**: reach for it when the user wants a readable document. It turns
+source material (`.txt`, `.srt`, `.md`, images) into a DOCUMENT, and when that
+material does not exist yet it **produces it first** (step 3), so the user never
+chains skills by hand. The other five still work standalone for the source itself.
 
 **You write the prose. You never hand-edit the mechanical parts.** Anchors,
 heading timestamps, the block-4 contents, percent-encoding and image placement
@@ -197,19 +199,29 @@ Read `data` for what changed. Do **not** hand-assemble a Python command.
    **Use the number you were given.** Copy `nextNumber` from the scan; never
    invent a number, write `NN`, or silently pick a date.
 
-3. **Write the prose** for the blocks you own: 1, 2, 3, and the block-6 headings
+3. **Produce the source material, if the item has none.** When the user handed you
+   a RAW source (not something already transcribed or rendered), run the producing
+   tool into the item folder you just confirmed, then carry on — one call produces
+   the SOURCE; you still write the prose yourself. Never chain `download`/`extract`
+   by hand: `pipeline` IS that chain.
+   - a video or a URL → `pipeline`; an audio file → `transcribe`;
+   - a PDF → `readpdf` (add `ocr: true`, or `vision: "<dir>"`, only for a scan);
+   - images → `readimages`.
+   Skip this step when the source material ALREADY exists.
+
+4. **Write the prose** for the blocks you own: 1, 2, 3, and the block-6 headings
    with their content. Put the origin link in block 2 — for a video whose local
    file was deleted, `<base>.source.json` still carries the URL (its `url` is
    `null` with a `urlReason` when the only input was a deleted scratch file: say
    the origin was not durable rather than inventing a link).
    Block-6 subsections follow **topic change, not slides** — see above.
 
-4. **Run the `postprocess` tool** with the confirmed paths and `apply: true`.
+5. **Run the `postprocess` tool** with the confirmed paths and `apply: true`.
 
-5. **Verify.** Re-read the result and confirm the anchors resolve and block 4
+6. **Verify.** Re-read the result and confirm the anchors resolve and block 4
    indexes what block 6 actually contains.
 
-6. **Offer the reindex**, do not assume it: `index` with `apply: true` rebuilds
+7. **Offer the reindex**, do not assume it: `index` with `apply: true` rebuilds
    the library `README.md`. Then offer `verify` as the check.
 
 ## Rules
@@ -223,5 +235,6 @@ Read `data` for what changed. Do **not** hand-assemble a Python command.
   do not read meaning from one: the number, date and title live in
   `.data/item.json`.
 - **Dry run first** when the document exists, so you can show the diff first.
-- **Do not re-transcribe or re-convert.** If the source material is missing, hand
-  back to the skill that produces it.
+- **Produce the source once; never re-do it.** If the item has no source material,
+  produce it once into the confirmed item folder (step 3). Do not re-transcribe or
+  re-convert material that ALREADY exists — read it instead.

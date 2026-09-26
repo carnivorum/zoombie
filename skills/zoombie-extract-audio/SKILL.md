@@ -1,7 +1,7 @@
 ---
 name: zoombie-extract-audio
-cvrm-zoombie-version: 5.0.0
-description: Extract the audio track from a video file into a whisper-ready WAV (or mp3/m4a/flac) using ffmpeg. Use when the user wants to pull audio out of a video or recording, prepare media for transcription, or convert to 16 kHz mono PCM. Always inspects the project first, proposes candidate output destinations, and confirms with the user before running ffmpeg or writing any file.
+cvrm-zoombie-version: 5.1.0
+description: Extract the audio track from a video file into a whisper-ready WAV (or mp3/m4a/flac) using ffmpeg. Use when the user wants the AUDIO FILE itself, e.g. pull audio out of a video, or convert to 16 kHz mono PCM. For a transcript or a readable document from the video, use zoombie-summarize instead - it runs the whole chain for you. Always inspects the project first, proposes candidate output destinations, and confirms with the user before running ffmpeg or writing any file.
 ---
 
 # Skill: zoombie-extract-audio

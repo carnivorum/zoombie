@@ -41,7 +41,11 @@ from __future__ import annotations
 # download -> extract -> transcribe. Paired with the mcp.py fix that accepts every
 # argument its schemas advertise (apply, ocr, vision, audio_only, ...), so the
 # WRITE and scan-escalation paths work over MCP at all.
-SKILL_VERSION = "5.0.0"
+# 5.1.0: zoombie-summarize becomes the FRONT DOOR: it produces its own source
+# material (pipeline/transcribe/readpdf/readimages) when the item has none, and
+# every producer's description points at it, so one skill answers "make me a
+# document" without a hand-rolled two-skill chain.
+SKILL_VERSION = "5.1.0"
 
 # The version marker written into every SKILL.md we own, to prove ownership.
 MARKER_KEY = "cvrm-zoombie-version"
