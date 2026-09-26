@@ -18,6 +18,7 @@ from ..lib import (
     manifest,
     paths,
     process,
+    skills,
     tesseract,
     tools,
     unpack,
@@ -160,6 +161,20 @@ def _install(modes: components.Modes, args, root: str, result: dict) -> tuple[bo
             "warn",
         )
 
+    # --- skill preflight (BEFORE any write) --------------------------------
+    # Every skill source is expanded up front. An unknown or unclosed include
+    # aborts here, before the first byte is written, so a broken skill can never
+    # leave a half-updated package behind. This is the fix for "install might fail
+    # due to stale versions in skills": the failure is now clean and total.
+    skills_source = os.path.normpath(os.path.join(env_mod.cli_dir(), "..", "skills"))
+    if paths.is_dir(skills_source):
+        process.log("preflight: expanding every skill source", "step")
+        try:
+            expanded_names = skills.preflight(skills_source)
+            process.log(f"skill preflight ok: {len(expanded_names)} source(s)")
+        except Exception as exc:  # noqa: BLE001 - surfaced as one clean result line
+            raise RuntimeError(f"skill preflight failed: {exc}") from exc
+
     # --- components --------------------------------------------------------
     process.log("ensuring ffmpeg/ffprobe", "step")
     components.install_ffmpeg(modes)
@@ -191,7 +206,8 @@ def _install(modes: components.Modes, args, root: str, result: dict) -> tuple[bo
     model_info = components.install_model(modes, model_name)
 
     process.log("installing the CLI", "step")
-    cli_path = components.deploy_cli(modes)
+    cli_record = components.deploy_cli(modes)
+    cli_path = cli_record["launcher"]["path"]
 
     process.log("deploying skills to the global root", "step")
     skill_results = components.deploy_skills(modes)
@@ -333,6 +349,7 @@ def _install(modes: components.Modes, args, root: str, result: dict) -> tuple[bo
     ok = (not missing or modes.check or modes.dry_run) and not cuda_policy_failed
     result.update({
         "cli": cli_path,
+        "sync": cli_record,
         "skills": skill_results,
         "modes": mode_results,
         "missing": missing,

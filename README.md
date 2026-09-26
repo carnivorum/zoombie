@@ -8,9 +8,27 @@ The skills are thin wrappers that call one CLI.
 
 ## Install on a fresh machine
 
-Paste this into a fresh Zoo task. Zoo fetches the setup instructions from this
-repo and then follows them: it detects what is present, tells you what the real
-run will download, waits for your confirmation, and installs and self-tests.
+**Fire-and-forget.** One file, no arguments, any working directory. Double-click
+it (it holds the window open so you can read the output) or run it from a shell:
+
+```bat
+curl.exe -L -o "%TEMP%\zoombie-install.cmd" https://raw.githubusercontent.com/carnivorum/zoombie/main/scripts/zoombie-install.cmd
+"%TEMP%\zoombie-install.cmd"
+```
+
+It ensures a Python interpreter, fetches the current repo, and installs or
+updates everything. Re-running it is the update: it is idempotent, and it
+**removes** what the source no longer ships (a retired skill, an obsolete module).
+
+```bat
+"%TEMP%\zoombie-install.cmd" -Check     REM detect only; write nothing
+"%TEMP%\zoombie-install.cmd" -DryRun    REM plan only; write nothing
+```
+
+**Agentic fallback.** If the fire-and-forget run fails, paste this into a Zoo task
+to *diagnose* it: Zoo fetches [`setup.md`](setup.md), reads it, and follows it —
+detect, report, and only then apply. `setup.md` is the agent-facing diagnostic
+procedure, not the primary path.
 
 ```text
 Fetch the zoombie setup instructions and follow them exactly.
@@ -22,22 +40,24 @@ step with a todo checklist. Detect before installing. Ask me before the real
 download. Never claim success without the self-test passing.
 ```
 
-Nothing else is needed -- no prior setup, no saved file, no shell wrapper.
-Re-running the same paste installs or updates to the latest. [`setup.md`](setup.md)
-is the agent-facing procedure itself; the sections below explain the design.
-
 ## Why it is built this way
 
 - **Determinism.** Install and media commands live in [`scripts/`](scripts/), so
   the same prompt produces the same result instead of re-improvising `ffmpeg`
   and `whisper-cli` flags on every run.
-- **One language.** The toolchain is Python end to end, with a single
-  `bootstrap.cmd` whose only job is to ensure an interpreter exists. There is no
-  PowerShell in the pipeline, so there is no second dialect to keep in sync and
-  no shell-specific quirk (argv quoting, exit codes, native-stderr handling) to
-  work around. `bootstrap.ps1` exists only as a one-line convenience entry point
-  that downloads and runs `bootstrap.cmd`; it contains no install logic of its
-  own, so the two cannot drift.
+- **One language.** The toolchain is Python end to end. The only non-Python files
+  are the two install shims, split deliberately: `zoombie-install.cmd` is a frozen
+  **getter** (fetch `install.ps1` from the repo and run it, nothing more), and
+  `install.ps1` is the **core** (ensure Python, fetch the repo archive, run the
+  Python installer). Because the getter holds no install logic, a stale copy can
+  never install the wrong thing — it always fetches the current core. Nothing else
+  in the pipeline is PowerShell.
+- **Content-based updates.** The installer reconciles the deployed tree against
+  the fetched one **by sha256** ([`lib/sync.py`](scripts/zoombie/lib/sync.py)):
+  it writes what is missing or changed and **removes** what the source dropped.
+  A version marker no longer decides "up to date" — the bytes do — so `-Check`
+  reports a stale package file or skill instead of hiding it behind a matching
+  version string.
 - **One shared library, split by concern.** `zoombie/lib/` holds the shared
   helpers and `zoombie/commands/` holds one module per subcommand, so a skill's
   path is short and legible: `cli → commands/<name>.py → lib/<concern>.py`.
@@ -86,10 +106,10 @@ is the agent-facing procedure itself; the sections below explain the design.
 ## Layout
 
 ```
-setup.md                        thin setup prompt that drives the bootstrap
+setup.md                        the agentic DIAGNOSTIC path (fallback when fire-and-forget fails)
 scripts/
-  bootstrap.cmd                 the implementation: ensure Python, fetch the repo, hand off
-  bootstrap.ps1                 thin shim over bootstrap.cmd: the one-line PowerShell entry point
+  zoombie-install.cmd           the ONE entry point: a frozen getter (fetch install.ps1, run it)
+  install.ps1                   the core: ensure Python, fetch the repo archive, hand off
   requirements-pdf.txt          Python dependencies for the PDF extractor
   requirements-selftest.txt     extra self-test dependency (pyttsx3, for the TTS step)
   pdf/extract_pdf.py            standalone wrapper over zoombie.lib.pdf
@@ -124,6 +144,7 @@ scripts/
       download.py   HTTP download with resume
       archive.py    zip extraction, long-path aware
       skills.py     skill marker + deployment
+      sync.py       content-based reconciliation: hash_tree + plan (writes nothing)
       modes.py      merge the Zoombie role into custom_modes.yaml
       mcpsettings.py  merge the MCP server into mcp_settings.json
       errors.py     user-facing exception types
@@ -132,6 +153,7 @@ scripts/
       main.py       the installer flow (the setup-worker replacement)
       hardware.py   hardware probe + model recommendation
       components.py ffmpeg, yt-dlp, whisper, cuBLAS, model, PDF deps, CLI, skills
+      syncfiles.py  apply the hash plan: write changed/missing, remove remote-missing
 tests/                          unit tests (python -m pytest tests)
 skills/
   zoombie-download-video/SKILL.md     thin wrapper -> zoombie download
@@ -210,78 +232,54 @@ python -m zoombie.selftest
 Run those from the `scripts\` directory (or with `PYTHONPATH=scripts`), so
 `python -m zoombie...` resolves the package.
 
-**End users** do not clone the repo. Paste the block from
-[Install on a fresh machine](#install-on-a-fresh-machine) into a Zoo task: Zoo
-fetches [`setup.md`](setup.md) and runs the bootstrap for you (detect, confirm,
-apply, self-test). The two commands below are the manual equivalent, for a
-machine that already has this checkout:
+**End users** do not clone the repo: they run the one file from
+[Install on a fresh machine](#install-on-a-fresh-machine). When it fails, a Zoo
+task can instead fetch [`setup.md`](setup.md) and follow it to diagnose the
+cause. On a machine that already has this checkout, the local equivalents are:
 
 ```bat
-REM END USERS (manual): one command installs or updates to the LATEST
-scripts\bootstrap.cmd
-scripts\bootstrap.cmd -Check
+REM LOCAL DEV: install/update from the working tree (no network)
+python -m zoombie.install
+python -m zoombie.install -Check
 ```
 
 ## Distributing to other machines
 
-[`scripts/bootstrap.cmd`](scripts/bootstrap.cmd) is the single entry point and is
-a **bootstrap**: it finds (or installs) a Python interpreter, fetches the CURRENT
-repository archive from GitHub, and hands off to the Python installer. So any
-start of setup means *install or update to the latest* — there is no cached copy
-to go stale and no gate that can skip the update.
+[`scripts/zoombie-install.cmd`](scripts/zoombie-install.cmd) is the single entry
+point. It is a **getter**: it fetches [`install.ps1`](scripts/install.ps1) — the
+core that ensures Python, fetches the current repository archive, and hands off to
+the Python installer — and runs it. So any start of the install means *install or
+update to the latest*: there is no cached copy to go stale, no gate that can skip
+the update, and because the getter carries no install logic a stale getter still
+runs the current core.
 
-The distribution unit is a short instruction, not a file. Paste this into a Zoo
-task on any machine, from any shell and any working directory:
-
-```text
-Fetch the zoombie setup instructions and follow them exactly.
-
-    curl.exe -L -o "%TEMP%\zoombie-setup.md" https://raw.githubusercontent.com/carnivorum/zoombie/main/setup.md
-
-Then read %TEMP%\zoombie-setup.md and carry out every step in it, working step by
-step with a todo checklist. Detect before installing. Ask me before the real
-download. Never claim success without the self-test passing.
-```
-
-Zoo downloads [`setup.md`](setup.md) and follows it: detect -> confirm -> apply ->
-self-test -> report. `setup.md` in turn runs [`scripts/bootstrap.cmd`](scripts/bootstrap.cmd),
-which finds (or installs) a Python interpreter, fetches the CURRENT repository
-archive from GitHub, and hands off to the Python installer. So any start of setup
-means *install or update to the latest* -- there is no cached copy to go stale and
-no gate that can skip the update.
-
-The bootstrap underneath is also runnable by hand, which is the fallback when no
-agent is driving and for troubleshooting. From PowerShell:
-
-```powershell
-irm https://raw.githubusercontent.com/carnivorum/zoombie/main/scripts/bootstrap.ps1 | iex
-```
-
-or, needing no PowerShell at all, from `cmd.exe`:
+The distribution unit is that one file. Save it and double-click it, or fetch and
+run it from cmd.exe (no PowerShell needed):
 
 ```bat
-curl.exe -L -o "%TEMP%\bootstrap.cmd" https://raw.githubusercontent.com/carnivorum/zoombie/main/scripts/bootstrap.cmd
-"%TEMP%\bootstrap.cmd"
+curl.exe -L -o "%TEMP%\zoombie-install.cmd" https://raw.githubusercontent.com/carnivorum/zoombie/main/scripts/zoombie-install.cmd
+"%TEMP%\zoombie-install.cmd"
 ```
 
-Running the bootstrap directly skips the guardrails: it never prompts, it runs no
-`-Check` first and no self-test afterwards, so prefer the `setup.md` flow. Both
-entry points are location-independent, so neither cares where it is saved or run
-from, and re-running either installs or updates to the latest (the install is
-idempotent, so only what changed does work).
+Double-clicked from Explorer it holds the window open at the end so the output is
+readable; run from a shell, with an argument, or with `ZOOMBIE_NOPAUSE=1` it
+returns immediately with the exit code. It works from any working directory.
 
-`bootstrap.ps1` is a shim: it downloads `bootstrap.cmd` to a temp directory and
-runs it. Every option (`-Check`, `-DryRun`, `-Model`, `-Root`, `-Force`) has an
-environment-variable form (`ZOOMBIE_CHECK`, `ZOOMBIE_DRYRUN`, `ZOOMBIE_MODEL`,
-`ZOOMBIE_ROOT`, `ZOOMBIE_FORCE`) so the unattended one-liner can still select
-them. Run as a file it returns the installer's exit code; run inline it throws
-rather than exiting, so it never closes the caller's shell.
+**The agentic path is the fallback.** When the fire-and-forget run fails, have a
+Zoo task fetch and follow [`setup.md`](setup.md): detect -> report -> confirm ->
+apply -> self-test. `setup.md` explains each failure mode the entry point can
+print, and the manual `python -m zoombie.install` route from a local checkout.
+
+Every option has an environment-variable form so an unattended run can select it:
+`ZOOMBIE_CHECK`, `ZOOMBIE_DRYRUN`, `ZOOMBIE_MODEL`, `ZOOMBIE_ROOT`,
+`ZOOMBIE_FORCE`, `ZOOMBIE_NOPAUSE`, plus `ZOOMBIE_REPO_SLUG` / `ZOOMBIE_REPO_REF`
+for a fork or branch. A switch wins over its variable.
 
 What travels in the repo vs. what each machine rebuilds:
 
 | Thing | Travels? | Why |
 |-------|----------|-----|
-| `scripts/`, `skills/`, `modes/`, `setup.md` | yes | the implementation and the sources; the bootstrap fetches these itself |
+| `scripts/`, `skills/`, `modes/`, `setup.md` | yes | the implementation and the sources; the installer fetches these itself |
 | `%USERPROFILE%\zoombie-env\` (or `%PUBLIC%\zoombie-env\`) | no | machine-local and large (the model alone can be ~1.5 GB); re-fetched so it matches each machine's GPU backend, and re-homed to `%PUBLIC%` when the profile is not ASCII |
 | `%USERPROFILE%\.roo\skills\` | no | deployed copies, written from `skills/` by the installer |
 | `%APPDATA%\Code\User\globalStorage\zoocodeorganization.zoo-code\settings\custom_modes.yaml` | no | the Zoombie role is **merged** into it (only our entry is replaced; foreign modes are preserved), so a hand-written mode there is never lost |
@@ -293,7 +291,7 @@ deployed launcher under the ASCII root (`%USERPROFILE%\zoombie-env\`, or
 its own package and `pdf\` -- and the six `zoombie-*` skills live in the global
 root, so "transcribe this video" and "convert this PDF" work from any workspace.
 
-The bootstrap honors environment overrides, so a fork or branch can be used
+The entry point honors environment overrides, so a fork or branch can be used
 without editing anything:
 
 ```bat
@@ -534,8 +532,10 @@ if not exist "%ZOOMBIE_BIN%" set "ZOOMBIE_BIN=%PUBLIC%\zoombie-env\bin\zoombie\z
 The six skills in [`skills/`](skills/) are the canonical sources. They only
 inspect the project, propose paths, collect the user's confirmation, and then
 call the CLI. They are namespaced `zoombie-*` so their names cannot collide with a
-foreign skill, and they carry `cvrm-zoombie-version: 4.8.0`, which the installer
-compares to decide `up to date` vs `updated`.
+foreign skill, and they carry `cvrm-zoombie-version: 5.2.0`. The marker is the
+ownership proof used to prune a retired skill; the "up to date" decision itself is
+made by comparing the **expanded bytes**, so a changed shared block redeploys
+without a version bump and `-Check` can report a stale skill.
 
 Five blocks repeat across all six - how to resolve the launcher, the JSON
 contract, the repo fallback, the shell note and the scratch-dir rule - so they live once in
@@ -632,20 +632,23 @@ holds none.
   with `paths.assert_fits(p, what, slack=n)`. Always pass `slack` for a name that
   gets a suffix appended (`.txt`, `.images`, `.whisper.log`), because the suffix
   is what usually crosses the limit.
-- Install/update logic belongs in `zoombie/install/`. The two entry points are
-  [`bootstrap.cmd`](scripts/bootstrap.cmd) (ensure Python, fetch the repo, hand
-  off) and [`bootstrap.ps1`](scripts/bootstrap.ps1) (a shim that downloads and
-  runs the batch one, so a PowerShell user needs a single line). There is no
-  separate "fetch the latest worker" module: the batch entry point always pulls
-  the current archive and runs the installer from that fresh checkout, which is
-  what keeps a re-run an update rather than a re-install of a stale tree.
+- Install/update logic belongs in `zoombie/install/`. The entry point is
+  [`zoombie-install.cmd`](scripts/zoombie-install.cmd) — a frozen getter that
+  fetches [`install.ps1`](scripts/install.ps1) (the core: ensure Python, fetch the
+  repo, hand off) and runs it. The getter holds no install logic, so it cannot go
+  stale; the core is always fetched fresh, so it can gain steps freely. There is
+  no separate "fetch the latest worker" module.
 - When iterating locally, run `python -m zoombie.install` — it installs the
-  working tree as-is and never hits the network. `bootstrap.cmd` is the end-user
-  path and always pulls the published repo.
+  working tree as-is and never hits the network. The getter is the end-user path
+  and always pulls the published repo.
+- **Updates are content-based.** The installer hashes the fetched tree and the
+  installed tree ([`lib/sync.py`](scripts/zoombie/lib/sync.py)) and writes the
+  difference, removing files the source dropped. Skills are compared on their
+  **expanded** bytes, so editing a shared block redeploys without a version bump.
 - Bump `SKILL_VERSION` in [`__init__.py`](scripts/zoombie/__init__.py) when skill
-  content changes, so deployment can tell an installed skill is out of date. It is
-  currently `4.8.0`; every `SKILL.md` carries the same value in
-  `cvrm-zoombie-version`, inside the first 12 lines — `read_marker` reads only the
+  content changes. It is currently `5.2.0`; every `SKILL.md` carries the same value
+  in `cvrm-zoombie-version`, inside the first 12 lines — the marker is the
+  ownership proof used to prune a retired skill, and `read_marker` reads only the
   front matter, so a marker that drifts below it reads as unowned.
 - **A comment must earn its place.** Keep one that prevents a realistic future
   regression or explains a non-obvious constraint (why a `\\?\` path must never

@@ -14,5 +14,5 @@ $cli = @(
     "$env:USERPROFILE\zoombie-env\bin\zoombie\zoombie.cmd",
     "$env:PUBLIC\zoombie-env\bin\zoombie\zoombie.cmd"
 ) | Where-Object { Test-Path $_ } | Select-Object -First 1
-if (-not $cli) { throw "zoombie CLI not found. Run the zoombie setup first: fetch https://raw.githubusercontent.com/carnivorum/zoombie/main/setup.md and follow it (or, as a manual fallback, irm https://raw.githubusercontent.com/carnivorum/zoombie/main/scripts/bootstrap.ps1 | iex)." }
+if (-not $cli) { throw "zoombie CLI not found. Run the zoombie setup first (fetch and run https://raw.githubusercontent.com/carnivorum/zoombie/main/scripts/zoombie-install.cmd); if that fails, fetch https://raw.githubusercontent.com/carnivorum/zoombie/main/setup.md and follow it to diagnose the install." }
 ```

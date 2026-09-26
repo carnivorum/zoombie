@@ -48,7 +48,7 @@ class Env:
         if not value or not paths.is_file(value):
             raise SetupRequiredError(
                 f"{name} is not available. Run the zoombie setup first "
-                "(scripts\\bootstrap.cmd or python -m zoombie.install)."
+                "(zoombie-install.cmd, or python -m zoombie.install)."
             )
         return value
 

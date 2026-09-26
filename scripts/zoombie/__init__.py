@@ -45,7 +45,13 @@ from __future__ import annotations
 # material (pipeline/transcribe/readpdf/readimages) when the item has none, and
 # every producer's description points at it, so one skill answers "make me a
 # document" without a hand-rolled two-skill chain.
-SKILL_VERSION = "5.1.0"
+# 5.2.0: the install is content-based and the entry point is unified. A frozen
+# getter (zoombie-install.cmd) fetches the evolving core (install.ps1), which runs
+# a hash reconciler that writes changed files and REMOVES files the source no
+# longer carries (stale skills, the pre-Port orphans). The version marker no
+# longer decides "up to date" for a skill: the expanded bytes do, which is what
+# makes -Check able to report a stale skill at all.
+SKILL_VERSION = "5.2.0"
 
 # The version marker written into every SKILL.md we own, to prove ownership.
 MARKER_KEY = "cvrm-zoombie-version"

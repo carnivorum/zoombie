@@ -131,7 +131,7 @@ def read_marker(path: str) -> Marker:
     return result
 
 
-def prune(root: str, keep: set[str]) -> list[dict]:
+def prune(root: str, keep: set[str], *, dry_run: bool = False) -> list[dict]:
     """Remove deployed ``zoombie-*`` skills that no longer have a source.
 
     A rename (``zoombie-pdf-to-md`` -> ``zoombie-images-to-md``) leaves the old
@@ -143,6 +143,9 @@ def prune(root: str, keep: set[str]) -> list[dict]:
     * only a directory whose ``SKILL.md`` carries OUR version marker is removed
       (an unowned folder that merely starts with ``zoombie-`` is left alone);
     * a name still present in ``keep`` is never removed.
+
+    ``dry_run`` reports the same removals while deleting nothing, so ``-Check``
+    tells the truth about what a real run would drop.
     """
     removed: list[dict] = []
     if not paths.is_dir(root):
@@ -155,12 +158,35 @@ def prune(root: str, keep: set[str]) -> list[dict]:
         skill_file = os.path.join(entry.path, "SKILL.md")
         if not read_marker(skill_file).owned:
             continue  # not ours: a foreign folder that happens to be named so
-        paths.remove(entry.path, recursive=True)
+        if not dry_run:
+            paths.remove(entry.path, recursive=True)
         removed.append({"skill": entry.name, "action": "removed (stale)"})
     return removed
 
 
-def deploy(source_root: str, version: str) -> list[dict]:
+def preflight(source_root: str) -> list[str]:
+    """Expand every skill source up front, so a broken include fails before ANY
+    write. Returns the skill names in source order; raises on an unknown or
+    unclosed include.
+
+    This is the fix for "install might fail due to stale versions in skills": the
+    old flow wrote the package, then discovered a skill/include error mid-deploy
+    and left a half-updated tree. Now every source is expanded before the first
+    byte is written.
+    """
+    shared = shared_dir(source_root)
+    names: list[str] = []
+    for entry in paths.list_dir(source_root, dirs=True):
+        source = os.path.join(entry.path, "SKILL.md")
+        if not paths.is_file(source):
+            continue
+        # Side effect only on failure: an unexpandable source aborts the install.
+        expand_includes(_read_text(source), shared)
+        names.append(entry.name)
+    return names
+
+
+def deploy(source_root: str, version: str, *, dry_run: bool = False) -> list[dict]:
     """Deploy every ``<source_root>\\<name>\\SKILL.md`` to the global skills root.
 
     The source is expanded (its includes resolved) before it is written, and the
@@ -168,7 +194,14 @@ def deploy(source_root: str, version: str) -> list[dict]:
     so a change to a shared block redeploys without a version bump and a second
     run on unchanged content writes nothing.
 
-    Returns one record per skill: ``{"skill", "action", "path"}``.
+    ``dry_run`` computes the same records and writes nothing — the marker is no
+    longer trusted for "up to date", only the bytes are, which is what makes
+    ``-Check`` able to report a stale skill (the exact drift a matching marker
+    used to hide).
+
+    Returns one record per skill: ``{"skill", "action", "path"}`` with ``action``
+    in ``added`` / ``updated`` / ``unchanged`` (plus ``removed (stale)`` records
+    from :func:`prune`).
     """
     root = skills_root()
     shared = shared_dir(source_root)
@@ -184,30 +217,22 @@ def deploy(source_root: str, version: str) -> list[dict]:
     ]
     # Remove stale skills BEFORE writing, so a rename cannot leave both the old
     # and the new skill installed at the end of the run.
-    results.extend(prune(root, {entry.name for entry in sources}))
+    results.extend(prune(root, {entry.name for entry in sources}, dry_run=dry_run))
 
     for entry in sources:
         source = os.path.join(entry.path, "SKILL.md")
         destination = os.path.join(root, entry.name, "SKILL.md")
         expanded = expand_includes(_read_text(source), shared)
 
-        if not paths.is_file(destination):
-            action = "created"
+        installed = _read_text(destination) if paths.is_file(destination) else None
+        if installed is None:
+            action = "added"
+        elif installed != expanded:
+            action = "updated"
         else:
-            marker = read_marker(destination)
-            if marker.version == version:
-                action = "up to date"
-            elif marker.version:
-                action = f"updated ({marker.version} -> {version})"
-            else:
-                action = f"updated (no version -> {version})"
+            action = "unchanged"
 
-        if action == "up to date" and _read_text(destination) != expanded:
-            # The version marker matched but the body did not: a shared block or
-            # a body edit changed without a bump. Say so rather than skipping.
-            action = "updated (content)"
-
-        if action != "up to date":
+        if action != "unchanged" and not dry_run:
             paths.ensure_dir(os.path.dirname(destination))
             if paths.exists(destination):
                 paths.remove(destination)
@@ -216,5 +241,5 @@ def deploy(source_root: str, version: str) -> list[dict]:
 
         results.append({"skill": entry.name, "action": action, "path": destination})
 
-    process.log(f"skills deployed -> {root}")
+    process.log(f"skills {'planned' if dry_run else 'deployed'} -> {root}")
     return results

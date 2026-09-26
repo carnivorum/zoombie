@@ -32,7 +32,7 @@ from ..lib import (
     tools,
     unpack,
 )
-from ..install import hardware
+from . import hardware, syncfiles
 
 GITHUB_REPO = "ggml-org/whisper.cpp"
 FFMPEG_URL = (
@@ -802,55 +802,14 @@ def install_selftest_dependencies(modes: Modes, python: str | None, requirements
 # CLI + bootstrap + skills
 # ---------------------------------------------------------------------------
 
-def deploy_cli(modes: Modes) -> str:
-    """Copy the CLI package to a stable ASCII location, plus its launcher.
-
-    Skills invoke the CLI by an absolute, stable path so they work from any
-    project and never depend on PATH or on where this repo was cloned.
-    """
-    dest_dir = paths.env_path("bin", "zoombie")
-    launcher = os.path.join(dest_dir, "zoombie.cmd")
-
-    if not modes.may_write:
-        process.log(f"would install CLI -> {dest_dir}", "step")
-        return launcher
-
-    source_dir = env_mod.cli_dir()
-    paths.ensure_dir(dest_dir)
-    paths.copy_tree(os.path.join(source_dir, "zoombie"), os.path.join(dest_dir, "zoombie"))
-
-    # The PDF helper lives beside the package, and the installed layout mirrors
-    # the repo layout, so Invoke-ReadPdf resolves it relative to the package.
-    pdf_source = os.path.join(source_dir, "pdf")
-    if paths.is_dir(pdf_source):
-        paths.copy_tree(pdf_source, os.path.join(dest_dir, "pdf"))
-
-    requirements = os.path.join(source_dir, "requirements-pdf.txt")
-    if paths.is_file(requirements):
-        paths.copy_file(requirements, os.path.join(dest_dir, "requirements-pdf.txt"))
-
-    # The self-test requirements travel too, so the documented remedy
-    # (`pip install --user -r requirements-selftest.txt`) works from the deployed
-    # directory and not only from a checkout.
-    selftest_requirements = os.path.join(source_dir, "requirements-selftest.txt")
-    if paths.is_file(selftest_requirements):
-        paths.copy_file(
-            selftest_requirements, os.path.join(dest_dir, "requirements-selftest.txt")
-        )
-
-    write_launcher(launcher, dest_dir)
-    process.log(f"CLI installed: {launcher}")
-    return launcher
-
-
-def write_launcher(launcher: str, dest_dir: str) -> None:
-    """Write the stable ``.cmd`` shim skills call.
+def launcher_text() -> str:
+    """The stable ``.cmd`` shim skills call, as text so it can be diffed.
 
     The shim sets ``PYTHONPATH`` to the directory holding the ``zoombie`` package
     and runs it as a module, so the CLI works from ANY working directory and does
     not depend on an installed package or on the caller's cwd.
     """
-    content = (
+    return (
         "@echo off\r\n"
         "rem zoombie CLI launcher: runs the package as a module from its own\r\n"
         "rem directory so it works from any working directory.\r\n"
@@ -859,25 +818,43 @@ def write_launcher(launcher: str, dest_dir: str) -> None:
         'python -m zoombie %*\r\n'
         "exit /b %ERRORLEVEL%\r\n"
     )
-    paths.ensure_dir(dest_dir)
-    with open(paths.to_extended(launcher), "w", encoding="ascii", newline="") as handle:
-        handle.write(content)
+
+
+def deploy_cli(modes: Modes) -> dict:
+    """Reconcile the deployed CLI by content, not by a blind copy.
+
+    Covers the package, the PDF helper, the requirement files, the launcher and
+    the getter, and removes files the source no longer carries (plus the named
+    pre-Port orphans). Runs in EVERY mode: in -Check/-DryRun it computes the plan
+    and writes nothing, so an out-of-date install is reported rather than masked.
+    """
+    dest_dir = paths.env_path("bin", "zoombie")
+    record = syncfiles.reconcile(modes, launcher_text())
+    if modes.may_write:
+        process.log(f"CLI reconciled -> {os.path.join(dest_dir, 'zoombie.cmd')}")
+    else:
+        process.log(f"would reconcile the CLI -> {dest_dir}", "step")
+    return record
 
 
 def deploy_skills(modes: Modes) -> list[dict]:
-    """Deploy ``skills/<name>/SKILL.md`` into the global skills root."""
-    source_root = os.path.join(env_mod.cli_dir(), "..", "skills")
-    source_root = os.path.normpath(source_root)
+    """Plan or deploy ``skills/<name>/SKILL.md`` into the global skills root.
+
+    The content comparison runs in EVERY mode, so ``-Check`` reports the real
+    per-skill action (added/updated/unchanged/removed) instead of returning [] and
+    hiding a stale skill behind a matching version marker.
+    """
+    source_root = os.path.normpath(os.path.join(env_mod.cli_dir(), "..", "skills"))
 
     if not paths.is_dir(source_root):
         process.log("no skills folder in the repo; skipping skill deployment", "warn")
         return []
 
+    results = skills.deploy(source_root, SKILL_VERSION, dry_run=not modes.may_write)
     if not modes.may_write:
-        process.log(f"would deploy skills -> {skills.skills_root()}", "step")
-        return []
-
-    return skills.deploy(source_root, SKILL_VERSION)
+        for record in results:
+            process.log(f"skill '{record['skill']}' would be {record['action']}", "step")
+    return results
 
 
 def deploy_modes(modes: Modes) -> list[dict]:

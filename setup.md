@@ -1,49 +1,52 @@
 # Zoo PC Setup — Speech-to-Text Toolchain
 
-> **How to use this file**
-> This file IS the procedure. It is not pasted in full by a human; a Zoo agent
-> fetches it and follows it, from the short install instruction in
-> [`README.md`](README.md) ("Install on a fresh machine"):
+> **Primary method: fire-and-forget.**
+> The normal way to install or update is to run the single entry point,
+> [`scripts/zoombie-install.cmd`](scripts/zoombie-install.cmd): double-click it, or
+> from any shell:
 >
-> ```text
-> curl.exe -L -o "%TEMP%\zoombie-setup.md" https://raw.githubusercontent.com/carnivorum/zoombie/main/setup.md
+> ```bat
+> curl.exe -L -o "%TEMP%\zoombie-install.cmd" https://raw.githubusercontent.com/carnivorum/zoombie/main/scripts/zoombie-install.cmd
+> "%TEMP%\zoombie-install.cmd"
 > ```
 >
-> Then "read that file and carry out every step in it". No prior setup is needed:
-> Step 0 fetches a bootstrap script, which ensures a Python interpreter, fetches
-> the rest of the repo, and runs the install.
+> It needs no arguments, works from any directory, ensures Python, fetches the
+> current repo, and installs or updates everything. **This file is a FALLBACK and a
+> DIAGNOSTIC**: read it and follow it only when the fire-and-forget run failed, or
+> when you want to *detect first* and explain to the user what will be fetched
+> before it happens.
 >
-> Target OS: **Windows 10/11**. Shell: **PowerShell, cmd.exe, or any process
-> spawn** — PowerShell users get a single line, and the batch file beneath it
-> needs no wrapper.
-> The install logic is not prose — it is [`scripts/bootstrap.cmd`](scripts/bootstrap.cmd),
-> pulled from `https://raw.githubusercontent.com/carnivorum/zoombie/main/scripts/bootstrap.cmd`,
-> which hands off to the Python installer in [`scripts/zoombie/install/`](scripts/zoombie/install/).
-> [`scripts/bootstrap.ps1`](scripts/bootstrap.ps1) is a thin shim that downloads and
-> runs that batch file, so a PowerShell user never has to save a `.cmd` by hand.
-> This procedure's job is to run it, deploy the skills, verify, and report.
+> Nothing about the install lives in prose. `zoombie-install.cmd` is a **getter**:
+> it fetches [`scripts/install.ps1`](scripts/install.ps1) (the core: ensure Python,
+> fetch the repo archive, run the Python installer) and runs it. The core hands off
+> to [`scripts/zoombie/install/`](scripts/zoombie/install/), which reconciles the
+> installed tree **by content hash** and removes what the source no longer carries.
+> Target OS: **Windows 10/11**.
 
 ---
 
 ## YOUR ROLE AND OPERATING CONTRACT
 
-You are setting up a Windows PC so the user can extract audio from video and
-transcribe audio/video to text. **Do not improvise install or media commands.**
-The repo already contains a tested, idempotent implementation:
+You are setting up (or repairing) a Windows PC so the user can extract audio from
+video and transcribe audio/video to text, and convert PDFs/images to Markdown.
+**Do not improvise install or media commands.** The repo already contains a tested,
+idempotent implementation:
 
-- [`scripts/bootstrap.cmd`](scripts/bootstrap.cmd) — the implementation entry
-  point, and the only non-Python file. Its entire job is to ensure a Python
-  interpreter exists, fetch the latest repo archive, and hand off to the Python
-  installer. So **any start of setup means install or update to the latest**;
-  there is no cached copy to go stale and no gate that can skip the update.
-- [`scripts/bootstrap.ps1`](scripts/bootstrap.ps1) — the PowerShell entry point:
-  a thin shim that downloads `bootstrap.cmd` to a temp directory and runs it, so
-  a fresh machine needs one line. It holds no install logic, so it cannot drift
-  from the batch file. It never prompts — **this prompt is responsible for
-  asking the user before the real run.**
+- [`scripts/zoombie-install.cmd`](scripts/zoombie-install.cmd) — the ONE entry
+  point. A frozen getter: it fetches the core and runs it, and holds no install
+  logic, so it can never go stale.
+- [`scripts/install.ps1`](scripts/install.ps1) — the core. Locates a usable
+  Python (elevating **once**, only to install Python if it is genuinely absent),
+  fetches the current repo archive into an **ASCII** staging dir, extracts it, and
+  runs `python -m zoombie.install`. It is always fetched fresh, so it can gain
+  steps without any distribution change.
 - [`scripts/zoombie/install/main.py`](scripts/zoombie/install/main.py) — the
-  installer/updater that actually does the work (the `setup-worker` replacement,
-  also used directly for local development).
+  installer/updater that actually does the work (also used directly for local
+  development).
+- [`scripts/zoombie/lib/sync.py`](scripts/zoombie/lib/sync.py) — the reconciler:
+  it compares the fetched tree with the installed tree **by sha256**, writes what
+  is missing or changed, and **removes** files the source dropped (stale skills,
+  retired modules). Version markers no longer decide "up to date": the bytes do.
 - [`scripts/zoombie/cli.py`](scripts/zoombie/cli.py) — the runtime CLI. The skills
   reach it through the `zoombie` **MCP server** (`python -m zoombie.mcp`), which
   calls the same command modules in process; the deployed `zoombie.cmd` launcher is
@@ -54,32 +57,35 @@ The repo already contains a tested, idempotent implementation:
 Hard rules:
 
 1. **Work step by step**, keeping a todo checklist updated.
-2. **Detect before you install.** `bootstrap.cmd -Check` (or
-   `bootstrap.ps1 -Check`) reports what is present. Never install something the
-   check says is already there.
-3. **Ask before installing. You are the only thing that asks.** `bootstrap.ps1`
-   and `bootstrap.cmd` both run unattended by design, so the real run must not be
-   started until the user has agreed. Before it (it downloads
-   ffmpeg, whisper.cpp and a model, and pip-installs yt-dlp plus the PDF
-   dependencies), tell the user what will be fetched and roughly how large it is,
-   then wait for confirmation. On a machine with an NVIDIA GPU this also fetches
-   the matching cuBLAS runtime (~400 MB), because the whisper.cpp CUDA asset does
-   not ship the cuBLAS DLLs that `ggml-cuda.dll` needs. The required version is
-   read from the asset name (e.g. `whisper-cublas-11.8.0-...` → cuBLAS 11), and a
-   major with no pinned, hash-verified redist is refused rather than guessed.
-   **Tesseract is one of these proposed dependencies, not an optional aside**: it
-   is a pinned, toolchain-owned component (~25 MB engine + ~44 MB `eng`/`rus`
-   language data), so name it when you list what will be fetched and let the user
-   agree before the run. There is no portable upstream archive — the installer is
-   only ever *extracted*, never run, so no elevation is requested.
-4. **Never write media output without a confirmed destination.** Every skill
+2. **Try the fire-and-forget entry point first.** If `zoombie-install.cmd` fails,
+   then diagnose *why* using this file. Only fall back to manual steps once the
+   cause is named.
+3. **Detect before you install.** `zoombie-install.cmd -Check` reports the exact
+   plan — including which deployed files and skills are out of date — and writes
+   nothing. Never install something the check says is already current.
+4. **Ask before installing. You are the only thing that asks.**
+   `zoombie-install.cmd` runs unattended by design, so the real run must not be
+   started until the user has agreed. Before it (it downloads ffmpeg, whisper.cpp
+   and a model, and pip-installs yt-dlp plus the PDF dependencies), tell the user
+   what will be fetched and roughly how large it is, then wait for confirmation. On
+   a machine with an NVIDIA GPU this also fetches the matching cuBLAS runtime
+   (~400 MB), because the whisper.cpp CUDA asset does not ship the cuBLAS DLLs that
+   `ggml-cuda.dll` needs. The required version is read from the asset name (e.g.
+   `whisper-cublas-11.8.0-...` → cuBLAS 11), and a major with no pinned,
+   hash-verified redist is refused rather than guessed. **Tesseract is one of these
+   proposed dependencies, not an optional aside**: it is a pinned, toolchain-owned
+   component (~25 MB engine + ~44 MB `eng`/`rus` language data), so name it when
+   you list what will be fetched and let the user agree before the run. There is no
+   portable upstream archive — the installer is only ever *extracted*, never run,
+   so no elevation is requested.
+5. **Never write media output without a confirmed destination.** Every skill
    inspects the project, proposes candidate paths, and asks before writing.
-5. **Never modify files that are not yours.** Do not edit the project's source,
+6. **Never modify files that are not yours.** Do not edit the project's source,
    config, or `README.md`, and do not edit skill files by hand — the skills are
    deployed from [`skills/`](skills/) by the installer.
-6. **Use environment-variable paths** (`%USERPROFILE%`, `%TEMP%`), never a
+7. **Use environment-variable paths** (`%USERPROFILE%`, `%TEMP%`), never a
    hard-coded `C:\Users\<name>\...`.
-7. **Report as you go**, and never claim success without the self-test passing.
+8. **Report as you go**, and never claim success without the self-test passing.
 
 ### About the ASCII root (why this design)
 
@@ -101,7 +107,11 @@ characters. This setup removes the problem structurally:
   chose.
 
 So Cyrillic input names, Cyrillic output folders, and even a Cyrillic user
-profile are all safe.
+profile are all safe. The same rule governs the **install**: the getter stages the
+core, and the core stages the repo archive, on an ASCII base (`%TEMP%` if ASCII,
+else `%PUBLIC%`, else `%SystemDrive%\`), and the core forces the child's
+`TEMP`/`TMP` to an ASCII dir. So a double-click from a Cyrillic desktop, or a run
+from a Cyrillic working directory, installs correctly.
 
 ### About path length (the other Windows path limit)
 
@@ -141,104 +151,97 @@ Practical consequences for the agent:
 
 ---
 
-## STEP 0 — FETCH AND DETECT (writes only a temp checkout)
+## STEP 0 — RUN THE FIRE-AND-FORGET INSTALL (or diagnose why it failed)
 
-### 0.1 Run the one-liner
+### 0.1 The entry point
 
-Nothing needs to be saved or checked out first. This single line downloads the
-bootstrap, which then ensures Python, fetches the rest of the repo (runtime CLI,
-installer, self-test, skills), and runs the install. It works from any shell and
-any working directory, and it writes nothing outside a temp directory until the
-installer decides to.
-
-```powershell
-irm https://raw.githubusercontent.com/carnivorum/zoombie/main/scripts/bootstrap.ps1 | iex
-```
-
-On a machine where `Invoke-WebRequest` cannot parse the response (it uses the IE
-engine on Windows PowerShell 5.1), use the .NET client instead:
-
-```powershell
-iex (New-Object Net.WebClient).DownloadString('https://raw.githubusercontent.com/carnivorum/zoombie/main/scripts/bootstrap.ps1')
-```
-
-From `cmd.exe`, without PowerShell at all:
+Nothing needs to be saved or checked out first. This single file ensures Python,
+fetches the rest of the repo (runtime CLI, installer, self-test, skills), and runs
+the install. It works from any shell and any working directory, and it writes
+nothing outside an ASCII temp directory until the installer decides to.
 
 ```bat
-curl.exe -L -o "%TEMP%\bootstrap.cmd" https://raw.githubusercontent.com/carnivorum/zoombie/main/scripts/bootstrap.cmd
-"%TEMP%\bootstrap.cmd"
+curl.exe -L -o "%TEMP%\zoombie-install.cmd" https://raw.githubusercontent.com/carnivorum/zoombie/main/scripts/zoombie-install.cmd
+"%TEMP%\zoombie-install.cmd"
 ```
 
-> **Re-running is the update.** The bootstrap always re-fetches the latest repo
-> archive from GitHub, so a re-run updates in place rather than installing a
-> stale copy. The install itself is idempotent, so only what changed does work.
+Double-clicked from Explorer it holds its window open at the end so the output is
+readable; run from a shell (or with any argument, or with `ZOOMBIE_NOPAUSE=1`) it
+returns immediately with the installer's exit code. If you already ran it once, a
+copy lives at `<root>\zoombie-install.cmd` and can be re-run directly.
 
-### 0.2 Shell note
+> **Re-running is the update.** The getter always fetches the current core, and the
+> core always fetches the latest repo archive, so a re-run updates in place rather
+> than installing a stale copy. The install is idempotent: only what changed does
+> work, and anything the source no longer ships is **removed**.
 
-**Python is the only prerequisite.** `bootstrap.cmd` finds an existing
-interpreter, and attempts `winget install Python.Python.3.12` when none is
-present (it re-probes PATH afterwards and prints explicit manual instructions if
-that also fails). Nothing else needs to be installed by hand.
+### 0.2 If it failed — how to diagnose
 
-`bootstrap.ps1` is only a shim: it downloads `bootstrap.cmd` to a temp directory
-and runs it, so no `.ps1` is saved and nothing needs `Unblock-File` or an
-execution-policy change. The batch file it runs takes cmd.exe, PowerShell or any
-process spawn with no wrapper. If you have saved `bootstrap.ps1` as a file
-instead, parameters bind normally and the script returns the installer's exit
-code; run inline (as above) it **throws** on failure rather than exiting, so it
-never closes your shell.
+The entry point prints a short, ordered trail and exits non-zero on failure. Read
+its last lines first:
 
-Options work in both forms. As a file: `-Check`, `-DryRun`, `-Model <name>`,
-`-Root <path>`, `-Force`. For the unattended one-liner, the same choices come from
-the environment: `ZOOMBIE_CHECK`, `ZOOMBIE_DRYRUN`, `ZOOMBIE_MODEL`,
-`ZOOMBIE_ROOT`, `ZOOMBIE_FORCE` (plus `ZOOMBIE_REPO_SLUG` / `ZOOMBIE_REPO_REF`
-for a fork or branch). A switch wins over its variable.
+- **"no usable Python found; installing Python 3.12"** then an elevation prompt —
+  normal on a fresh machine; approve it. If it still fails, install Python by hand
+  (`winget install Python.Python.3.12`) and re-run.
+- **"could not fetch the core"** / **"could not download the repository archive"** —
+  a network or proxy problem. Set `ZOOMBIE_REPO_SLUG` / `ZOOMBIE_REPO_REF` to a fork
+  or branch, or place a saved checkout under `scripts\` and run
+  `python -m zoombie.install` directly (see STEP 2b).
+- **"skill preflight failed: ..."** — a `SKILL.md` include marker is unknown or
+  unclosed. The install aborts **before writing anything**, so nothing is left
+  half-updated; fix the marker in [`skills/`](skills/) and re-run.
+- **a root/path-length refusal** — pass `-Root C:\zoombie-env` (a shorter ASCII root).
 
-> **`bootstrap.ps1` never prompts.** It runs unattended by design. Asking the
-> user before the real run is *this prompt's* job — see hard rule 3.
+`-Check` (detect only) and `-DryRun` (plan only), plus `-Model <name>`,
+`-Root <path>`, `-Force`, are forwarded all the way to the installer:
+
+```bat
+"%TEMP%\zoombie-install.cmd" -Check
+"%TEMP%\zoombie-install.cmd" -DryRun
+```
 
 ---
 
 ## STEP 1 — DETECT (writes nothing persistent)
 
-```powershell
-# inline form: set the mode through the environment, then run the one-liner
-$env:ZOOMBIE_CHECK = '1'
-irm https://raw.githubusercontent.com/carnivorum/zoombie/main/scripts/bootstrap.ps1 | iex
+```bat
+"%TEMP%\zoombie-install.cmd" -Check
 ```
-
-Saved as a file, the same thing is `.\bootstrap.ps1 -Check`; from cmd.exe it is
-`bootstrap.cmd -Check`.
 
 This prints a human-readable trace to stderr and one JSON result line to stdout.
-Read `data.missing` to see what is absent. Report the hardware summary it
-detects (CPU, RAM, GPU, VRAM) and the backend it selects
-(`cuda` > `vulkan` > `cpu`), plus the model it recommends for that hardware.
-
-If the user only wants to see the plan, run the dry-run instead — it also writes
-nothing:
-
-```powershell
-$env:ZOOMBIE_DRYRUN = '1'
-irm https://raw.githubusercontent.com/carnivorum/zoombie/main/scripts/bootstrap.ps1 | iex
-```
+Read `data.missing` to see what is absent, and `data.sync` to see the **content**
+plan: which package files are `added`/`updated`/`removed`, and each skill's action
+(`added`/`updated`/`unchanged`, plus any stale `zoombie-*` skill `removed`). Unlike
+the old marker-based check, this reports a stale skill even when its version marker
+matches. Report the hardware summary it detects (CPU, RAM, GPU, VRAM) and the
+backend it selects (`cuda` > `vulkan` > `cpu`), plus the model it recommends for
+that hardware.
 
 ---
 
 ## STEP 2 — CONFIRM, THEN APPLY
 
 Tell the user exactly what the real run will fetch, then wait for confirmation.
-**This prompt asks; the script never does.** When the user agrees:
+**This prompt asks; the entry point never does.** When the user agrees:
 
-```powershell
-# drop the mode variable set above, then run the one-liner unprompted
-Remove-Item Env:\ZOOMBIE_CHECK, Env:\ZOOMBIE_DRYRUN -ErrorAction SilentlyContinue
-irm https://raw.githubusercontent.com/carnivorum/zoombie/main/scripts/bootstrap.ps1 | iex
+```bat
+"%TEMP%\zoombie-install.cmd"
 ```
 
-What it does (all idempotent — anything present is skipped). Paths are relative
-to the toolchain root, which is `%USERPROFILE%\zoombie-env` on an ASCII profile
-and `%PUBLIC%\zoombie-env` when the profile path is not ASCII:
+### 2b. Manual fallback (from a local checkout)
+
+If the network path is unavailable but a checkout exists, run the installer
+directly. It installs the working tree as-is and never hits the network:
+
+```bat
+cd scripts
+python -m zoombie.install          REM install/update
+python -m zoombie.install -Check   REM detect only
+```
+
+What the install does (all idempotent — anything already current is skipped).
+Paths are relative to the toolchain root, which is `%USERPROFILE%\zoombie-env` on
+an ASCII profile and `%PUBLIC%\zoombie-env` when the profile path is not ASCII:
 
 | Item | Where | Notes |
 |------|-------|-------|
@@ -250,20 +253,24 @@ and `%PUBLIC%\zoombie-env` when the profile path is not ASCII:
 | PDF dependencies | the existing Python | `pymupdf4llm` + `pytesseract` via `pip install --user`; Python is already required |
 | pip shims | `%APPDATA%\Python\<ver>\Scripts` | any launcher this install creates is removed again; pre-existing tools are left alone |
 | Tesseract + `eng`/`rus` traineddata | `zoombie-env\tesseract\` | **provisioned, pinned**. Upstream publishes *no portable archive* — the only Windows release asset is an NSIS installer. That installer is downloaded, its published sha256 verified, and its payload **extracted** (never executed) with a pinned 7-Zip into the ASCII root, so no elevation is needed and nothing lands in a system location. Language data is fetched separately from the official `tesseract-ocr/tessdata` repository, each file sha256-verified against a pinned commit. Needed for `readpdf -Ocr` / `readimages -Ocr` / the `slides` text gate |
-| the CLI | `zoombie-env\bin\zoombie\` | `zoombie.cmd` + the packaged `zoombie\` package and `pdf\` helper, at a stable ASCII path |
-| skills | `%USERPROFILE%\.roo\skills\` | deployed from [`skills/`](skills/); stays under the profile even when the root is under `%PUBLIC%`, because the editor owns this path and no native tool opens it |
+| the CLI | `zoombie-env\bin\zoombie\` | `zoombie.cmd` + the packaged `zoombie\` package and `pdf\` helper, at a stable ASCII path. Reconciled **by hash**; a module the source retired is removed, and the pre-Port leftovers (`zoombie.ps1`, `lib\ZoombieEnv.psm1`) are removed on the first run |
+| the entry point | `<root>\zoombie-install.cmd` | a copy of the getter, so a re-run needs no download |
+| skills | `%USERPROFILE%\.roo\skills\` | deployed from [`skills/`](skills/); the expanded bytes are compared, so a changed shared block redeploys without a version bump, and a retired `zoombie-*` skill is pruned. Stays under the profile even when the root is under `%PUBLIC%`, because the editor owns this path and no native tool opens it |
 | the Zoombie role | `%APPDATA%\Code\User\globalStorage\zoocodeorganization.zoo-code\settings\custom_modes.yaml` | **merged**, not overwritten, from [`modes/`](modes/): only our entry is replaced, so a hand-written mode in that file survives |
 | the MCP server | `%APPDATA%\Code\User\globalStorage\zoocodeorganization.zoo-code\settings\mcp_settings.json` | **merged**, not overwritten: registers the `zoombie` server (`python -m zoombie.mcp`) as `mcpServers.zoombie`, so the tools appear in the client without a manual config. Other MCP servers survive. Re-run any time with `python -m zoombie mcp -Apply` |
 | manifest | `zoombie-env\env.json` | resolved absolute paths + versions + hardware |
 
-Useful options (passed straight through `bootstrap.cmd` to the installer). Each
-has a switch form and an environment form for the unattended one-liner:
+Useful options:
 
-| File form | One-liner form | Effect |
-|-----------|----------------|--------|
-| `-Model <name>` | `$env:ZOOMBIE_MODEL = '<name>'` | force a model (e.g. `small`, `large-v3-turbo`) |
-| `-Root <path>` | `$env:ZOOMBIE_ROOT = '<path>'` | use a different (still ASCII) toolchain root |
-| `-Force` | `$env:ZOOMBIE_FORCE = '1'` | re-download even when a component is present |
+| Flag | Environment form | Effect |
+|------|------------------|--------|
+| `-Model <name>` | `ZOOMBIE_MODEL=<name>` | force a model (e.g. `small`, `large-v3-turbo`) |
+| `-Root <path>` | `ZOOMBIE_ROOT=<path>` | use a different (still ASCII) toolchain root |
+| `-Force` | `ZOOMBIE_FORCE=1` | re-download even when a component is present |
+| `-NoPause` | `ZOOMBIE_NOPAUSE=1` | never hold the window open at the end |
+
+A switch wins over its environment variable. `ZOOMBIE_REPO_SLUG` /
+`ZOOMBIE_REPO_REF` select a fork or branch.
 
 Already downloaded that 1.5 GB model and do not want to wait? Confirm with the
 user first; `-Model large-v3-turbo` avoids re-fetching a smaller default.
@@ -280,16 +287,19 @@ profile even when the toolchain root moves to `%PUBLIC%`: the editor owns it and
 no native tool opens it, so the ASCII rule that governs `zoombie-env` does not
 apply to it. Do not relocate it.
 
-Versioning:
+Versioning and ownership:
 
 - Every skill is namespaced `zoombie-*`, so its name can never collide with a
   foreign skill — deployment simply overwrites.
-- Each skill carries `cvrm-zoombie-version: 4.8.0` (the value of
-  `zoombie.__init__.SKILL_VERSION`, which is the single source of truth). On a
-  re-run the version is compared and the skill is reported as `up to date` or
-  `updated`. The marker must stay inside the first 12 lines of `SKILL.md`: the
-  comparison reads only the front matter, so a marker pushed below it reads as
-  unowned.
+- Each skill carries `cvrm-zoombie-version: 5.2.0` (the value of
+  `zoombie.__init__.SKILL_VERSION`, the single source of truth). The marker must
+  stay inside the first 12 lines of `SKILL.md`: it is the **ownership proof** used
+  to prune a retired skill safely.
+- The marker no longer decides "up to date" — the **expanded bytes** do. A change
+  to any shared block under [`skills/_shared/`](skills/_shared/) redeploys the
+  affected skills without a version bump, and a second run on unchanged content
+  writes nothing. This is what lets `-Check` report a stale skill at all: a
+  matching marker used to hide exactly that drift.
 
 If the user prefers project-local skills, they are already versioned sources in
 [`skills/`](skills/); copy that folder into `<project>\.roo\skills\` by hand.
@@ -365,24 +375,13 @@ the entry's `command` is an existing Python and that the `-m zoombie.mcp` module
 runs:
 
 ```bat
-"%USERPROFILE%\zoombie-env\bin\zoombie\python.exe" -c "import zoombie.mcp"
+python -c "import zoombie.mcp"
 ```
 
 **Optional: project scope.** The global merge above is all that is normally needed.
 Only if a client insists on a project-scoped server, register the SAME entry in the
 workspace's `.roo/mcp.json` (the file the extension reads for *project* servers) —
-this is a manual fallback, not part of the install:
-
-```json
-{ "mcpServers": { "zoombie": {
-  "command": "%USERPROFILE%\\zoombie-env\\bin\\zoombie\\python.exe",
-  "args": ["-m", "zoombie.mcp"],
-  "env": { "PYTHONPATH": "%USERPROFILE%\\zoombie-env\\bin\\zoombie", "PYTHONUTF8": "1" }
-} } }
-```
-
-Ask the agent to fill the absolute interpreter path, since `%USERPROFILE%` is not
-expanded inside the JSON.
+this is a manual fallback, not part of the install.
 
 ### The item model
 
@@ -473,10 +472,10 @@ The self-test:
 A pass ends with `PASS: Cyrillic destination path worked end to end` and exit
 code 0. If it fails, report the failing line; do not claim success.
 
-**The installer now provisions the self-test's speech dependency.** `pyttsx3`
-is not a runtime dependency of the pipeline — ffmpeg, whisper.cpp and yt-dlp all
-work without it — but the self-test's TTS step needs it, and without it the
-end-to-end chain SKIPS instead of running. So `setup` installs it (from
+**The installer provisions the self-test's speech dependency.** `pyttsx3` is not a
+runtime dependency of the pipeline — ffmpeg, whisper.cpp and yt-dlp all work
+without it — but the self-test's TTS step needs it, and without it the end-to-end
+chain SKIPS instead of running. So setup installs it (from
 `requirements-selftest.txt`, reported at `data.manifest.selftest`), which is what
 makes a green self-test mean the chain actually ran.
 
@@ -533,6 +532,10 @@ Give the user a final table with:
   system memory, or no `vulkan` asset shipped so the CPU build was substituted —
   `gpuPolicy.backendSubstituted`).
 - model name and size,
+- the **content sync** result (`data.sync`): how many package files were
+  added/updated/removed, the per-skill actions, and whether the pre-Port orphans
+  were removed. This is the evidence that the install is current, in place of a
+  version string.
 - PDF toolchain: the Python used and whether the dependencies installed cleanly
   (`data.manifest.pdf.ok`),
 - Tesseract: the provisioned engine path (`data.manifest.tesseract.engine`), its
@@ -553,15 +556,17 @@ cause and the fix rather than overstating the result.
 ## FINAL CHECKLIST
 
 ```
-[ ] Shell resolved (cmd.exe, PowerShell, or any process spawn — batch needs no wrapper)
-[ ] `bootstrap.cmd -Check` run and its findings reported
-[ ] User confirmed the download, then `bootstrap.cmd` applied
+[ ] Fire-and-forget entry point run (zoombie-install.cmd), from any directory
+[ ] zoombie-install.cmd -Check run and its findings reported (data.missing AND data.sync)
+[ ] User confirmed the download, then the entry point applied
 [ ] Toolchain installed under the ASCII root %USERPROFILE%\zoombie-env (or %PUBLIC%\zoombie-env on a non-ASCII profile)
+[ ] Content sync clean: data.sync shows the package reconciled by hash, every skill added/updated/unchanged, and no unexpected removals
 [ ] Backend selected from hardware AND explained in plain language (`whisper.backendReason`): cuda for NVIDIA; vulkan only for a discrete GPU with enough dedicated VRAM and a current driver; cpu otherwise (including integrated GPUs, which share the system memory bus)
 [ ] Installed backend matches the CURRENT hardware (`backendDetected`), OR differs for a recorded reason: `whisper.backendSubstituted` is true when no asset exists for the detected backend and the CPU build was used instead
 [ ] Model downloaded and recorded in env.json
 [ ] CLI deployed to zoombie-env\bin\zoombie\zoombie.cmd, and the launcher works from ANY working directory
-[ ] Six zoombie-* skills deployed to %USERPROFILE%\.roo\skills\ with cvrm-zoombie-version 4.9.0
+[ ] Pre-Port orphans gone: %USERPROFILE%\zoombie-env\bin\zoombie\zoombie.ps1 and lib\ZoombieEnv.psm1 are absent
+[ ] Six zoombie-* skills deployed to %USERPROFILE%\.roo\skills\ with cvrm-zoombie-version 5.2.0
 [ ] The Zoombie role merged into the global custom_modes.yaml, only our entry replaced, and any hand-written mode in that file still intact
 [ ] The `zoombie` MCP server merged into the global mcp_settings.json (`mcpServers.zoombie`), only our entry replaced, and any other MCP server in that file still intact
 [ ] The MCP server is usable: `python -m zoombie.mcp --version` prints to stderr from the deployed package
@@ -572,7 +577,7 @@ cause and the fix rather than overstating the result.
 [ ] Backend verified, not assumed: `backendObserved` matches `backendConfigured`; on a CUDA machine the cuBLAS runtime for the ASSET's major (e.g. `cublas64_11.dll`, `cublasLt64_11.dll`) is present beside `whisper-cli.exe`
 [ ] GPU policy holds: a machine with a fitted GPU reports `deviceUsed: cuda` on a real transcription, or `setup` FAILED and said why
 [ ] On a GPU-accelerated install (cuda, or a discrete-GPU vulkan), a real transcription reports `deviceUsed: cuda`/`vulkan` and a `realtimeFactor` well below 1.0. **This line does not apply to a CPU install** — `deviceUsed: cpu` there is the intended outcome, not a failure
-[ ] Non-ASCII (Cyrillic) paths handled: inputs isolated in ASCII work dirs
+[ ] Non-ASCII (Cyrillic) paths handled: inputs isolated in ASCII work dirs, and the install itself staged on an ASCII base even from a Cyrillic folder
 [ ] Path lengths sane: `doctor` reports `data.report.paths.whisperExeFits` and `modelPathFits` true, and the installer did not refuse the root as too deep
 [ ] `python -m zoombie.selftest` passed (7/7 key words, Cyrillic destination, GPU assertion, deliberate `-NoGpu` run), or reported the TTS step SKIPPED with the pure regression guards still passing
 [ ] `readpdf` (PDF -> Markdown + manifest.json/README.md image sidecar) verified or reported as skipped

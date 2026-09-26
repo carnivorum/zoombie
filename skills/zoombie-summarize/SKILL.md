@@ -1,6 +1,6 @@
 ---
 name: zoombie-summarize
-cvrm-zoombie-version: 5.1.0
+cvrm-zoombie-version: 5.2.0
 description: Turn a source into a readable 6-block summary.md inside an item folder - the FRONT DOOR for any document. Accepts existing SOURCE material (a transcript, a PDF-derived Markdown, or text) OR a raw source (a video, an audio recording, a PDF, or images), producing the transcript or rendering itself before it writes the document. Use when the user wants a summary, notes, a digest, a write-up, or a readable document, from a raw recording or PDF as much as from material already on disk - you never have to chain skills. You write the prose yourself; the mechanical passes (anchors, heading timestamps from the SRT, the regenerated table of contents, link encoding, image re-insertion) are done by zoombie postprocess, so a re-run cannot drift.
 ---
 

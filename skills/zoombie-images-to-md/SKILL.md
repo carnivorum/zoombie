@@ -1,6 +1,6 @@
 ---
 name: zoombie-images-to-md
-cvrm-zoombie-version: 5.1.0
+cvrm-zoombie-version: 5.2.0
 description: Turn a visual source into SOURCE material only - a PDF, a loose image, or a folder of images - as a faithful Markdown rendering plus extracted figures with placement metadata. A text PDF is read directly and costs nothing; only pages with NO text layer (scans) or images are read by the vision model or by Tesseract OCR. Use when the user wants the Markdown or the extracted text itself, e.g. extract text from a PDF, OCR a scan or a screenshot. It deliberately does not summarise. When the goal is a readable DOCUMENT from this PDF or these images, use zoombie-summarize instead - it is the front door and runs this stage for you. Always inspects the project first, proposes candidate output paths, and confirms before writing anything.
 ---
 
