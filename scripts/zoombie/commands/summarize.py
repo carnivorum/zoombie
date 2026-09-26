@@ -12,8 +12,7 @@ step's argument list grows past what that step needs.
                      name, so the agent never presents a four-way prompt)
     step 3  prose    the agent's title, short summary, optional criticism and the
                      topic-change section headings; the backend splits the
-                     transcript, ARCHIVES any existing summary, writes the
-                     skeleton and runs postprocess
+                     transcript, writes the skeleton and runs postprocess
     step 4  verify   gate the tree, then delete the run scratch
 
 Every throwaway -- the transcript, the SRT, the origin sidecar, the OCR report,
@@ -433,8 +432,15 @@ def _step_name(args) -> Outcome:
         # name a DIFFERENT parent than the source step routed to; the item must
         # land where the source step said it would.
         parent = os.path.dirname(destination) or destination
-        name = workspace.unique_name(parent, name)
-        final = os.path.join(parent, name)
+        # REUSE an existing item of ours rather than accreting ``Name (2)``: a
+        # re-run is a re-run of the SAME item, and the overwrite gate below -- not
+        # a second folder nobody asked for -- is what protects the user's document.
+        # A folder we did NOT make still falls back to ``unique_name``, so we never
+        # write into a directory that is not ours.
+        if _reusable_item(os.path.join(parent, name)):
+            final = os.path.join(parent, name)
+        else:
+            final = os.path.join(parent, workspace.unique_name(parent, name))
 
     paths.assert_fits(final, "The summarize destination")
     paths.ensure_dir(final)
@@ -470,6 +476,31 @@ def _step_name(args) -> Outcome:
     # slides step and published by the prose step, which knows the final keep/drop
     # selection. Publishing early would copy frames the agent later drops.
 
+    # OVERWRITE SAFETY. Exactly two artifacts belong to the tool and are the only
+    # things a re-run may replace: the document and the figures. The media and every
+    # other file in the folder are the user's own material and are never touched --
+    # for an IN-PLACE source the item folder IS the source folder, so a folder-level
+    # wipe here would delete the user's recording. That invariant is why the reuse
+    # rule above never deletes a directory, why ``_publish_figures`` rebuilds only
+    # ``img/``, and why this gate names only ``summary.md`` and ``img/``.
+    #
+    # The gate REFUSES rather than archiving on its own: the user must be told what
+    # is at risk and be free to back down and archive by hand. ``-Archive`` takes a
+    # snapshot of the document AND its figures; ``-Overwrite`` replaces them with no
+    # backup. Neither flag is required for an empty target, so a first run is
+    # unchanged.
+    existing = _existing_artifacts(final)
+    overwrite_required = bool(existing["summary"])
+    if overwrite_required and not (args.overwrite or args.archive):
+        raise ZoombieError(
+            f"summarize: {final} already holds a summary ({existing['summary']}), and "
+            f"{existing['images']} figure(s) in {item_paths.IMAGE_DIR_NAME}/. "
+            "Proceeding would replace the document and rebuild the figures. Ask the "
+            "user first: pass -Archive to move the existing document AND its figures "
+            "into a summary_<timestamp>/ folder, or -Overwrite to replace them with "
+            "no backup. The source media is never touched either way."
+        )
+
     state["destinationFinal"] = final
     # ``sourceMedia`` is the readable handle (always the file to READ from);
     # ``media`` is the PLACED deliverable in the item, or None when the user kept
@@ -481,22 +512,35 @@ def _step_name(args) -> Outcome:
     state["mediaMode"] = mode
     state["mediaPlaced"] = placed
 
-    # Archive the existing summary ONCE, at the START of the task: the snapshot must
-    # be the file as the USER left it, not an intermediate the run itself produced.
-    # The later steps (prose can run several times) only ever overwrite the live
-    # summary, so a re-run of the task archives exactly one copy.
-    archived = _archive_existing(final)
+    # The snapshot happens HERE, at the START of the task -- not at prose -- so it
+    # is the document as the USER left it, never an intermediate the run produced.
+    # Prose may run several times and only ever rewrites the live document, so a
+    # task takes at most one snapshot. Taking it is the user's explicit choice
+    # (``-Archive``); there is no silent backup any more.
+    archived = _archive_existing(final) if args.archive else None
     state["archived"] = archived
+    state["overwrote"] = overwrite_required
     _write_run(run, state)
 
-    why = (
-        f"the previous summary was archived to {os.path.basename(archived['to'])} "
-        "-- tell the user; then ask whether to extract slide frames (a separate "
-        "question) and call step slides with -Slides true/false"
-        if archived else
-        "ask the user whether to extract slide frames (a separate question), then "
-        "call step slides with -Slides true/false"
-    )
+    # The slides question is the agent's to ASK, so ``-Slides`` cannot ride in
+    # ``next.args``: it is an answer, not a step of the invocation. The ``why``
+    # therefore names the flag the agent must supply, exactly as the source step's
+    # ``why`` names ``-Media``.
+    question = "ask whether to extract slide frames (a separate question)"
+    if archived:
+        why = (
+            f"the previous document and its figures were archived to "
+            f"{os.path.basename(archived['to'])}/ -- tell the user where their work "
+            f"went; then {question} and call step slides with -Slides true/false"
+        )
+    elif overwrite_required:
+        why = (
+            "the user chose to overwrite with no backup, so the previous document "
+            f"was replaced in place and its figures will be rebuilt; then {question} "
+            "and call step slides with -Slides true/false"
+        )
+    else:
+        why = f"{question}, then call step slides with -Slides true/false"
     return Outcome(ok=True, data={
         "step": "name", "run": run, "itemDir": final,
         # ``media`` is the PLACED deliverable (a path, or None when no copy was
@@ -506,6 +550,16 @@ def _step_name(args) -> Outcome:
         # machine-readable next to ``why`` and the two steps' media shapes never
         # collide. ``default`` rides only when a choice was required.
         "mediaChoice": _media_choice(state, mode),
+        # What the target ALREADY held, so the answer is machine-readable rather
+        # than inferred from ``why``: the document at risk, its figure count, the
+        # media that survives, and any strays a human should look at.
+        "existing": existing,
+        "overwrite": {
+            "required": overwrite_required,
+            "archived": bool(archived),
+            "mode": ("archive" if archived else
+                     "overwrite" if overwrite_required else None),
+        },
         "archived": archived,
         "next": _next("slides", {"-Run": run}, why),
     })
@@ -524,6 +578,19 @@ def _step_slides(args) -> Outcome:
         raise ZoombieError("summarize: run the name step before the slides step.")
 
     want = str(args.slides or "").strip().lower() in {"1", "true", "yes", "on"}
+    # A keep/drop can only mean "prune the frames I was just shown", so naming ids
+    # implies the run. WITHOUT this the selection was parsed and silently discarded:
+    # the step answered ok/exit 0 with an UNCHANGED frame set, which reads as
+    # success. Silently failing open on a narrowing intent is the worst shape a
+    # selection can have -- the whole frame set is published instead of the kept
+    # subset -- so the flag is INFERRED and the inference is logged.
+    if not want and (getattr(args, "keep", None) or getattr(args, "drop", None)):
+        want = True
+        process.log(
+            "  -Keep/-Drop given without -Slides: treating it as -Slides true "
+            "(a selection implies the run it selects from)",
+            "step",
+        )
     media = state.get("media") or state.get("sourceMedia")
     frames: dict = {"requested": want, "extracted": 0}
 
@@ -583,17 +650,25 @@ def _step_slides(args) -> Outcome:
     proposals = bool(frames.get("frames")) and not (getattr(args, "keep", None) or getattr(args, "drop", None))
     why = (
         f"review the {len(frames.get('frames') or [])} proposed frame(s) above (by id "
-        "fNNN or timestamp): call step slides again with -Keep/-Drop to prune "
-        "talking-head frames, or call step prose to accept them all"
+        "fNNN or timestamp): call step slides again with -Slides true -Keep/-Drop to "
+        "prune talking-head frames (e.g. -Slides true -Drop \"f001,f003\"), or call "
+        "step prose to accept them all; then check data.slides.selection.applied -- "
+        "false means the selection was NOT honoured"
         if proposals else
         "write the title, the short summary, an optional criticism and the "
         "topic-change section headings (with an anchor phrase for each), then call "
         "step prose; the backend assembles block 6"
     )
+    # ``-Slides true`` is part of the returned invocation, not a placeholder: the
+    # prune step is only replayable WITH it, because without it the selection is
+    # ignored. The question of WHETHER to prune stays in ``why``.
     return Outcome(ok=True, data={
         "step": "slides", "run": run, "itemDir": item_dir, "slides": frames,
-        "next": _next("slides" if proposals else "prose",
-                      {"-Run": run} if proposals else {"-Run": run}, why),
+        "next": _next(
+            "slides" if proposals else "prose",
+            {"-Run": run, "-Slides": "true"} if proposals else {"-Run": run},
+            why,
+        ),
     })
 
 
@@ -602,26 +677,96 @@ def _step_slides(args) -> Outcome:
 # --------------------------------------------------------------------------- #
 
 
-def _archive_existing(item_dir: str) -> dict | None:
-    """Rename an existing ``summary.md`` to ``summary_<yyyyMMdd_HHmm>.md``.
+def _reusable_item(folder: str) -> bool:
+    """Whether ``folder`` is an EXISTING item we may write into again.
 
-    The user's edited document is NEVER destroyed: a re-summarize archives the
-    previous summary under its own last-edit timestamp and reports the new path,
-    so the agent can tell the user where their work went. Returns
-    ``{"from", "to", "timestamp"}`` or ``None`` when there was nothing to archive.
+    True when the folder does not exist (nothing to reuse but nothing to avoid), is
+    empty (an aborted run's leftover), or already holds our document or figures.
+    False for a folder holding anything else, so a name collision with a stranger's
+    directory still falls back to ``unique_name`` and we never write into -- or
+    archive -- a directory that is not ours.
+    """
+    if not paths.is_dir(folder):
+        return not paths.exists(folder)
+    try:
+        entries = paths.list_dir(folder)
+    except OSError:
+        return False
+    if not entries:
+        return True
+    names = {entry.name.lower() for entry in entries}
+    return item_paths.SUMMARY_NAME.lower() in names or item_paths.IMAGE_DIR_NAME.lower() in names
+
+
+def _existing_artifacts(folder: str) -> dict:
+    """What an existing item holds, split by ownership.
+
+    The tool owns exactly ``summary.md`` and ``img/``; everything else -- the
+    media, a stray note -- is the user's and is reported rather than touched. This
+    is the factual basis of the overwrite gate, so the question the agent puts to
+    the user names real paths and a real figure count, not a guess.
+    """
+    summary = item_paths.summary_path(folder)
+    image_dir = item_paths.image_dir(folder)
+    media: list[str] = []
+    others: list[str] = []
+    if paths.is_dir(folder):
+        for entry in paths.list_dir(folder, files=True):
+            name = entry.name.lower()
+            if name == item_paths.SUMMARY_NAME.lower():
+                continue
+            if os.path.splitext(name)[1] in (_VIDEO_EXT | _AUDIO_EXT | _PDF_EXT | _IMAGE_EXT):
+                media.append(entry.name)
+            else:
+                others.append(entry.name)
+    figures = 0
+    if paths.is_dir(image_dir):
+        figures = len([
+            entry for entry in paths.list_dir(image_dir, files=True)
+            if entry.name.lower().endswith(".png")
+        ])
+    return {
+        "summary": summary if paths.is_file(summary) else None,
+        "images": figures,
+        "media": media,
+        "others": others,
+    }
+
+
+def _archive_existing(item_dir: str) -> dict | None:
+    """Move ``summary.md`` AND its ``img/`` into ``summary_<yyyyMMdd_HHmm>/``.
+
+    The archive is a FOLDER because the figures are index-numbered: a 20-frame run
+    and a 17-frame run disagree about what ``005 - ...`` means, so a flat backup
+    beside a rebuilt ``img/`` would repoint the archived document at the wrong
+    pictures, or at none. Moving the pair keeps every relative ``img/...`` link
+    valid without rewriting a single one.
+
+    Only the document is required; a run that kept no figures archives the document
+    alone. The media is never moved. Returns ``{"from", "to", "timestamp", "images"}``
+    or ``None`` when there was nothing to archive.
     """
     summary = item_paths.summary_path(item_dir)
     if not paths.is_file(summary):
         return None
     stamp = _timestamp_of(summary)
-    archived = os.path.join(item_dir, f"summary_{stamp}.md")
+    archived = os.path.join(item_dir, f"summary_{stamp}")
     index = 1
     while paths.exists(archived):
         index += 1
-        archived = os.path.join(item_dir, f"summary_{stamp} ({index}).md")
-    paths.move(summary, archived)
-    process.log(f"  archived the previous summary -> {archived}", "step")
-    return {"from": summary, "to": archived, "timestamp": stamp}
+        archived = os.path.join(item_dir, f"summary_{stamp} ({index})")
+    paths.ensure_dir(archived)
+    paths.move(summary, os.path.join(archived, item_paths.SUMMARY_NAME))
+    image_dir = item_paths.image_dir(item_dir)
+    figures = 0
+    if paths.is_dir(image_dir):
+        figures = len([
+            entry for entry in paths.list_dir(image_dir, files=True)
+            if entry.name.lower().endswith(".png")
+        ])
+        paths.move(image_dir, item_paths.image_dir(archived))
+    process.log(f"  archived the previous summary and its figures -> {archived}", "step")
+    return {"from": summary, "to": archived, "timestamp": stamp, "images": figures}
 
 
 def _timestamp_of(path: str) -> str:
@@ -833,8 +978,9 @@ def _step_prose(args) -> Outcome:
     # what is ours -- so the whole image directory is rebuilt here.
     _publish_figures(run, item_dir)
 
-    # NO archive here: the name step already snapshotted the user's file at the START
-    # of the task. The prose step only writes the live summary, so re-running it
+    # NO archive here: the name step already took the snapshot -- if the user asked
+    # for one -- at the START of the task. The prose step only writes the live
+    # summary, so re-running it
     # (an iterative prose pass) overwrites the live document without piling up
     # snapshots of intermediate work.
     archived = state.get("archived")
@@ -855,8 +1001,9 @@ def _step_prose(args) -> Outcome:
     why = "check the finished tree, then the run scratch is removed"
     if archived:
         why = (
-            f"the previous summary was archived to {os.path.basename(archived['to'])} "
-            "-- tell the user; then check the finished tree"
+            f"the previous document and its {archived.get('images', 0)} figure(s) were "
+            f"archived to {os.path.basename(archived['to'])}/ -- tell the user where "
+            "their work went; then check the finished tree"
         )
     return Outcome(ok=True, data={
         "step": "prose", "run": run, "itemDir": item_dir, "summary": summary,

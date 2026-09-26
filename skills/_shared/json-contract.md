@@ -37,7 +37,10 @@ the request (e.g. `slides` with explicit `times`), not raising the cap.
 `summarize` is called once per step, and each result's `data.next` names the next
 `step`. Carry the `run` value forward: it is the run scratch path, and it is the
 whole session state. Steps run in order - `source`, `name`, `slides`, `prose`,
-`verify` - and an out-of-order call is refused. `data.archived` on the `prose`
-step means a previous `summary.md` was renamed to `summary_<yyyyMMdd_HHmm>.md`;
-report that path to the user. `verify` deletes the run scratch on success, so
+`verify` - and an out-of-order call is refused. `data.archived` on the `name` and
+`prose` steps means the user chose `archive` and a previous `summary.md` and its
+figures were moved into a `summary_<yyyyMMdd_HHmm>/` folder; report that path to
+the user. A target that already holds a summary is never written to without
+`archive` or `overwrite` - the `name` step refuses instead. `verify` deletes the
+run scratch on success, so
 after it only `summary.md`, the kept media and `img/` remain.

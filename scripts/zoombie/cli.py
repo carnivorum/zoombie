@@ -561,13 +561,15 @@ def build_parser() -> argparse.ArgumentParser:
     )
     # The agent's FINAL keep/drop over the detector's proposals, threaded straight
     # to `slides`. Frames are named by id (``fNNN``) or timestamp, NEVER a path.
+    # Either flag IMPLIES the run it selects from, so -Slides need not be repeated;
+    # omitting -Slides is inferred rather than silently ignoring the selection.
     summarize.add_argument(
         "-Keep", "--keep", dest="keep", default=None,
-        help="slide frames to KEEP (ids like f005 or their timestamps); re-run -Step slides",
+        help="slide frames to KEEP (ids like f005 or their timestamps); re-run -Step slides; implies -Slides true",
     )
     summarize.add_argument(
         "-Drop", "--drop", dest="drop", default=None,
-        help="slide frames to DROP (same handles as -Keep)",
+        help="slide frames to DROP (same handles as -Keep); implies -Slides true",
     )
     summarize.add_argument("-Title", "--title", dest="title", default=None)
     summarize.add_argument(
@@ -598,6 +600,18 @@ def build_parser() -> argparse.ArgumentParser:
     summarize.add_argument(
         "-ConfirmMove", "--confirm-move", dest="confirm_move", action="store_true",
         help="acknowledge that -Media move relocates the user's own file (required for move)",
+    )
+    # OVERWRITE SAFETY. A target that already holds a summary.md is not written to
+    # without one of these: the name step REFUSES and names what is at risk, so the
+    # agent can ask the user, who may back down and archive by hand. Only the
+    # document and its figures are ever replaced; the source media is never touched.
+    summarize.add_argument(
+        "-Overwrite", "--overwrite", dest="overwrite", action="store_true",
+        help="replace an existing summary.md and rebuild img/ with NO backup (media preserved)",
+    )
+    summarize.add_argument(
+        "-Archive", "--archive", dest="archive", action="store_true",
+        help="move the existing summary.md AND its figures into summary_<timestamp>/ before writing (media preserved)",
     )
     summarize.add_argument(
         "-Language", "--language", dest="language", default="auto",

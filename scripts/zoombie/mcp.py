@@ -183,7 +183,14 @@ KNOWN_OPTIONS: dict[str, dict] = {
         # ``confirm_move`` is the acknowledgement -Media move RELOCATES the user's
         # own file: move is refused without it.
         "media": "str", "confirm_move": "bool", "language": "str",
+        # The agent's final keep/drop; either IMPLIES the slides run, so -Slides
+        # need not repeat it.
         "keep": "str", "drop": "str",
+        # Overwrite safety: ``overwrite`` replaces the document with no backup,
+        # ``archive`` snapshots the document AND its figures into a
+        # summary_<timestamp>/ folder first. One is REQUIRED when the target already
+        # holds a summary.md; the media is never touched either way.
+        "overwrite": "bool", "archive": "bool",
     },
     "items": {"root": "str", "depth": "int", "recurse": "bool", "json": "bool", "title": "str", "date": "str"},
     "modes": {"target": "str", "check": "bool", "apply": "bool"},
@@ -722,12 +729,16 @@ def tool_schemas() -> list[dict]:
                 "Produce a summary.md step by step - the FRONT DOOR. Call once per step "
                 "and follow data.next: source (summarize a URL or path; produces the "
                 "source material), name (confirm the folder name and, for an existing "
-                "local source, how the media is placed; slides is a SEPARATE question), "
-                "slides (optional frames), prose (your title, summary, optional "
-                "criticism and section headings; the backend assembles block 6 and "
-                "archives any existing summary), verify (gate the tree and delete the "
+                "local source, how the media is placed; slides is a SEPARATE question - "
+                "if the target already holds a summary the step REFUSES and names what "
+                "is at risk, so ask the user and pass overwrite or archive), slides "
+                "(optional frames; a keep/drop selection implies slides:true, and "
+                "data.slides.selection.applied false means the selection was IGNORED), "
+                "prose (your title, summary, optional criticism and section headings; "
+                "the backend assembles block 6), verify (gate the tree and delete the "
                 "run scratch). Args: step, run (from the previous step), source, name, "
-                "media, slides, times, title, summary_text, criticism, sections."
+                "media, slides, times, title, summary_text, criticism, sections, keep, "
+                "drop, overwrite, archive."
             ),
             {
                 "source": {"type": "string", "description": "source file or URL (step source)"},
@@ -736,14 +747,16 @@ def tool_schemas() -> list[dict]:
                 "name": {"type": "string", "description": "the confirmed folder name (step name)"},
                 "media": {"type": "string", "enum": ["keep", "copy", "move", "none"], "description": "existing local media: keep in place, copy into the item, move into the item (requires confirm_move), or keep no copy (ask the user; default keep if in-place, else copy)"},
                 "confirm_move": {"type": "boolean", "description": "acknowledge that media:\"move\" RELOCATES the user's own file (the source is removed); move is refused without it"},
-                "slides": {"type": "string", "description": "true/false: extract slide frames? (step slides)"},
+                "overwrite": {"type": "boolean", "description": "replace an existing summary.md and rebuild img/ with NO backup; required (with archive) when the target already holds a summary, after asking the user; the media is preserved"},
+                "archive": {"type": "boolean", "description": "move the existing summary.md AND its figures into summary_<timestamp>/ before writing; required (with overwrite) when the target already holds a summary, after asking the user; the media is preserved"},
+                "slides": {"type": "string", "description": "true/false: extract slide frames? (step slides); implied by keep/drop - without it a keep/drop selection is ignored"},
                 "times": {"type": "string", "description": "exact slide timestamps"},
                 "title": {"type": "string", "description": "the document title (step prose)"},
                 "summary_text": {"type": "string", "description": "the short summary, block 3"},
                 "criticism": {"type": "string", "description": "optional criticism sub-block"},
                 "sections": {"type": "string", "description": "JSON array of {heading, at} topic-change sections for block 6"},
-                "keep": {"type": "string", "description": "slide frames to KEEP (ids fNNN or timestamps); re-run step slides"},
-                "drop": {"type": "string", "description": "slide frames to DROP (same handles as keep)"},
+                "keep": {"type": "string", "description": "slide frames to KEEP (ids fNNN or timestamps); implies slides:true; check data.slides.selection.applied"},
+                "drop": {"type": "string", "description": "slide frames to DROP (same handles as keep); implies slides:true; check data.slides.selection.applied"},
                 "language": {"type": "string"},
             },
             [],

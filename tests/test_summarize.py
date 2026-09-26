@@ -63,7 +63,8 @@ def _args(**overrides):
     base = dict(step=None, source=None, run=None, name=None, slides=None,
                 times=None, title=None, summary_text=None, criticism=None,
                 sections=None, media=None, confirm_move=False, language="auto",
-                work_root=None, dry_run=False, force=False)
+                work_root=None, dry_run=False, force=False,
+                overwrite=False, archive=False, keep=None, drop=None)
     base.update(overrides)
     return argparse.Namespace(**base)
 
@@ -89,7 +90,16 @@ class TestRouting:
         assert outcome.data["itemDir"] == str(folder)
 
     def test_a_name_is_made_unique(self, tmp_path, monkeypatch):
-        (tmp_path / "_unsorted" / "summaries" / "My Item").mkdir(parents=True)
+        """A folder that is NOT ours is never written into: the name is uniquified.
+
+        The colliding folder carries a foreign file, which is what makes it someone
+        else's. An EMPTY folder is treated as an aborted run's leftover and reused --
+        see ``test_an_existing_item_is_reused_not_suffixed`` -- so only a folder with
+        content of its own falls through to ``unique_name``.
+        """
+        taken = tmp_path / "_unsorted" / "summaries" / "My Item"
+        taken.mkdir(parents=True)
+        (taken / "notes.txt").write_text("not ours", encoding="utf-8")
         source = str(tmp_path / "elsewhere" / "video.mp4")
         run, _dest = _seed_run(tmp_path, monkeypatch, source=source, internal=False)
         outcome = sz.run(_args(step="name", run=run, name="My Item"))
@@ -140,35 +150,108 @@ class TestSteps:
             sz.run(_args(step="prose", run=run))
 
 
-class TestArchive:
-    def test_an_existing_summary_is_archived_at_the_start(self, tmp_path, monkeypatch):
-        """The archive is the USER's file, taken at the NAME step (task start)."""
+class TestOverwriteSafety:
+    """An existing summary is never silently destroyed: the step REFUSES, the user chooses."""
+
+    @staticmethod
+    def _item(tmp_path, *, figures: int = 0):
         folder = tmp_path / "item"
         folder.mkdir()
-        source = str(folder / "b.mp4")
         (folder / "b.mp4").write_bytes(b"\x00")
         (folder / "summary.md").write_text("# Old\n", encoding="utf-8")
-        run, _dest = _seed_run(tmp_path, monkeypatch, source=source, internal=True)
-        named = sz.run(_args(step="name", run=run))
-        archived = named.data["archived"]
-        assert archived is not None
-        assert os.path.basename(archived["to"]).startswith("summary_")
-        # The snapshot holds the file as the USER left it, moved away already.
-        assert (folder / "summary.md").exists() is False
-        assert open(archived["to"], encoding="utf-8").read().startswith("# Old")
+        if figures:
+            image_dir = folder / "img"
+            image_dir.mkdir()
+            for index in range(1, figures + 1):
+                (image_dir / f"{index:03d} - 00-0{index}-00.png").write_bytes(b"png")
+        return str(folder / "b.mp4"), folder
 
-        outcome = sz.run(_args(step="prose", run=run, title="New", summary_text="s"))
-        assert (folder / "summary.md").read_text(encoding="utf-8").startswith("# New")
+    def test_an_existing_summary_is_refused_without_a_choice(self, tmp_path, monkeypatch):
+        """The document at risk is NAMED and nothing is touched until the user chooses."""
+        source, folder = self._item(tmp_path, figures=2)
+        run, _dest = _seed_run(tmp_path, monkeypatch, source=source, internal=True)
+        with pytest.raises(ZoombieError) as caught:
+            sz.run(_args(step="name", run=run))
+        message = str(caught.value)
+        assert "-Archive" in message and "-Overwrite" in message
+        # The refusal is a no-op on disk: the document and its figures are intact.
+        assert (folder / "summary.md").read_text(encoding="utf-8").startswith("# Old")
+        assert len(os.listdir(folder / "img")) == 2
+
+    def test_archive_moves_the_document_and_its_figures_together(
+        self, tmp_path, monkeypatch
+    ):
+        """The archive is a FOLDER, because the figures are index-numbered.
+
+        A flat ``summary_<stamp>.md`` beside a rebuilt ``img/`` would repoint the
+        archived document at the wrong pictures, so the pair travels together and
+        every relative ``img/...`` link keeps resolving.
+        """
+        source, folder = self._item(tmp_path, figures=2)
+        run, _dest = _seed_run(tmp_path, monkeypatch, source=source, internal=True)
+        named = sz.run(_args(step="name", run=run, archive=True))
+        archived = named.data["archived"]
+        assert archived is not None and archived["images"] == 2
+        archive_dir = archived["to"]
+        assert os.path.isdir(archive_dir)
+        assert open(os.path.join(archive_dir, "summary.md"), encoding="utf-8").read().startswith("# Old")
+        assert sorted(os.listdir(os.path.join(archive_dir, "img"))) == [
+            "001 - 00-01-00.png", "002 - 00-02-00.png",
+        ]
+        # The live item is clean: the next run builds a fresh document and img/.
+        assert not (folder / "summary.md").exists()
+        assert not (folder / "img").exists()
+        # The MEDIA is never collateral damage.
+        assert (folder / "b.mp4").is_file()
+        assert named.data["overwrite"] == {"required": True, "archived": True, "mode": "archive"}
+
+    def test_overwrite_replaces_with_no_backup_and_keeps_the_media(
+        self, tmp_path, monkeypatch
+    ):
+        """-Overwrite is the user's explicit "no backup", and the source survives it."""
+        source, folder = self._item(tmp_path, figures=1)
+        run, _dest = _seed_run(tmp_path, monkeypatch, source=source, internal=True)
+        named = sz.run(_args(step="name", run=run, overwrite=True))
+        assert named.data["archived"] is None
+        assert named.data["overwrite"] == {"required": True, "archived": False, "mode": "overwrite"}
+        # No snapshot was taken, but the document is not removed HERE either: the
+        # prose step rewrites it. The media is untouched.
+        assert (folder / "summary.md").is_file()
+        assert (folder / "b.mp4").is_file()
+        assert not any(name.startswith("summary_") for name in os.listdir(folder))
+
+    def test_a_fresh_target_needs_no_flag(self, tmp_path, monkeypatch):
+        """The gate must not tax the ordinary first run."""
+        folder = tmp_path / "item"
+        folder.mkdir()
+        (folder / "b.mp4").write_bytes(b"\x00")
+        run, _dest = _seed_run(tmp_path, monkeypatch, source=str(folder / "b.mp4"), internal=True)
+        named = sz.run(_args(step="name", run=run))
+        assert named.data["overwrite"] == {"required": False, "archived": False, "mode": None}
+        assert named.data["existing"]["summary"] is None
+
+    def test_an_existing_item_is_reused_not_suffixed(self, tmp_path, monkeypatch):
+        """A re-run is a re-run of the SAME item, not ``Name (2)``."""
+        source, folder = self._item(tmp_path)
+        run, _dest = _seed_run(tmp_path, monkeypatch, source=source, internal=True)
+        named = sz.run(_args(step="name", run=run, overwrite=True))
+        assert named.data["itemDir"] == str(folder)
+
+    def test_a_foreign_folder_still_gets_a_unique_name(self, tmp_path, monkeypatch):
+        """A directory that is not ours is never written into."""
+        (tmp_path / "_unsorted" / "summaries" / "My Item").mkdir(parents=True)
+        (tmp_path / "_unsorted" / "summaries" / "My Item" / "notes.txt").write_text("mine")
+        run, _dest = _seed_run(tmp_path, monkeypatch,
+                               source=str(tmp_path / "elsewhere" / "video.mp4"),
+                               internal=False)
+        named = sz.run(_args(step="name", run=run, name="My Item"))
+        assert os.path.basename(named.data["itemDir"]) == "My Item (2)"
 
     def test_a_second_prose_run_does_not_archive_again(self, tmp_path, monkeypatch):
         """Prose can run many times; only the name step snapshots the user's file."""
-        folder = tmp_path / "item"
-        folder.mkdir()
-        source = str(folder / "b.mp4")
-        (folder / "b.mp4").write_bytes(b"\x00")
-        (folder / "summary.md").write_text("# Old\n", encoding="utf-8")
+        source, folder = self._item(tmp_path)
         run, _dest = _seed_run(tmp_path, monkeypatch, source=source, internal=True)
-        sz.run(_args(step="name", run=run))
+        sz.run(_args(step="name", run=run, archive=True))
         sz.run(_args(step="prose", run=run, title="First", summary_text="a"))
         sz.run(_args(step="prose", run=run, title="Second", summary_text="b"))
         archives = [n for n in os.listdir(folder) if n.startswith("summary_")]
@@ -657,3 +740,85 @@ class TestNextArgsAreReplayable:
         outcome = sz.run(_args(step="name", run=run, name="My Item", media="copy"))
         assert outcome.data["next"]["args"]["-Step"] == "slides"
         replay(outcome.data["next"])
+
+
+class TestSlideSelection:
+    """The silent no-op: a keep/drop must never be parsed and then discarded.
+
+    The defect that shipped: ``-Drop`` without ``-Slides`` returned ok/exit 0 with an
+    UNCHANGED frame set, so the whole frame set was published instead of the kept
+    subset and the agent had no signal. A narrowing intent that fails OPEN is the
+    worst shape a selection can have, so both halves are pinned here -- the flag is
+    inferred, and the recommended prune invocation carries it.
+    """
+
+    @staticmethod
+    def _framed_dispatch(seen: dict):
+        from zoombie.cli import Outcome
+
+        def dispatch(command, argv):
+            if command != "slides":
+                return Outcome(ok=True, data={})
+            seen["argv"] = list(argv)
+            drop = argv[argv.index("-Drop") + 1] if "-Drop" in argv else None
+            applied = bool(drop)
+            return Outcome(ok=True, data={
+                "images": {
+                    "count": 1 if applied else 3, "proposed": 3,
+                    "selection": {
+                        "applied": applied, "keep": [], "drop": [drop] if drop else [],
+                        "dropped": 1 if applied else 0,
+                        "droppedIds": [drop] if drop else [],
+                    },
+                },
+                "visionFrames": [
+                    {"id": f"f{index:03d}", "path": f"r/{index}.jpg",
+                     "timeSec": float(index), "timecode": f"00-00-0{index}"}
+                    for index in (1, 2, 3)
+                ],
+            })
+        return dispatch
+
+    def _named_run(self, tmp_path, monkeypatch):
+        media = tmp_path / "item" / "clip.mp4"
+        media.parent.mkdir(exist_ok=True)
+        media.write_bytes(b"media")
+        run, _dest = _seed_run(tmp_path, monkeypatch, source=str(media),
+                               internal=False, media=str(media))
+        sz.run(_args(step="name", run=run, name="My Item", media="copy"))
+        return run
+
+    def test_a_drop_without_slides_is_inferred_not_ignored(self, tmp_path, monkeypatch):
+        run = self._named_run(tmp_path, monkeypatch)
+        seen: dict = {}
+        monkeypatch.setattr(sz, "_dispatch", self._framed_dispatch(seen))
+        outcome = sz.run(_args(step="slides", run=run, drop="f001"))
+        # The run HAPPENED: the selection reached the tool rather than being dropped.
+        assert "-Drop" in seen["argv"]
+        assert seen["argv"][seen["argv"].index("-Drop") + 1] == "f001"
+        assert outcome.data["slides"]["requested"] is True
+        assert outcome.data["slides"]["selection"]["applied"] is True
+        assert outcome.data["slides"]["selection"]["droppedIds"] == ["f001"]
+
+    def test_the_prune_invocation_carries_slides_true(self, tmp_path, monkeypatch):
+        """``data.next.args`` must be replayable -- it must not reproduce the no-op."""
+        run = self._named_run(tmp_path, monkeypatch)
+        monkeypatch.setattr(sz, "_dispatch", self._framed_dispatch({}))
+        outcome = sz.run(_args(step="slides", run=run, slides="true"))
+        # The command is always ``summarize``; the STEP lives in ``args``.
+        assert outcome.data["next"]["args"]["-Step"] == "slides"
+        assert outcome.data["next"]["args"]["-Slides"] == "true"
+        # Replaying it verbatim must actually prune, not silently accept everything.
+        # ``-Slides true`` is the flag the old invocation omitted, which is why the
+        # replay used to reproduce the no-op.
+        pruned = sz.run(_args(step="slides", run=run, slides="true", drop="f002"))
+        assert pruned.data["slides"]["selection"]["applied"] is True
+        assert pruned.data["slides"]["selection"]["droppedIds"] == ["f002"]
+
+    def test_the_why_names_the_flag_and_the_applied_check(self, tmp_path, monkeypatch):
+        run = self._named_run(tmp_path, monkeypatch)
+        monkeypatch.setattr(sz, "_dispatch", self._framed_dispatch({}))
+        outcome = sz.run(_args(step="slides", run=run, slides="true"))
+        why = outcome.data["next"]["why"]
+        assert "-Slides true" in why
+        assert "selection.applied" in why

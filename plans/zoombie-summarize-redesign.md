@@ -103,10 +103,18 @@ their edited `summary.md`. Two rules:
 1. **The skill asks.** Before an overwrite the agent confirms with the user, because
    a long instruction (for example "summarize X and rewrite the criticism as ...")
    is a deliberate rewrite, not an accident.
-2. **The backend archives, always.** When the destination already holds a
-   `summary.md`, the backend RENAMES it to
-   `summary_<yyyyMMdd_HHmm>.md` -- the existing file's last-edit timestamp, as
-   `year month day _ hour minute` -- and then writes the new `summary.md`. This is
+2. **The backend always ASKS; the user chooses the archive.** When the destination
+   already holds a `summary.md`, the `name` step REFUSES and reports what is at risk,
+   so the agent can put the choice to the user, who may back down and archive by
+   hand. With `-Archive` the backend moves the superseded document AND its `img/`
+   figures into a `summary_<yyyyMMdd_HHmm>/` FOLDER (the existing document's
+   last-edit timestamp, as `year month day _ hour minute`) and then writes the new
+   `summary.md`. It is a folder, not a file, because the figures are index-numbered:
+   a flat `summary_<stamp>.md` beside a rebuilt `img/` would repoint the archived
+   document at the wrong pictures. With `-Overwrite` the document and figures are
+   replaced with no backup. Only `summary.md` and `img/` are ever touched -- the
+   media is never removed. This is superseded by the earlier flat-file wording below:
+> Old: this was the rename to `summary_<yyyyMMdd_HHmm>.md`. This is
    the fallback for every case, asked or not, so no work can be lost.
 
 The rename is **reported explicitly**: the step result carries
@@ -116,8 +124,9 @@ skill's step-3 prose (the step that writes) must surface that archive path to th
 user, so the agent connects a long instruction to the file it displaced.
 
 Note the tension with idempotency: an intended re-`postprocess` on an already
-finished item must NOT archive the summary it is rewriting. Archiving happens only
-when the SUMMARIZE flow writes a new document at the prose step, never inside
+finished item must NOT archive the summary it is rewriting. The snapshot is taken
+at the NAME step -- the start of the task, so it is the document as the user left
+it rather than an intermediate -- and never inside
 `postprocess`.
 
 ## File impact

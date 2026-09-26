@@ -39,8 +39,9 @@ Call the `summarize` MCP tool once per step and follow `data.next`:
 | Step | Call | You do |
 |------|------|--------|
 | source | `summarize {source: "<url-or-path>"}` | for an EXISTING local file, **ask how to place the media** (below); the tool transcribes/renders into a run scratch and proposes a name |
-| name | `summarize {step:"name", run, name, media}` | **ask the user** the name, and carry the media answer (`media`, plus `confirm_move: true` only for a user-approved `move`) |
+| name | `summarize {step:"name", run, name, media}` | **ask the user** the name, carry the media answer (`media`, plus `confirm_move: true` only for a user-approved `move`); if the target already holds a summary, **ask whether to archive or overwrite** and pass `archive` or `overwrite` |
 | slides | `summarize {step:"slides", run, slides, times}` | **ask the user** the slides question; then review the proposed frames and keep/drop |
+| slides (prune) | `summarize {step:"slides", run, slides:"true", keep\|drop}` | **re-run** with the kept or dropped frames; `slides:"true"` is required - without it the selection is **ignored** |
 | prose | `summarize {step:"prose", run, title, summary_text, criticism, sections}` | write the title, the short summary, an optional criticism, and the topic headings |
 | verify | `summarize {step:"verify", run}` | nothing; the tool gates the tree and deletes the run scratch |
 
@@ -74,9 +75,23 @@ combined multi-way question.
    but a talking-head video still yields webcam frames. The result lists them under
    `data.slides.frames` with ids (`fNNN`) and timestamps; `data.next` then points
    back at `step:"slides"`. **Look at the frames and drop the faces**: re-run with
-   `keep: "f001,f003,..."`, or `drop: "f002,..."`, naming ids or timestamps, never a
-   path. Then call `step:"prose"`. Skipping this leaves presenters' faces in the
-   document.
+   `slides: "true"` **and** `keep: "f001,f003,..."` or `drop: "f002,..."`, naming ids
+   or timestamps, never a path. Then call `step:"prose"`. Skipping this leaves
+   presenters' faces in the document.
+
+   `slides:"true"` is not optional on a prune, even though a `keep`/`drop` implies
+   it and the tool will infer it. Then **check `data.slides.selection.applied`**: it
+   must be `true`, and `droppedIds` must name the frames you dropped. `applied:false`
+   means the selection was **not honoured** and the full frame set is about to be
+   published - fix the call rather than continuing to `prose`.
+
+4. **Overwrite** (only when the target already holds a `summary.md`). The `name`
+   step **refuses** rather than acting, and `data.existing` names the document at
+   risk, its figure count, and the media. Ask the user, who may back down and
+   archive by hand. Pass `archive: true` to move the old document **and its
+   figures** into a `summary_<timestamp>/` folder first, or `overwrite: true` for a
+   clean rewrite with no backup. `data.overwrite.mode` echoes what was done. The
+   source media is never removed either way.
 
 ## Where the output goes
 
@@ -95,12 +110,19 @@ rather than linking a file the item does not hold.
 
 ## Never destroy an existing summary
 
-If the destination already holds a `summary.md`, the tool RENAMES it to
-`summary_<yyyyMMdd_HHmm>.md` (its last-edit time) and reports it in
-`data.archived`. **Tell the user where the previous document went** - do not
-silently continue. Because a long instruction ("summarize X and rewrite the
-criticism as ...") is a deliberate second pass, confirm with the user before
-overwriting.
+If the destination already holds a `summary.md`, the `name` step does nothing and
+**refuses**: the folder is reused, not copied to a `(2)` sibling, and the error
+names the document and figure count at risk. Nothing is touched until the user
+chooses, so there is room to back down and archive by hand.
+
+- `archive: true` moves the superseded document AND the figures it inlines into
+  `summary_<yyyyMMdd_HHmm>/`, keeping every relative link valid. The path is
+  reported in `data.archived`; **tell the user where their work went**.
+- `overwrite: true` replaces the document and rebuilds `img/`, with no backup.
+
+Only `summary.md` and `img/` are ever replaced. The **media is never removed** -
+for an in-place source the item folder *is* the source folder, so the recording the
+user owns survives a rewrite untouched.
 
 ## Run this (MCP tool first)
 
@@ -113,14 +135,19 @@ Call the `summarize` MCP tool with the step's JSON arguments:
 {"source": "<url-or-path>"}
 {"step": "name", "run": "<run>", "name": "<confirmed-name>", "media": "copy"}
 {"step": "name", "run": "<run>", "name": "<name>", "media": "move", "confirm_move": true}
+{"step": "name", "run": "<run>", "name": "<name>", "archive": true}
+{"step": "name", "run": "<run>", "name": "<name>", "overwrite": true}
 {"step": "slides", "run": "<run>", "slides": "true", "times": "00:01:00,00:05:30"}
+{"step": "slides", "run": "<run>", "slides": "true", "drop": "f001,f003"}
 {"step": "prose", "run": "<run>", "title": "<title>", "summary_text": "<short summary>",
  "sections": "[{\"heading\": \"Вступление\", \"at\": \"first words of the section\"}]"}
 {"step": "verify", "run": "<run>"}
 ```
 
 The first `name` variant is the safe one; the second (`move`) applies only after the
-user explicitly agreed, because it deletes the original.
+user explicitly agreed, because it deletes the original. The third and fourth apply
+only when the target already holds a summary: `archive` keeps a full copy, `overwrite`
+does not.
 
 CLI fallback only:
 `& $cli summarize -Source "<url-or-path>"`, then `-Step name -Run "<run>" -Name "..."`, etc.

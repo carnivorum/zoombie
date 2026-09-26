@@ -25,6 +25,7 @@ module parses a name, and no other module may spell a path by hand.
 from __future__ import annotations
 
 import os
+import re
 
 from ..lib import paths
 
@@ -40,6 +41,9 @@ __all__ = [
     "manifest_path",
     "item_markers",
     "is_item",
+    "is_archive_dir",
+    "is_archived_summary",
+    "archive_dir_name",
     "image_count",
 ]
 
@@ -68,6 +72,38 @@ SOURCE_NAME = "source.json"
 # material, and requiring a sidecar would make an item unrecognizable the moment
 # the toolchain stopped writing one.
 ITEM_MARKERS = (SUMMARY_NAME,)
+
+# An ARCHIVED summary, as the summarize flow leaves one when the user chooses
+# -Archive. It is a FOLDER holding the superseded document AND the figures it
+# inlines, so the pair stays consistent -- figures are index-numbered, so a flat
+# copy beside a live ``img/`` would repoint at the wrong pictures.
+#
+# The pattern lives HERE, not in the producer and the checker separately: an
+# archive folder holds a ``summary.md``, so without one shared definition a
+# re-summarize would archive happily while ``verify`` and ``items`` counted the
+# snapshot as a second item of its own.
+_ARCHIVE_STAMP = r"\d{8}_\d{4}(?: \(\d+\))?"
+_ARCHIVE_DIR_RE = re.compile(rf"^summary_{_ARCHIVE_STAMP}$", re.IGNORECASE)
+_ARCHIVED_SUMMARY_RE = re.compile(rf"^summary_{_ARCHIVE_STAMP}\.md$", re.IGNORECASE)
+
+
+def is_archive_dir(name: str) -> bool:
+    """True for an archive FOLDER name, ``summary_<yyyyMMdd_HHmm>[ (n)]``."""
+    return bool(_ARCHIVE_DIR_RE.match(name))
+
+
+def is_archived_summary(name: str) -> bool:
+    """True for a legacy flat archive name, ``summary_<yyyyMMdd_HHmm>[ (n)].md``.
+
+    The folder form is current; this matches snapshots written by the older
+    file-per-archive layout, which some items still carry.
+    """
+    return bool(_ARCHIVED_SUMMARY_RE.match(name))
+
+
+def archive_dir_name(stamp: str, index: int = 1) -> str:
+    """The archive folder for ``stamp``, suffixed by ``index`` when one is taken."""
+    return f"summary_{stamp}" if index <= 1 else f"summary_{stamp} ({index})"
 
 
 def image_dir(item_dir: str) -> str:
@@ -100,12 +136,20 @@ def item_markers(item_dir: str) -> list[str]:
 
 
 def is_item(item_dir: str) -> bool:
-    """True when ``item_dir`` holds a ``summary.md``.
+    """True when ``item_dir`` holds a ``summary.md`` and is not an archive.
 
     **Recognition is evidence-based and never parses the name.** A folder named
     ``a Заметки``, ``2020-05-06 Заметки`` or plain ``Заметки`` is equally an item
     when it holds our document.
+
+    The ONE name-shaped exception is the archive folder: it holds a superseded
+    ``summary.md`` too, so evidence alone cannot tell a snapshot from a live item.
+    The pattern is specific enough (a date-stamp stem) that a user naming a real
+    item ``summary_20260926_1410`` is the only false negative, and that is a fair
+    trade for never reporting one snapshot as a second item.
     """
+    if is_archive_dir(os.path.basename(os.path.normpath(item_dir))):
+        return False
     return bool(item_markers(item_dir))
 
 

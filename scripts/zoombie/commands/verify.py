@@ -14,9 +14,11 @@ Checks, per Markdown file:
 * ``dead-link``      -- a block-5 relative link that resolves to nothing.
 * ``missing-source`` -- a ``<base>.md`` referenced by the block-2 source block
   that does not exist.
-* ``section6-image-count-mismatch`` -- ADVISORY: the anchored block-6 heading count
-  differs from the image manifest's ``count``/``images`` length, so the ordinal
-  heading-to-image stamp association cannot hold.
+
+A finished item keeps no image manifest, so there is no ordinal heading-to-image
+convention left to compare: that advisory was removed with the ``.data/`` layout
+(see the note at the image checks below). A figure the document references is
+verified by its presence on disk, which is the check that survives.
 
 Two properties matter more than the checks themselves:
 
@@ -259,28 +261,37 @@ def _de_extend(path: str, extended_root: str, real_root: str) -> str:
     return os.path.join(real_root, os.path.relpath(path, extended_root))
 
 
-# An ARCHIVED summary: ``summary_<yyyyMMdd_HHmm>.md`` (optionally `` (2)``). It is a
-# historical snapshot the summarize flow kept when it overwrote a summary, and its
-# figure links point at whatever ``img/`` held at the time. It must NOT be checked:
-# a live check would flag every historical link as a missing image and fail a tree
-# that is actually sound.
-_ARCHIVED_SUMMARY_RE = re.compile(r"^summary_\d{8}_\d{4}( \(\d+\))?\.md$", re.IGNORECASE)
-
-
+# An ARCHIVED summary. It is a historical snapshot the summarize flow kept when the
+# user chose -Archive, and its figure links point at whatever ``img/`` held at the
+# time. It must NOT be checked: a live check would flag every historical link as a
+# missing image and fail a tree that is actually sound.
+#
+# The name patterns live in ``item.paths`` -- the module that owns "what an item
+# is" -- because an archive folder holds a ``summary.md``, so the producer and this
+# checker must agree on ONE definition or the snapshot is counted as an item.
 def _is_archived_summary(name: str) -> bool:
-    """True for the ``summary_<stamp>.md`` snapshots a re-summarize leaves behind."""
-    return bool(_ARCHIVED_SUMMARY_RE.match(name))
+    """True for a ``summary_<stamp>.md`` snapshot a re-summarize left behind."""
+    return item_paths.is_archived_summary(name)
+
+
+def _is_archive_dir(name: str) -> bool:
+    """True for a ``summary_<stamp>/`` archive folder."""
+    return item_paths.is_archive_dir(name)
 
 
 def _collect_markdown(root: str, recurse: bool) -> list[str]:
     """Every LIVE ``*.md`` in the scanned scope, sorted for a stable report.
 
-    Archived summaries (``summary_<stamp>.md``) are skipped: they are frozen
-    snapshots, and their links legitimately dangle once the live ``img/`` changed.
+    Archived summaries are skipped, in BOTH forms: a ``summary_<stamp>.md`` file from
+    an older run, and a ``summary_<stamp>/`` folder from the current one. They are
+    frozen snapshots, and their links legitimately resolve to pictures that moved
+    with them and no longer sit in the live ``img/``. The folder walk prunes those
+    directories outright, so no document inside one is ever reached.
     """
     found: list[str] = []
     if recurse:
-        for walk_root, _dirs, files in os.walk(paths.to_extended(root)):
+        for walk_root, dirs, files in os.walk(paths.to_extended(root)):
+            dirs[:] = [name for name in dirs if not _is_archive_dir(name)]
             for name in files:
                 if name.lower().endswith(".md") and not _is_archived_summary(name):
                     found.append(_de_extend(os.path.join(walk_root, name), paths.to_extended(root), root))

@@ -57,7 +57,10 @@ from __future__ import annotations
 # sidecar directory and item.json are gone: a finished item holds summary.md, the
 # kept media and a visible img/ folder, and every throwaway lives in a run scratch
 # under the workspace /.tmp and is deleted at verify. An existing summary is never
-# destroyed - it is archived to summary_<yyyyMMdd_HHmm>.md and the path reported.
+# destroyed: the name step REFUSES and names what is at risk, and the user chooses
+# between -Archive (the document and its figures move to summary_<yyyyMMdd_HHmm>/)
+# and -Overwrite (replace with no backup). Only summary.md and img/ are ever
+# replaced; the source media is never touched.
 SKILL_VERSION = "6.0.0"
 
 # The version marker written into every SKILL.md we own, to prove ownership.

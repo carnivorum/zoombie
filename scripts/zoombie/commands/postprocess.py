@@ -335,20 +335,37 @@ def time_stamps(
     the SRT places that speech at ``00:13:30``. A plausible wrong timestamp is
     indistinguishable from a correct one, so on a count mismatch the ordinal
     association is abandoned entirely and the caller falls back to the SRT/fuzzy
-    path. A warning naming BOTH counts is logged, because the fallback is a
-    different provenance for the same value and a reader must be able to tell.
+    path.
+
+    The mismatch ALARM depends on its DIRECTION, because the two directions have
+    different causes and only one is a defect:
+
+    * fewer headings than times -- the normal signature of an agent PRUNING the
+      frame set (``-Keep``/``-Drop``) or of sections being merged. The fallback is
+      the expected outcome, so it is logged as a note, not a warning; a WARN here
+      would fire on every legitimate prune and teach the reader to ignore it.
+    * MORE headings than times -- the corruption signature above. It stays a WARN
+      naming both counts, because the fallback is a different provenance for the
+      same value and a reader must be able to tell.
 
     Returns ``{}`` on a mismatch (nothing stamped) -- never a partial, shifted map.
     """
     stamps: dict[str, str] = {}
     headings = _headings_in_range(text, heading_start, heading_end)
     if len(headings) != len(times):
+        pruned = len(headings) < len(times)
+        detail = (
+            f"block 6 has {len(headings)} headings but the manifest has "
+            f"{len(times)} times, so the ordinal (one heading per slide) convention "
+            "does not hold"
+        )
         process.log(
-            f"  slide-time association refused: block 6 has {len(headings)} "
-            f"headings but the manifest has {len(times)} times, so the ordinal "
-            "(one heading per slide) convention does not hold; falling back to the "
-            "SRT text search. A count mismatch is how timestamps shift silently.",
-            "warn",
+            f"  slide-time association skipped: {detail}; falling back to the SRT "
+            "text search, which is the expected path after a keep/drop prune."
+            if pruned else
+            f"  slide-time association refused: {detail}; falling back to the SRT "
+            "text search. A count mismatch is how timestamps shift silently.",
+            "info" if pruned else "warn",
         )
         return stamps
     for position, seconds in enumerate(times):

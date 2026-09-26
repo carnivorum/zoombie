@@ -544,6 +544,26 @@ class TestPickerRouting:
         assert "archived" in body.lower(), (
             "the skill must tell the agent an existing summary is archived, not destroyed"
         )
+        # The flow is now: the step REFUSES, the agent ASKS, the user chooses. The
+        # skill must name both answers and the invariant that the media survives.
+        for token in ("archive", "overwrite", "media is never removed"):
+            assert token in body.lower(), (
+                f"the skill must document {token!r} for an existing summary"
+            )
+
+    def test_the_prune_example_carries_slides_true(self):
+        """The documented prune must not reproduce the silent no-op.
+
+        ``-Drop`` without ``-Slides`` was parsed and discarded, so a skill that shows
+        the prune without the flag teaches the agent the exact broken call.
+        """
+        body = _read(os.path.join(SKILLS_DIR, "zoombie-summarize", "SKILL.md"))
+        assert '"slides": "true"' in body or "slides:\"true\"" in body, (
+            "the prune example must carry slides:true"
+        )
+        assert "selection.applied" in body, (
+            "the skill must tell the agent to verify the selection was applied"
+        )
 
     def test_the_body_describes_the_visible_img_folder(self):
         body = _read(os.path.join(SKILLS_DIR, "zoombie-summarize", "SKILL.md"))
