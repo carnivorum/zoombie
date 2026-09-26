@@ -66,6 +66,9 @@ MARKER_KEY = "cvrm-zoombie-version"
 # number would, which is why the two are kept apart.
 # 1.2.0: the prompt drops what zoombie-summarize already owns and states the
 # not-a-coder rule once instead of three times.
-ROLE_VERSION = "1.2.0"
+# 1.3.0: the prompt picks the working language from the user's prompt at the start
+# of the task, and treats a mostly-non-English prompt that borrows English terms
+# as non-English.
+ROLE_VERSION = "1.3.0"
 
 __all__ = ["SKILL_VERSION", "MARKER_KEY", "ROLE_VERSION"]
